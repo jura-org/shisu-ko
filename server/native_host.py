@@ -352,6 +352,22 @@ def registered(home: Optional[Path] = None, environ=os.environ) -> Optional[Path
     return path if path.is_file() else None
 
 
+def same_file(a, b) -> bool:
+    """Whether two path strings name the same file.
+
+    macOS and Windows keep the case of a name but ignore it when looking one up, so the very same
+    wrapper can be registered under a spelling that does not compare equal to this checkout's.
+    """
+    if not a or not b:
+        return False  # nothing is the same file as nothing, however the caller spells it
+    if a == b:
+        return True
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
 def status_text(root: Path = ROOT, home: Optional[Path] = None, environ=os.environ) -> str:
     path = registered(home, environ)
     if path is None:
@@ -361,7 +377,7 @@ def status_text(root: Path = ROOT, home: Optional[Path] = None, environ=os.envir
         target = json.loads(path.read_text(encoding="utf-8")).get("path")
     except (OSError, ValueError, AttributeError):
         target = None
-    if target != str(wrapper_path(root)):
+    if not same_file(target, str(wrapper_path(root))):
         text += f" (points at {target}; run native_host.py --register for this checkout)"
     return text
 

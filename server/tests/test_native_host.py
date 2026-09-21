@@ -565,6 +565,46 @@ def test_register_gives_the_wrapper_its_executable_bit_back(tmp_path):
     assert nh.register(root, environ=env) == path, "a missing wrapper is --status's business, not a crash here"
 
 
+def test_same_file_sees_through_two_spellings_of_one_path(tmp_path):
+    # macOS and Windows keep the case of a name but ignore it when looking one up, so the very
+    # same wrapper can be registered under a spelling that does not compare equal to this
+    # checkout's; comparing the strings alone would send the viewer off to re-register.
+    wrapper = tmp_path / "native-host.sh"
+    wrapper.write_bytes(b"#!/usr/bin/env bash\n")
+    assert nh.same_file(str(wrapper), str(wrapper))
+    assert nh.same_file("/x/server/native-host.cmd", "/x/server/native-host.cmd"), "equal strings need no disk"
+
+    other_case = tmp_path / "Native-Host.sh"
+    if other_case.exists():  # a case-insensitive filesystem: one file, two spellings
+        assert nh.same_file(str(wrapper), str(other_case))
+    else:  # elsewhere a hard link is the same file under another name, which is the same question
+        link = tmp_path / "linked.sh"
+        os.link(wrapper, link)
+        assert nh.same_file(str(wrapper), str(link))
+
+    second = tmp_path / "other-checkout.sh"
+    second.write_bytes(b"#!/usr/bin/env bash\n")
+    assert not nh.same_file(str(wrapper), str(second)), "two files that exist are not one file"
+    missing = str(tmp_path / "gone.sh")
+    assert not nh.same_file(str(wrapper), missing) and not nh.same_file(missing, str(wrapper))
+    assert not nh.same_file(None, str(wrapper)) and not nh.same_file(str(wrapper), None)
+
+
+@posix_only
+def test_status_text_accepts_the_same_checkout_reached_by_another_path(home, tmp_path):
+    # A registration that points at this very wrapper is this checkout's, whatever the path looks
+    # like; only a manifest naming another file is another checkout's.
+    root = fake_checkout(tmp_path)
+    wrapper = nh.wrapper_path(root)
+    wrapper.write_bytes(b"#!/usr/bin/env bash\n")
+    env = env_for(home)
+    path = nh.register(root, environ=env)
+    link = tmp_path / "checkout-link"
+    link.symlink_to(root)
+    assert nh.status_text(link, environ=env) == f"registered at {path}"
+    assert "points at" in nh.status_text(fake_checkout(tmp_path / "elsewhere"), environ=env)
+
+
 def test_status_text_says_where_and_whether(home, tmp_path):
     root = fake_checkout(tmp_path)
     env = env_for(home)
