@@ -211,10 +211,14 @@ def test_canonical_model_name_without_faster_whisper_or_its_table(monkeypatch):
 
 def test_model_spellings_lists_every_name_of_the_same_weights(monkeypatch, tmp_path):
     fake_whisper(monkeypatch, tmp_path)
-    turbo = ["large-v3-turbo", "turbo", "mobiuslabsgmbh/faster-whisper-large-v3-turbo"]
+    # The MLX repo of the same weights comes last: on an Apple GPU that is the name the viewer may
+    # have typed, and the popup matches the field's text against this list.
+    turbo = ["large-v3-turbo", "turbo", "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+             "mlx-community/whisper-large-v3-turbo"]
     assert server.model_spellings("large-v3-turbo") == turbo
     assert server.model_spellings("turbo") == turbo and server.model_spellings(turbo[2]) == turbo
-    assert server.model_spellings("tiny") == ["tiny", "Systran/faster-whisper-tiny"]
+    assert server.model_spellings("tiny") == ["tiny", "Systran/faster-whisper-tiny",
+                                              "mlx-community/whisper-tiny-mlx"]
     assert server.model_spellings("kotoba-tech/kotoba-whisper-v2.0-faster") == ["kotoba-tech/kotoba-whisper-v2.0-faster"]
     monkeypatch.setattr(server, "_MODEL_ALIASES", None)
     monkeypatch.setitem(sys.modules, "faster_whisper", None)  # without the table a name is its own only spelling
@@ -820,7 +824,8 @@ def test_health_reports_the_model_state(monkeypatch, tmp_path):
     app.prepare_thread.join(5.0)
     assert tick(app) is False  # the swap fails
     assert app.health()["model_error"] == {"model": "small", "error": "no such model small",
-                                           "names": ["small", "Systran/faster-whisper-small"]}
+                                           "names": ["small", "Systran/faster-whisper-small",
+                                                     "mlx-community/whisper-small-mlx"]}
     assert app.health()["model_loading"] is None
 
 
@@ -835,11 +840,13 @@ def test_health_names_every_spelling_of_the_failed_model(monkeypatch, tmp_path):
     assert app.health()["model_error"] == {
         "model": "large-v3-turbo",
         "error": "could not reach Hugging Face to download 'large-v3-turbo'",
-        "names": ["large-v3-turbo", "turbo", "mobiuslabsgmbh/faster-whisper-large-v3-turbo"],
+        "names": ["large-v3-turbo", "turbo", "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+                  "mlx-community/whisper-large-v3-turbo"],
     }
     assert app.health()["model_loading"] is None
     # /sync judges the very spelling the request used; /health hands the popup the list instead.
-    for spelling in ("turbo", "large-v3-turbo", "mobiuslabsgmbh/faster-whisper-large-v3-turbo"):
+    for spelling in ("turbo", "large-v3-turbo", "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+                     "mlx-community/whisper-large-v3-turbo"):
         assert app.model_state(spelling)["model_error"].startswith("could not reach Hugging Face")
     assert app.model_state("large")["model_error"] is None
 
@@ -875,7 +882,10 @@ def test_load_model_passes_the_name_or_the_prepared_directory(monkeypatch):
             return iter(()), None
 
     monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=WhisperModel))
+    # --device auto is the CPU only when neither GPU backend answers; without both of these the
+    # test would ask for CTranslate2 on a CUDA machine and for MLX on an Apple one (see test_mlx.py).
     monkeypatch.setattr(server, "cuda_available", lambda: False)
+    monkeypatch.setattr(server, "mlx_available", lambda: False)
     args = SimpleNamespace(model="large-v3", device="auto", compute_type="auto", cpu_threads=0, language="ja")
     model, device, compute = server.load_model(args)
     assert isinstance(model, WhisperModel) and (device, compute) == ("cpu", "int8")

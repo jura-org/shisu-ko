@@ -6,7 +6,8 @@ Read this before changing code; the README is the user-facing document.
 ## What this project is
 
 Shisu-ko shows live Japanese subtitles on YouTube in Firefox and Chrome. A local Python server transcribes
-the video's audio with Whisper (faster-whisper / CTranslate2) a little ahead of the playhead; the
+the video's audio with Whisper (faster-whisper / CTranslate2, or MLX on the Apple GPU) a little
+ahead of the playhead; the
 extension renders the cues as real DOM text so Yomitan can scan them, and can mine a screenshot
 plus sentence audio into the newest Anki card via AnkiConnect.
 
@@ -78,10 +79,16 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
 - A model name from a client (`model` in `/sync`) must match `MODEL_NAME_RE`
   (`^[A-Za-z0-9][A-Za-z0-9._-]{0,95}(/[A-Za-z0-9][A-Za-z0-9._-]{0,95})?$`) and contain no `..`;
   anything else is answered with `MODEL_NAME_HINT` and never stored. A valid name is reduced to
-  its canonical alias (`canonical_model_name()`: `large`, `Systran/faster-whisper-large-v3` and
-  `large-v3` are one model) and resolved through `faster_whisper.download_model()` before it is
-  loaded. A raw client string must never reach `WhisperModel()`, which also opens local
+  its canonical alias (`canonical_model_name()`: `large`, `Systran/faster-whisper-large-v3`,
+  `mlx-community/whisper-large-v3-mlx` and `large-v3` are one model) and resolved through
+  `download_model_files()` — faster-whisper's own download, or the MLX repo's on the Apple GPU —
+  before it is loaded. A raw client string must never reach `WhisperModel()`, which also opens local
   directories; only the operator's `--model` may be a folder, and it skips the download.
+- A transcription backend is `transcribe()` and `detect_language()`, and nothing else in the server
+  may know which one is loaded. `--device` names it, `resolve_device()` is the single place `auto`
+  becomes one of `cuda`, `mlx` and `cpu`, and `canonical_model_name()` gives one set of weights one
+  name whatever backend holds them, so neither the cue cache nor the popup splits by backend. See
+  "How the Apple GPU works".
 - `enabled` in the settings is the master switch (the header toggle in the popup, Alt+Shift+S).
   Off must mean nothing happens on YouTube pages: no `/sync`, no overlay, no native-caption
   hiding, no arrow-key handling, no Anki polling, no mining (the cues outlive the switch, so
@@ -212,7 +219,9 @@ compare two cue builders on identical Whisper output; keep them working (`retran
 decides every window as `process()` does, `wants_lyrics()` and then `sung_in_target()` on an idle
 `App` like `retranscribe.py`'s, decodes a sung one without the detector and writes `"lyrics": true`
 into its record, its own `--lyrics off` sending every window through the detector; `replay_cues.py`
-passes a record's `lyrics` through, building on `lyrics_spans()` and the lyrics gates).
+passes a record's `lyrics` through, building on `lyrics_spans()` and the lyrics gates). Both tools
+build their model with `load_model()`, never `WhisperModel()` directly, so the words they dump come
+from the backend the server would have used on that machine.
 
 Sung lyrics (P0.3 of the doc): singing over music is no speech to Silero, so `process()` decides
 `wants_lyrics()` after the detector and the language watch: with `--lyrics auto` (default; `off`
@@ -353,9 +362,10 @@ runs while a window is being transcribed. It is a small state machine over `want
 1. Nothing wanted (`wanted == model_name`): drop leftover prepared files, clear `model_loading`.
 2. Wanted but nothing in flight: start `prepare_model(wanted)` on a daemon thread
    (`prepare_thread`), set `model_preparing = model_loading = wanted`, keep transcribing with the
-   old model. `prepare_model()` runs `download_model_files()`: `faster_whisper.download_model()`
-   into `MODELS_DIR` plus a `model.bin` check, so a PyTorch checkpoint is refused before
-   `WhisperModel()` sees it (the operator's `--model` folder skips the download). Nothing here
+   old model. `prepare_model()` runs `download_model_files(wanted, self.device)`:
+   `faster_whisper.download_model()` into `MODELS_DIR` plus a `model.bin` check, so a PyTorch
+   checkpoint is refused before `WhisperModel()` sees it (the operator's `--model` folder skips the
+   download; on the Apple GPU the MLX weights are fetched instead, see below). Nothing here
    touches the GPU, so a typo, a missing repo or an offline hub costs only a failed download:
    `model_error = (name, friendly_model_error())`, `model_failed_at`, `wanted_model` reset to the
    loaded model. There is no retry without a new request.
@@ -396,7 +406,8 @@ Tests: `server/tests/test_model_switch.py` fakes `faster_whisper` in `sys.module
 down and calls `switch_model_if_wanted()` by hand (`tick()` joins the real prepare thread, a
 blocking `Event` variant looks at the server mid-download); it covers names and aliases, the
 prepare and swap, every failure path and the cooldown, the per-model cache files and both
-endpoints. `addon/tests/content.test.js` covers the model name in `/sync`, the restart on a new
+endpoints; `server/tests/test_mlx.py` drives the same switch on the Apple GPU.
+`addon/tests/content.test.js` covers the model name in `/sync`, the restart on a new
 session token, the status texts and `fontStack()`; `addon/tests/popup-copies.test.js` keeps the
 popup's copies of `FONT_FAMILY_RE`, the preset stacks and `MODEL_NAME_RE` equal to the originals
 and the model hint in step with the `/health` shape. `server/tests/test_setup_model.py` covers
@@ -404,6 +415,60 @@ and the model hint in step with the `/health` shape. `server/tests/test_setup_mo
 `huggingface_hub` faked in `sys.modules`; the interrupt through a replaced `wait_for_thread()`
 and `os._exit()`), `run_check()` against stand-ins for `ctranslate2`, `yt_dlp` and `winreg` (no
 GPU driver and no registry in the suite) and the text of `setup.cmd` / `setup.sh`.
+
+## How the Apple GPU works
+
+CTranslate2 has no Metal backend, so on Apple Silicon faster-whisper decodes on the CPU. MLX runs
+the same Whisper weights on the GPU. Measured on an M1 Pro over 180 s of Japanese news audio, with
+identical windows and the identical cue pipeline: faster-whisper large-v3 on `--device cpu` (int8,
+beam size 5) at 2.3x realtime, MLX large-v3 (float16, greedy) at 7.3x, and the cores stay free for
+the video that is playing. Hence `--device auto` prefers it to the CPU.
+
+`resolve_device()` is the single place `auto` is decided: `cuda` when there is an NVIDIA GPU, else
+`mlx` when `mlx_available()` (darwin, `mlx.core`, `mlx_whisper`, `mx.metal.is_available()`), else
+`cpu`. `--device mlx` names it outright. Everything downstream reads the resolved name, so a third
+backend is a branch here plus a class, not a change in the transcriber.
+
+A backend is two methods. `transcribe(audio, **options)` returns `(segments, info)`, each segment
+carrying `start`, `end`, `text` and `words` of `word` / `start` / `end` / `probability`;
+`detect_language(audio=...)` returns `(language, probability, every probability)`.
+`MlxWhisperModel` presents exactly those over mlx-whisper (`MlxSegment`, `MlxInfo` and the file's
+own `Word`), so the transcriber, the cue gates and the language watch never learn which backend
+ran.
+
+Two options do not survive the crossing, and the wrapper absorbs both rather than the call sites.
+MLX has no beam search, so `--beam-size` is dropped and each temperature is sampled once; greedy
+decoding costs accuracy, in those 180 s three slips (`経老` for `敬老`, `線上降水帯` for
+`線状降水帯`, one wrong figure). And mlx-whisper has no `vad_filter`, so given one the wrapper runs
+the Silero pass faster-whisper would have run, hands the decoder the speech with the silence cut
+out (`collect_chunks`) and maps every timestamp back (`SpeechTimestampsMap`) — the same
+`VAD_PARAMS`, so the gates in the cue builder keep judging what they were written for.
+
+`canonical_model_name()` is what keeps one name per set of weights across backends. `MLX_REPOS`
+maps a faster-whisper size to the mlx-community repo holding it converted and `MLX_ALIASES`
+reverses that, so `large`, `large-v3`, `Systran/faster-whisper-large-v3` and
+`mlx-community/whisper-large-v3-mlx` all canonicalise to `large-v3`. One name means one cue cache,
+so a machine's CPU cues and its GPU cues are the same file, and one name in the popup whichever
+backend is loaded. `model_spellings()` appends the MLX repo, so the popup still matches whatever
+the viewer typed.
+
+`download_model_files(name, device)` branches on the device: CTranslate2 files for `cuda` and
+`cpu`, `download_mlx_model_files()` for `mlx` (`snapshot_download()` into the same `MODELS_DIR`,
+refusing a repo without `config.json` beside `weights.safetensors` / `weights.npz`, the way a
+missing `model.bin` refuses a PyTorch checkpoint). `App.prepare_model()` passes `self.device`, so
+the state machine above is unchanged and runs on the Apple GPU as documented: nothing in the
+download touches the GPU, so it still runs beside the working model, and a size nobody converted
+fails as a failed download rather than a crash. `--compute-type` on MLX is `float16` (the default)
+or `float32`; anything else is ignored with a warning instead of being reported as loaded, because
+`/health` must not name a precision the GPU never ran.
+
+`server/requirements.txt` installs `mlx-whisper` only under `sys_platform == "darwin" and
+platform_machine == "arm64"`. faster-whisper stays required everywhere: the MLX path still uses its
+Silero VAD, its audio decoding and its alias table. `run_check()` prints `MLX <version>: Metal
+available` on macOS and `Backend for --device auto: <device>` on every platform.
+`server/tests/test_mlx.py` fakes `mlx.core`, `mlx_whisper`, `huggingface_hub` and `faster_whisper`
+in `sys.modules`, so the device choice, the names, the download, the option translation, the VAD
+emulation, `detect_language()` and a switch on the Apple GPU are covered without a Mac.
 
 ## One tab at a time
 
@@ -1124,8 +1189,9 @@ disables Update while `START_BUSY` and hides Start while `UPDATE_BUSY`.
 
 Tests: `server/tests/test_native_host.py` (framing, `handle()` for every shape with `launch()`
 never called, `serve()`, `launch()` with a recorded `Popen` on both platforms, the lock against
-`server.py`'s, registration into a temp home with a fake `winreg` on every platform, `main()`,
-the host over a real pipe, the wrapper run the way Firefox runs it, the launchers' register
+`server.py`'s, registration into a temp home with a fake `winreg` on every platform, `same_file()`
+against two spellings of one wrapper, `main()`, the host over a real pipe, the wrapper run the way
+Firefox runs it, the launchers' register
 lines); `server/tests/test_server.py` for `hold_instance_lock()`; `addon/tests/background.test.js`
 (the message, the error mapping, the timeout, the record across an event-page restart);
 `addon/tests/popup.test.js` (the flow against a fake document: resume, both deadline hints,
@@ -1296,8 +1362,8 @@ because only the VAD uses it). `nix run .#check`, `nix run .#tests`, `nix build 
 Native server (Windows): `server\setup.cmd` once (it asks for large-v3 or small and downloads it),
 then `server\run.cmd [options]`.
 Native server (Linux/macOS): `bash server/setup.sh`, then `server/run.sh`.
-Diagnostics: `server\run.cmd --check` (also says whether the Start button's launcher is registered
-and which model a bare start runs).
+Diagnostics: `server\run.cmd --check` (also says which backend `--device auto` picks, whether the
+Start button's launcher is registered and which model a bare start runs).
 Music videos: `--lyrics auto` (default) transcribes a window the speech detector hears next to
 nothing in (under `LYRICS_MAX_SPEECH_S`, 1 s) without the detector when its audio is not silent
 and the language head hears the target language in it; `--lyrics off` transcribes such windows
@@ -1314,7 +1380,11 @@ and Windows delivers the signal only between waits. The interrupt prints one lin
 process with `os._exit(2)`, since a normal exit would wait for that pool's worker at shutdown;
 the partial blob stays as `.incomplete` and the next download resumes it. `setup.cmd`'s pick
 line tests `errorlevel 3` before 2: `choice` answers 255 when it cannot read a key (stdin closed
-or empty), and that takes large-v3 like `setup.sh`'s EOF fallback.
+or empty), and that takes large-v3 like `setup.sh`'s EOF fallback. Which conversion it fetches
+follows `resolve_device(args.device)`, not the machine alone: on an Apple GPU it is the MLX build
+of that name, since the CTranslate2 files would be the whole wait for weights that backend never
+loads, and `--device cpu --download-model` still fetches the CTranslate2 ones, so the download and
+the start that follows it agree.
 Start-button launcher, with the venv's Python (`run.cmd` / `setup.cmd` and their `.sh` twins do
 this themselves): `~/.shisu-ko/venv/Scripts/python server/native_host.py --register --verbose`
 (`venv/bin/python` on Linux/macOS), `--status`, `--unregister`.
@@ -1407,6 +1477,13 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
   context, and also a failed model switch after which the previous model could not be reloaded,
   which would leave the server running without any model. Exit code 4 (`EXIT_UPDATE`) asks the
   launcher to run `update.py` before starting again; only `POST /update` produces it.
+- `mlx_whisper.audio.pad_or_trim()` pads with `mx.pad`, which refuses a numpy array, so anything
+  shorter than the 30 s encoder window has to be an `mx.array` first. Every language probe is
+  shorter, and this broke the whole language watch in silence: a detector that raises is never what
+  pauses a video, so the only sign was a line in the server log.
+- macOS and Windows keep the case of a path but ignore it when looking one up, so comparing two
+  path strings can call one file two (`same_file()` in `native_host.py`, used by `status_text()`:
+  the very same registered wrapper used to be reported as another checkout's).
 - AnkiConnect: send requests without a `Content-Type` header (a "simple" request needs no CORS
   preflight), call `requestPermission` first, find the newest card with `findNotes("added:1")`.
 - `data_collection_permissions` in the manifest requires `strict_min_version` 140 or later.
@@ -1461,7 +1538,8 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
 
 ## Making changes
 
-1. Keep `server.py` a single dependency-light file (stdlib + numpy + faster-whisper + yt-dlp + PyAV).
+1. Keep `server.py` a single dependency-light file (stdlib + numpy + faster-whisper + yt-dlp + PyAV,
+   plus mlx-whisper on Apple Silicon).
 2. Bump `version` in `addon/manifest.json` and `VERSION` in `server/server.py` together.
 3. Run the checks above, then test manually on a real YouTube video: subtitles appear, hover
    pauses, transcript panel works, Alt+Shift+M produces a toast and (with Anki running) fills the card.

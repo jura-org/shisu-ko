@@ -4,8 +4,10 @@ and writes ~/.shisu-ko/config.json, which parse_args() reads as the --model defa
 faster_whisper and huggingface_hub are fakes in sys.modules (a snapshot_download() that records
 its keyword arguments and writes model.bin into the directory it returns), so nothing here
 downloads or loads a model, and run_check() sees stand-ins for ctranslate2, yt-dlp and the
-registry as well, so it never initialises a GPU driver. The launchers are checked as text, like
-run.cmd / run.sh in test_update_endpoint.py.
+registry as well, so it never initialises a GPU driver. The backend is faked too: the download
+follows resolve_device("auto"), so cuda_available() and mlx_available() are pinned rather than
+asked, and the machine the tests run on cannot change what they assert. The launchers are checked
+as text, like run.cmd / run.sh in test_update_endpoint.py.
 """
 from __future__ import annotations
 
@@ -41,17 +43,40 @@ def data_dir(monkeypatch, tmp_path):
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def on_the_cpu(monkeypatch):
+    """The backend is pinned, not read off the machine: everything below describes the CTranslate2 path.
+
+    run_download_model() asks resolve_device("auto") which conversion this computer would load,
+    so on an Apple Silicon Mac with mlx-whisper installed the same command fetches MLX weights
+    from mlx-community instead (the tests at the end of the --download-model section turn that
+    machine on again). Without this the file would pass or fail by where it runs.
+    """
+    monkeypatch.setattr(server, "cuda_available", lambda: False)
+    monkeypatch.setattr(server, "mlx_available", lambda: False)
+
+
+def on_the_apple_gpu(monkeypatch):
+    """Undo the fixture for one test: a Mac whose resolve_device("auto") answers "mlx".
+
+    Faking the machine is enough; mlx.core and mlx_whisper never have to exist, because the setup
+    download goes to the Hub and loads nothing (test_mlx.py fakes the libraries themselves).
+    """
+    monkeypatch.setattr(server, "mlx_available", lambda: True)
+    assert server.resolve_device("auto") == "mlx"
+
+
 class DisabledTqdm:
     """Stands for faster_whisper.utils.disabled_tqdm, the class the setup download must not pass on."""
 
 
-def fake_hub(monkeypatch, tmp_path, fail=None, bare=False, table=None, block=None):
+def fake_hub(monkeypatch, tmp_path, fail=None, bare=False, table=None, block=None, files=("model.bin",)):
     """faster_whisper (its size table and disabled tqdm) and huggingface_hub with a recording snapshot_download().
 
-    The download comes back with a directory under tmp_path holding model.bin (unless `bare`),
-    or raises `fail`; with `block`, a pair of Events, it sets the first and waits for the second
-    first, a download that is still streaming. Returns the list of (repo_id, kwargs) it was
-    called with.
+    The download comes back with a directory under tmp_path holding `files` (model.bin, or the
+    MLX weights an mlx-community repo ships), none of them with `bare`, or raises `fail`; with
+    `block`, a pair of Events, it sets the first and waits for the second first, a download that
+    is still streaming. Returns the list of (repo_id, kwargs) it was called with.
     """
     calls = []
 
@@ -66,7 +91,8 @@ def fake_hub(monkeypatch, tmp_path, fail=None, bare=False, table=None, block=Non
         directory = tmp_path / "snapshots" / repo_id.replace("/", "--")
         directory.mkdir(parents=True, exist_ok=True)
         if not bare:
-            (directory / "model.bin").write_bytes(b"\0")
+            for name in files:
+                (directory / name).write_bytes(b"\0")
         return str(directory)
 
     utils = SimpleNamespace(_MODELS=dict(FAKE_MODELS if table is None else table), disabled_tqdm=DisabledTqdm)
@@ -398,6 +424,128 @@ def test_the_switch_and_the_setup_download_refuse_a_bare_repo_alike(tmp_path):
         server.require_model_bin(str(tmp_path), "x")
     (tmp_path / "model.bin").write_bytes(b"\0")
     server.require_model_bin(str(tmp_path), "x")
+
+
+# --- --download-model on an Apple GPU -------------------------------------------------------------
+# The machine that will run the model decides which conversion setup fetches, because the first
+# start loads that one: on a Mac where resolve_device("auto") answers "mlx" the CTranslate2 files
+# would be dead weight and the viewer would wait for three gigabytes twice.
+
+LARGE_MLX = "mlx-community/whisper-large-v3-mlx"
+MLX_WEIGHTS = ("config.json", "weights.safetensors")
+MLX_FILES = ["*.json", "*.safetensors", "*.npz"]
+
+
+def test_download_on_the_apple_gpu_fetches_the_mlx_conversion(monkeypatch, tmp_path, capsys):
+    on_the_apple_gpu(monkeypatch)
+    calls = fake_hub(monkeypatch, tmp_path, files=MLX_WEIGHTS)
+    assert run_main(monkeypatch, "--download-model", "large-v3") == 0
+    (repo_id, kwargs), = calls
+    assert repo_id == LARGE_MLX, "mlx-community's conversion, not Systran's CTranslate2 build"
+    assert kwargs["allow_patterns"] == MLX_FILES, "the MLX weights; a model.bin would never be loaded"
+    assert kwargs["cache_dir"] == str(tmp_path / "models"), "one models folder for both backends"
+    assert config(tmp_path) == {"model": "large-v3"}
+    out = capsys.readouterr().out
+    assert f"Model large-v3 is ready in {tmp_path / 'snapshots' / 'mlx-community--whisper-large-v3-mlx'}." in out
+
+
+def test_an_mlx_repo_id_is_stored_under_its_size(monkeypatch, tmp_path):
+    # The two names are the same weights, so the config, /health and the cue cache all say large-v3;
+    # a viewer who typed the mlx-community repo at setup must not split the cache in two.
+    on_the_apple_gpu(monkeypatch)
+    calls = fake_hub(monkeypatch, tmp_path, files=MLX_WEIGHTS)
+    assert run_main(monkeypatch, "--download-model", LARGE_MLX) == 0
+    assert [repo for repo, _ in calls] == [LARGE_MLX]
+    assert config(tmp_path) == {"model": "large-v3"}
+
+
+@pytest.mark.parametrize("files", [("config.json",), ("weights.safetensors",), ("model.bin",)])
+def test_an_mlx_download_without_weights_is_refused_and_the_choice_taken_back(monkeypatch, tmp_path, capsys, files):
+    # require_mlx_weights() judges the directory here, not require_model_bin(): a repo that holds
+    # only the CTranslate2 model.bin is no more loadable on the GPU than an empty one, and the size
+    # written before the download is given back so the next start does not exit 2 on it forever.
+    on_the_apple_gpu(monkeypatch)
+    fake_hub(monkeypatch, tmp_path, files=files)
+    assert run_main(monkeypatch, "--download-model", "small") == 2
+    out = capsys.readouterr().out
+    assert "Could not download small: small is not an MLX Whisper model (no config.json beside weights.safetensors)" in out
+    assert "model" not in server.read_config() and server.parse_args([]).model == "large-v3"
+
+
+def test_a_name_without_an_mlx_build_says_so_instead_of_downloading(monkeypatch, tmp_path, capsys):
+    # mlx_repo_for() raises for a bare name nobody converted; run_download_model() must turn that
+    # into setup's own exit 2 with the reason, not let it out as a traceback the viewer reads as a crash.
+    on_the_apple_gpu(monkeypatch)
+    calls = fake_hub(monkeypatch, tmp_path, files=MLX_WEIGHTS)
+    assert run_main(monkeypatch, "--download-model", "whisper-jp") == 2
+    assert calls == [], "the hub is never asked for a repo id that cannot be built"
+    assert "there is no MLX build of 'whisper-jp'" in capsys.readouterr().out
+    assert not (tmp_path / "config.json").exists()
+
+
+def test_the_named_device_decides_the_download_on_a_mac(monkeypatch, tmp_path, capsys):
+    # --device cpu on a Mac means the CPU, here as everywhere else: the operator who runs the
+    # server on CTranslate2 must get its files at setup, or the first start downloads the whole
+    # model a second time. The machine is only consulted for --device auto.
+    on_the_apple_gpu(monkeypatch)
+    calls = fake_hub(monkeypatch, tmp_path, files=MLX_WEIGHTS)
+    assert run_main(monkeypatch, "--device", "cpu", "--download-model", "large-v3") == 2
+    (repo_id, kwargs), = calls
+    assert repo_id == "Systran/faster-whisper-large-v3" and kwargs["allow_patterns"] == MODEL_FILES
+    assert "large-v3 is not a CTranslate2/faster-whisper model (no model.bin)" in capsys.readouterr().out
+    again = fake_hub(monkeypatch, tmp_path)  # the same repo with model.bin: those files are enough
+    assert run_main(monkeypatch, "--device", "cpu", "--download-model", "large-v3") == 0
+    assert [repo for repo, _ in again] == ["Systran/faster-whisper-large-v3"]
+    assert config(tmp_path) == {"model": "large-v3"}
+
+
+def test_the_named_device_decides_the_download_without_a_mac_too(monkeypatch, tmp_path, capsys):
+    # The other direction, so that the rule is the device's and not the machine's: --device mlx is
+    # refused by load_model() where MLX cannot run, and a download that quietly fetched something
+    # else would hide that behind a missing-weights error hours later.
+    calls = fake_hub(monkeypatch, tmp_path, files=MLX_WEIGHTS)
+    assert server.resolve_device("auto") == "cpu", "the fixture's machine has neither GPU"
+    assert run_main(monkeypatch, "--device", "mlx", "--download-model", "large-v3") == 0
+    (repo_id, kwargs), = calls
+    assert repo_id == LARGE_MLX and kwargs["allow_patterns"] == MLX_FILES
+    assert config(tmp_path) == {"model": "large-v3"}
+    assert f"Model large-v3 is ready in {tmp_path / 'snapshots' / 'mlx-community--whisper-large-v3-mlx'}." \
+        in capsys.readouterr().out
+
+
+def test_the_device_defaults_to_auto_so_a_bare_call_asks_the_machine(monkeypatch, tmp_path, capsys):
+    # Every test above that names no device relies on this default; the tools and any later caller
+    # get the machine's own backend without having to say so.
+    on_the_apple_gpu(monkeypatch)
+    mlx_calls = fake_hub(monkeypatch, tmp_path, files=MLX_WEIGHTS)
+    assert server.run_download_model("large-v3") == 0
+    monkeypatch.setattr(server, "mlx_available", lambda: False)
+    ct2_calls = fake_hub(monkeypatch, tmp_path)
+    assert server.run_download_model("large-v3") == 0
+    assert [repo for repo, _ in mlx_calls] == [LARGE_MLX]
+    assert [repo for repo, _ in ct2_calls] == ["Systran/faster-whisper-large-v3"]
+    capsys.readouterr()
+
+
+def test_main_hands_the_download_the_device_it_was_started_with(monkeypatch, tmp_path):
+    # The argument is only useful if main() passes it on; a refactor that drops it would leave
+    # every test above green except this one, since the fixture's machine and "auto" agree.
+    asked = []
+    monkeypatch.setattr(server, "run_download_model", lambda *a, **k: (asked.append((a, k)), 0)[1])
+    assert run_main(monkeypatch, "--device", "mlx", "--download-model", "small") == 0
+    assert run_main(monkeypatch, "--download-model", "small") == 0
+    assert asked == [(("small", "mlx"), {}), (("small", "auto"), {})]
+
+
+def test_without_an_apple_gpu_the_same_call_takes_the_ctranslate2_files(monkeypatch, tmp_path, capsys):
+    # The twin of the first test, same command and same files in the repo, on the machine the
+    # autouse fixture describes: faster-whisper's repo id, its five files, and model.bin required.
+    calls = fake_hub(monkeypatch, tmp_path, files=MLX_WEIGHTS)
+    assert run_main(monkeypatch, "--download-model", "large-v3") == 2
+    (repo_id, kwargs), = calls
+    assert repo_id == "Systran/faster-whisper-large-v3" and kwargs["allow_patterns"] == MODEL_FILES
+    assert "Could not download large-v3: large-v3 is not a CTranslate2/faster-whisper model (no model.bin)" \
+        in capsys.readouterr().out
 
 
 # --- run_check() --------------------------------------------------------------------------------

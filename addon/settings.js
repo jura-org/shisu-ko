@@ -32,6 +32,8 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   // The Whisper model the server should use: a faster-whisper size (large-v3, large-v3-turbo,
   // distil-large-v3, medium, small, base, tiny, ...) or the Hugging Face repo id "owner/name" of a
   // CTranslate2 model (kotoba-tech/kotoba-whisper-v2.0-faster). Empty means the server's --model.
+  // The sizes name the same weights on an Apple GPU, where the server loads their MLX build
+  // instead; a repo id must then be an MLX one (mlx-community/whisper-large-v3-mlx).
   model: "",
   // sentence mining
   mineTarget: "anki", // "anki" (newest card via AnkiConnect) or "download"

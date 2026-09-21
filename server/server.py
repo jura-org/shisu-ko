@@ -67,7 +67,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.11.3"
+VERSION = "0.11.4"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (sys.exit; a failed --download-model ends on it too), 3 asks for a plain restart (os._exit: a broken
 # GPU context, no model left) and
@@ -2308,7 +2308,9 @@ class App:
             if name == self.default_model and os.path.isdir(name):
                 path = name  # the operator's --model is a folder (see request_model): nothing to download
             else:
-                path = download_model_files(name)
+                # self.device is the backend the loaded model runs on, so the files are the ones
+                # the swap will need: CTranslate2 for cuda and cpu, MLX weights for the Apple GPU.
+                path = download_model_files(name, self.device)
         except Exception as exc:  # noqa: BLE001
             log.error("Could not prepare the model '%s': %s", name, exc)
             with self.lock:
@@ -2835,6 +2837,214 @@ def valid_model_name(name) -> bool:
     return isinstance(name, str) and MODEL_NAME_RE.fullmatch(name) is not None and ".." not in name
 
 
+# --------------------------------------------------------------------------- the Apple GPU (MLX)
+
+# CTranslate2 has no Metal backend, so on Apple Silicon faster-whisper decodes on the CPU: large-v3
+# manages about twice real time there and keeps every core busy while the video plays. MLX runs the
+# same Whisper weights on the GPU instead, roughly three times faster and out of the CPU's way.
+# mlx-community publishes one converted repo per size, and this table is the only place they appear.
+MLX_REPOS = {
+    "tiny": "mlx-community/whisper-tiny-mlx",
+    "tiny.en": "mlx-community/whisper-tiny.en-mlx",
+    "base": "mlx-community/whisper-base-mlx",
+    "base.en": "mlx-community/whisper-base.en-mlx",
+    "small": "mlx-community/whisper-small-mlx",
+    "small.en": "mlx-community/whisper-small.en-mlx",
+    "medium": "mlx-community/whisper-medium-mlx",
+    "medium.en": "mlx-community/whisper-medium.en-mlx",
+    "large-v1": "mlx-community/whisper-large-v1-mlx",
+    "large-v2": "mlx-community/whisper-large-v2-mlx",
+    "large-v3": "mlx-community/whisper-large-v3-mlx",
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+    "distil-large-v3": "mlx-community/distil-whisper-large-v3",
+    "distil-medium.en": "mlx-community/distil-whisper-medium.en",
+}
+# An MLX repo holds the same weights as its size, so canonical_model_name() reports and caches both
+# under the size: the cues of a machine's CPU run are still the cues of its GPU run.
+MLX_ALIASES = {repo: alias for alias, repo in MLX_REPOS.items()}
+
+
+def mlx_available() -> bool:
+    """True when Whisper can decode on this machine's GPU: Apple Silicon with mlx-whisper installed."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        import mlx.core as mx
+        import mlx_whisper  # noqa: F401
+
+        return bool(mx.metal.is_available())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def resolve_device(device: str) -> str:
+    """Turn --device auto into the backend that will actually run: an NVIDIA GPU, else Apple's, else the CPU."""
+    if device != "auto":
+        return device
+    if cuda_available():
+        return "cuda"
+    if mlx_available():
+        return "mlx"
+    return "cpu"
+
+
+def mlx_repo_for(name: str) -> str:
+    """The MLX repo holding `name`'s weights; a repo id passes through, a size must be in the table."""
+    repo = MLX_REPOS.get(canonical_model_name(name))
+    if repo is not None:
+        return repo
+    if "/" in name:
+        return name  # the viewer named a repo; whether it holds MLX weights the download decides
+    raise ValueError(f"there is no MLX build of '{name}'; use a size such as large-v3, or an MLX repo id "
+                     "like mlx-community/whisper-large-v3-mlx")
+
+
+# The files of an MLX model, what download_mlx_model_files() and --download-model ask the Hub for.
+MLX_FILE_PATTERNS = ("*.json", "*.safetensors", "*.npz")
+
+
+def require_mlx_weights(path: str, name: str) -> None:
+    """Refuse a repo that came back without MLX weights; the twin of require_model_bin()."""
+    weights = any(os.path.isfile(os.path.join(path, w)) for w in ("weights.safetensors", "weights.npz"))
+    if not os.path.isfile(os.path.join(path, "config.json")) or not weights:
+        raise ValueError(f"{name} is not an MLX Whisper model (no config.json beside weights.safetensors); "
+                         "use an mlx-community/whisper-* repo, or convert one with mlx_whisper.convert")
+
+
+def download_mlx_model_files(name: str) -> str:
+    """Fetch the MLX weights of `name` into MODELS_DIR (or find them there) and return the directory.
+
+    The twin of download_model_files(): the same folder, the same "nothing here touches the GPU"
+    rule that lets a download run beside the working model, and the same refusal of a repo that is
+    not a converted model.
+    """
+    from huggingface_hub import snapshot_download
+
+    path = snapshot_download(repo_id=mlx_repo_for(name), cache_dir=str(MODELS_DIR),
+                             allow_patterns=list(MLX_FILE_PATTERNS))
+    require_mlx_weights(path, name)
+    return path
+
+
+@dataclass
+class MlxSegment:
+    """What the gates read off a segment: its span, its text, its words and the decoder's confidence.
+
+    `no_speech_prob` and `avg_logprob` are what lyrics_reason() judges a window Silero heard
+    nothing in by; mlx-whisper reports both, so a sung window is gated the same either way.
+    """
+    start: float
+    end: float
+    text: str
+    words: list
+    no_speech_prob: float = 0.0
+    avg_logprob: float = 0.0
+
+
+@dataclass
+class MlxInfo:
+    """The second half of faster-whisper's transcribe() return value; only `language` is ever read."""
+    language: Optional[str]
+    language_probability: float = 1.0
+
+
+class MlxWhisperModel:
+    """faster-whisper's WhisperModel over mlx-whisper, so nothing else in the server knows the difference.
+
+    Two options do not survive the crossing. MLX has no beam search, so --beam-size is dropped and
+    each temperature is sampled once. And mlx-whisper has no vad_filter of its own: given one, this
+    runs the Silero pass faster-whisper would run, hands the decoder the speech with the silence cut
+    out and maps the timestamps back, which is what faster-whisper does with the same options.
+    """
+
+    def __init__(self, path: str, compute_type: str = "float16"):
+        import mlx.core as mx
+
+        self.path = path
+        self.fp16 = compute_type != "float32"
+        self.dtype = mx.float16 if self.fp16 else mx.float32
+
+    def _model(self):
+        """The decoder's own cached model, so detect_language() never loads a second copy of the weights."""
+        from mlx_whisper.transcribe import ModelHolder
+
+        return ModelHolder.get_model(self.path, self.dtype)
+
+    def __del__(self):
+        # switch_model_if_wanted() drops its reference and collects before loading the next model;
+        # mlx-whisper's module-level cache would otherwise hold these weights until a window decodes.
+        try:
+            from mlx_whisper.transcribe import ModelHolder
+
+            if getattr(ModelHolder, "model_path", None) == self.path:
+                ModelHolder.model = None
+                ModelHolder.model_path = None
+        except Exception:  # noqa: BLE001
+            pass
+
+    def transcribe(self, audio, **options):
+        """(segments, info), the shape Transcriber.process() and load_model()'s warm-up expect."""
+        import mlx_whisper
+
+        language = options.get("language")
+        restore = None
+        if options.get("vad_filter"):
+            from faster_whisper.vad import SpeechTimestampsMap, VadOptions, collect_chunks, get_speech_timestamps
+
+            chunks = get_speech_timestamps(
+                audio, VadOptions(**VAD_PARAMS, max_speech_duration_s=VAD_MAX_SPEECH_SECONDS),
+                sampling_rate=SAMPLE_RATE)
+            if not chunks:
+                return [], MlxInfo(language)
+            audio = collect_chunks(audio, chunks, sampling_rate=SAMPLE_RATE)[0][0]
+            restore = SpeechTimestampsMap(chunks, SAMPLE_RATE)
+        result = mlx_whisper.transcribe(
+            np.asarray(audio, dtype=np.float32),
+            path_or_hf_repo=self.path,
+            language=language,
+            task=options.get("task", "transcribe"),
+            word_timestamps=bool(options.get("word_timestamps")),
+            condition_on_previous_text=bool(options.get("condition_on_previous_text", True)),
+            initial_prompt=options.get("initial_prompt"),
+            temperature=tuple(options.get("temperature") or (0.0,)),
+            no_speech_threshold=options.get("no_speech_threshold", 0.6),
+            logprob_threshold=options.get("log_prob_threshold", -1.0),
+            compression_ratio_threshold=options.get("compression_ratio_threshold", 2.4),
+            hallucination_silence_threshold=options.get("hallucination_silence_threshold"),
+            fp16=self.fp16,
+        )
+        segments = []
+        for seg in result.get("segments") or []:
+            start, end = float(seg.get("start") or 0.0), float(seg.get("end") or 0.0)
+            words = [Word(w.get("word") or "", float(w["start"]), float(w["end"]),
+                          float(w.get("probability") or 0.0))
+                     for w in (seg.get("words") or []) if w.get("start") is not None]
+            if restore is not None:
+                start, end = restore.get_original_time(start), restore.get_original_time(end, is_end=True)
+                words = [Word(w.word, restore.get_original_time(w.start),
+                              restore.get_original_time(w.end, is_end=True), w.probability) for w in words]
+            segments.append(MlxSegment(start, end, seg.get("text") or "", words,
+                                       float(seg.get("no_speech_prob") or 0.0),
+                                       float(seg.get("avg_logprob") or 0.0)))
+        return segments, MlxInfo(result.get("language") or language)
+
+    def detect_language(self, audio=None, **_options):
+        """(language, probability, every probability), the shape Transcriber.detect_language() unpacks."""
+        import mlx.core as mx
+        from mlx_whisper.audio import N_SAMPLES, log_mel_spectrogram, pad_or_trim
+        from mlx_whisper.decoding import detect_language as mlx_detect_language
+
+        model = self._model()
+        # An MLX array, not a numpy one: pad_or_trim() pads with mx.pad, which refuses numpy, and
+        # anything shorter than the 30 s encoder window (most windows) is padded.
+        mel = log_mel_spectrogram(pad_or_trim(mx.array(np.asarray(audio, dtype=np.float32)), N_SAMPLES),
+                                  n_mels=model.dims.n_mels)
+        _tokens, probabilities = mlx_detect_language(model, mel)
+        probs = probabilities[0] if isinstance(probabilities, (list, tuple)) else probabilities
+        language = max(probs, key=probs.get)
+        return language, float(probs[language]), probs
+
+
 _MODEL_ALIASES: Optional[tuple] = None  # (alias -> repo id, repo id -> first alias), built on first use
 
 
@@ -2859,10 +3069,12 @@ def canonical_model_name(name):
     """One name per set of weights: large-v3 for Systran/faster-whisper-large-v3, large and itself.
 
     faster-whisper's size aliases and their repo ids load the same files, so the server compares,
-    reports and caches under the first alias of the repo. Anything it does not know passes through.
+    reports and caches under the first alias of the repo. An MLX repo is the same weights converted
+    for the Apple GPU, so it answers to the size too. Anything else passes through.
     """
     if not isinstance(name, str):
         return name
+    name = MLX_ALIASES.get(name, name)
     forward, reverse = model_alias_tables()
     return reverse.get(forward.get(name, name), name)
 
@@ -2875,8 +3087,12 @@ def model_spellings(name) -> list:
     table does not know is its own only spelling.
     """
     forward, _ = model_alias_tables()
-    repo = forward.get(name, name)
-    return [alias for alias, target in forward.items() if target == repo] + [repo]
+    # Through the canonical name, so that an MLX repo answers with the sizes too, not only itself.
+    canonical = canonical_model_name(name)
+    repo = forward.get(canonical, canonical)
+    spellings = [alias for alias, target in forward.items() if target == repo] + [repo]
+    mlx = MLX_REPOS.get(canonical)
+    return spellings + [mlx] if mlx and mlx not in spellings else spellings
 
 
 def downloaded_models() -> list:
@@ -2898,15 +3114,18 @@ def require_model_bin(path: str, name: str) -> None:
                          "ct2-transformers-converter or pick a *-ct2 / faster-whisper repo")
 
 
-def download_model_files(name: str) -> str:
-    """Fetch the CTranslate2 files of `name` into MODELS_DIR (or find them there) and return the directory.
+def download_model_files(name: str, device: str = "cpu") -> str:
+    """Fetch the files of `name` into MODELS_DIR (or find them there) and return the directory.
 
     faster-whisper resolves its size aliases through its own table (ValueError for an unknown
     size), treats owner/name as a Hugging Face repo id and downloads only the model files. Nothing
     here touches the GPU, so it runs beside the working model. A repo that is not a converted
     model (a PyTorch checkpoint, say) comes back without model.bin and is refused before
-    WhisperModel() can choke on it.
+    WhisperModel() can choke on it. On the Apple GPU the files are MLX weights instead, so `device`
+    decides which of the two downloads runs.
     """
+    if device == "mlx":
+        return download_mlx_model_files(name)
     from faster_whisper import download_model
 
     path = download_model(name, cache_dir=str(MODELS_DIR))
@@ -2951,7 +3170,7 @@ def wait_for_thread(thread: threading.Thread) -> None:
         thread.join(0.5)
 
 
-def run_download_model(name: str) -> int:
+def run_download_model(name: str, device: str = "auto") -> int:
     """--download-model NAME, what setup runs: fetch the model with progress bars and make it the default.
 
     The same files download_model_files() fetches for a switch, but through huggingface_hub's
@@ -2974,7 +3193,17 @@ def run_download_model(name: str) -> int:
         return 2
     name = canonical_model_name(name)
     sizes = dict(getattr(fw_utils, "_MODELS", None) or {})
-    repo_id = name if "/" in name else sizes.get(name)
+    # The backend that will run this model decides which conversion of it setup fetches: the
+    # CTranslate2 files, or the MLX ones for an Apple GPU. `device` is the launcher's own
+    # --device, so a download and the start that follows it agree; fetching the other format
+    # here would cost the viewer the whole wait twice.
+    mlx = resolve_device(device) == "mlx"
+    patterns, require = (MLX_FILE_PATTERNS, require_mlx_weights) if mlx else (MODEL_FILE_PATTERNS, require_model_bin)
+    try:
+        repo_id = mlx_repo_for(name) if mlx else (name if "/" in name else sizes.get(name))
+    except ValueError as exc:
+        print(str(exc))
+        return 2
     if repo_id is None:
         print(f"unknown model size '{name}': faster-whisper knows {', '.join(sizes) or 'no sizes at all'}; "
               "a Hugging Face repo id is written owner/name")
@@ -2997,7 +3226,7 @@ def run_download_model(name: str) -> int:
 
     def fetch() -> None:
         try:
-            outcome.append(snapshot_download(repo_id, cache_dir=str(MODELS_DIR), allow_patterns=list(MODEL_FILE_PATTERNS)))
+            outcome.append(snapshot_download(repo_id, cache_dir=str(MODELS_DIR), allow_patterns=list(patterns)))
         except BaseException as exc:  # noqa: BLE001
             outcome.append(exc)
 
@@ -3017,7 +3246,7 @@ def run_download_model(name: str) -> int:
     try:
         if isinstance(result, BaseException):
             raise result
-        require_model_bin(result, name)
+        require(result, name)
     except Exception as exc:  # noqa: BLE001
         if alias and not isinstance(result, BaseException):
             write_config({"model": previous})  # the files came, but they are no model
@@ -3038,10 +3267,20 @@ def load_model(args, name: Optional[str] = None, path: Optional[str] = None):
     from faster_whisper import WhisperModel
 
     name = name or args.model
-    device = args.device
-    if device == "auto":
-        device = "cuda" if cuda_available() else "cpu"
+    device = resolve_device(args.device)
     compute = args.compute_type
+    if device == "mlx":
+        # MLX knows these two alone; reporting a CTranslate2 precision the GPU never ran would
+        # make /health lie about what is loaded.
+        if compute not in ("float16", "float32"):
+            if compute != "auto":
+                log.warning("MLX runs float16 or float32 only; --compute-type %s is ignored.", compute)
+            compute = "float16"
+        log.info("Loading Whisper model '%s' on the Apple GPU (MLX, %s); models are stored in %s",
+                 name, compute, MODELS_DIR)
+        model = MlxWhisperModel(path or download_mlx_model_files(name), compute)
+        warm_up(model, args)
+        return model, device, compute
     if device == "cuda":
         mem = gpu_memory_mb()
         if mem:
@@ -3071,14 +3310,20 @@ def load_model(args, name: Optional[str] = None, path: Optional[str] = None):
         device, compute = "cpu", "int8"
         kwargs.update(device=device, compute_type=compute)
         model = WhisperModel(path or name, **kwargs)
+    warm_up(model, args)
+    return model, device, compute
+
+
+def warm_up(model, args) -> None:
+    """Decode two seconds of silence, so the first real window does not pay for the lazy load."""
     try:
         t0 = time.time()
-        segs, _ = model.transcribe(np.zeros(SAMPLE_RATE * 2, dtype=np.float32), language=args.language, beam_size=1, vad_filter=False)
+        segs, _ = model.transcribe(np.zeros(SAMPLE_RATE * 2, dtype=np.float32), language=args.language,
+                                   beam_size=1, vad_filter=False)
         list(segs)
         log.info("Model ready (warm-up took %.1fs)", time.time() - t0)
     except Exception as exc:  # noqa: BLE001
         log.warning("Warm-up transcription failed: %s", exc)
-    return model, device, compute
 
 
 INSTANCE_LOCK = None  # the open, locked file of hold_instance_lock(); lives as long as the process
@@ -3201,9 +3446,21 @@ def run_check() -> None:
         import ctranslate2
 
         n = ctranslate2.get_cuda_device_count()
-        print(f"CTranslate2 {ctranslate2.__version__}: {n} CUDA device(s)" + ("" if n else "  -> CPU fallback; consider --model small"))
+        hint = "" if n else ("  -> the Apple GPU runs it instead" if mlx_available()
+                             else "  -> CPU fallback; consider --model small")
+        print(f"CTranslate2 {ctranslate2.__version__}: {n} CUDA device(s)" + hint)
     except Exception as exc:  # noqa: BLE001
         print(f"CTranslate2 import failed: {exc}")
+    if sys.platform == "darwin":
+        try:
+            import mlx.core as mx
+            import mlx_whisper  # noqa: F401
+
+            print(f"MLX {mx.__version__}: Metal {'available' if mx.metal.is_available() else 'unavailable'}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"MLX not usable ({exc}); Whisper would run on the CPU. Install it with "
+                  "pip install mlx-whisper")
+    print(f"Backend for --device auto: {resolve_device('auto')}")
     try:
         import faster_whisper
 
@@ -3243,8 +3500,9 @@ def parse_args(argv=None):
     p.add_argument("--host", default="127.0.0.1", help="bind address (keep it local)")
     p.add_argument("--port", type=int, default=8790, help="default 8790 (8765 is left free for AnkiConnect)")
     p.add_argument("--model", default=None, help="faster-whisper model size or CTranslate2 repo, e.g. large-v3, large-v3-turbo, kotoba-tech/kotoba-whisper-v2.0-faster (default: the model chosen at setup (config.json), else large-v3)")
-    p.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
-    p.add_argument("--compute-type", default="auto", help="float16, int8_float16, int8, ... (auto = float16 on GPU, int8 on CPU)")
+    p.add_argument("--device", default="auto", choices=["auto", "cuda", "mlx", "cpu"],
+                   help="auto picks an NVIDIA GPU, else the Apple GPU through MLX, else the CPU")
+    p.add_argument("--compute-type", default="auto", help="float16, int8_float16, int8, ... (auto = float16 on GPU, int8 on CPU; mlx knows float16 and float32)")
     p.add_argument("--language", default="ja")
     p.add_argument("--language-patience", type=float, default=60.0,
                    help="seconds of speech in another language before subtitles stop for that video (0 = never detect, always transcribe)")
@@ -3297,7 +3555,7 @@ def main() -> None:
         run_check()
         return
     if getattr(args, "download_model", None) is not None:
-        sys.exit(run_download_model(args.download_model))
+        sys.exit(run_download_model(args.download_model, args.device))
 
     if not hold_instance_lock(args.port):
         log.error("Another server is already starting or running on port %d (it holds %s). Stop it first.",

@@ -7,7 +7,7 @@ Shisu-ko shows live Japanese subtitles on YouTube in Firefox. A small server on 
 - **A transcript panel** with every line so far. A timestamp jumps there, a pickaxe mines it.
 - **Sentence mining without pressing anything.** The moment Yomitan adds a card, Shisu-ko attaches a screenshot of the frame you were reading and an MP3 clip of the line you were reading, through AnkiConnect. The pickaxe on a line, or Alt+Shift+M, does the same on demand, into the newest card or into your Downloads folder.
 - **Word colours, if you want them.** With Anki running, every word of a line that has a card in your deck is coloured by the card's state (green learned, yellow learning, orange suspended, red new), and can carry an overbar in the colour of its pitch accent, read from the card's pitch accent field. The deck follows your mining, a verb is found in its conjugations, and the text stays scannable. Both are off by default.
-- **Your hardware, your model.** Whisper large-v3 or small, chosen and downloaded at setup, on an NVIDIA GPU or the CPU; the popup switches to the Japanese-specialised kotoba-whisper (about 6x faster) or to any other faster-whisper model, without restarting the server.
+- **Your hardware, your model.** Whisper large-v3 or small, chosen and downloaded at setup, on an NVIDIA GPU, on an Apple Silicon GPU through MLX, or on the CPU; the popup switches to the Japanese-specialised kotoba-whisper (about 6x faster) or to any other faster-whisper model, without restarting the server.
 - **Your fonts.** The subtitle font is a preset (gothic, rounded, mincho) or any font installed on your computer, with position, colour, box and outline adjustable.
 - **A Start button for the server.** When the server is not running, the popup starts it for you; Firefox asks once for permission to talk to the small launcher that the server's setup registers.
 - **Updates without leaving the browser.** The popup tells you when a newer release is out, and one click makes the server update itself and restart; the extension itself is updated by Firefox from this listing.
@@ -20,7 +20,7 @@ The extension does nothing on its own. Download the server from the project page
 - Linux and macOS: `bash server/setup.sh` once, then `server/run.sh`.
 - Also available as a Nix flake and as a Docker image with GPU support.
 
-Requirements: Python 3.10 or newer, Node.js 20+ or Deno (yt-dlp needs a JavaScript runtime for YouTube), and an NVIDIA GPU with about 4 GB of free VRAM for large-v3; without a GPU, pick the small model at setup and run on the CPU. Optional: Yomitan for lookups, Anki with the AnkiConnect add-on for mining and the word colours.
+Requirements: Python 3.10 or newer, Node.js 20+ or Deno (yt-dlp needs a JavaScript runtime for YouTube), and a GPU for large-v3: an NVIDIA card with about 4 GB of free VRAM, or any Apple Silicon Mac, where the server decodes on the Mac's own GPU. Without either, pick the small model at setup and run on the CPU. Optional: Yomitan for lookups, Anki with the AnkiConnect add-on for mining and the word colours.
 
 **Shortcuts**
 
