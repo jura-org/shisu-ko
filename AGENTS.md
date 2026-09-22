@@ -18,6 +18,8 @@ addon/        Firefox source extension, Manifest V3, plain JS; directly loadable
 server/       server.py (single file) + setup/run scripts + update.py; runtime data in ~/.shisu-ko
               native_host.py: the native-messaging host behind the popup's "Start server" button
               (stdlib only); native-host.cmd / native-host.sh wrap it, Firefox runs the wrapper
+              mlx_beam.py: the beam search mlx-whisper lacks; server.py loads it by path on the
+              Apple GPU and nowhere else
 docker/       Windows wrappers for docker compose, WSL Docker Engine installer
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example
 flake.nix        Nix package/app/dev shell for the server and the extension build
@@ -421,8 +423,8 @@ GPU driver and no registry in the suite) and the text of `setup.cmd` / `setup.sh
 CTranslate2 has no Metal backend, so on Apple Silicon faster-whisper decodes on the CPU. MLX runs
 the same Whisper weights on the GPU. Measured on an M1 Pro over 180 s of Japanese news audio, with
 identical windows and the identical cue pipeline: faster-whisper large-v3 on `--device cpu` (int8,
-beam size 5) at 2.3x realtime, MLX large-v3 (float16, greedy) at 7.3x, and the cores stay free for
-the video that is playing. Hence `--device auto` prefers it to the CPU.
+beam size 5) at 2.3x realtime, MLX large-v3 (float16) at 5.0x with the same beam and 5.9x greedy,
+and the cores stay free for the video that is playing. Hence `--device auto` prefers it to the CPU.
 
 `resolve_device()` is the single place `auto` is decided: `cuda` when there is an NVIDIA GPU, else
 `mlx` when `mlx_available()` (darwin, `mlx.core`, `mlx_whisper`, `mx.metal.is_available()`), else
@@ -436,13 +438,14 @@ carrying `start`, `end`, `text` and `words` of `word` / `start` / `end` / `proba
 own `Word`), so the transcriber, the cue gates and the language watch never learn which backend
 ran.
 
-Two options do not survive the crossing, and the wrapper absorbs both rather than the call sites.
-MLX has no beam search, so `--beam-size` is dropped and each temperature is sampled once; greedy
-decoding costs accuracy, in those 180 s three slips (`経老` for `敬老`, `線上降水帯` for
-`線状降水帯`, one wrong figure). And mlx-whisper has no `vad_filter`, so given one the wrapper runs
-the Silero pass faster-whisper would have run, hands the decoder the speech with the silence cut
-out (`collect_chunks`) and maps every timestamp back (`SpeechTimestampsMap`) — the same
-`VAD_PARAMS`, so the gates in the cue builder keep judging what they were written for.
+One option does not survive the crossing, and the wrapper absorbs it rather than the call sites.
+mlx-whisper has no `vad_filter`, so given one the wrapper runs the Silero pass faster-whisper
+would have run, hands the decoder the speech with the silence cut out (`collect_chunks`) and maps
+every timestamp back (`SpeechTimestampsMap`) — the same `VAD_PARAMS`, so the gates in the cue
+builder keep judging what they were written for. `--beam-size` is served, by the decoder
+`mlx_beam.py` puts into the library: `MlxWhisperModel.transcribe()` passes the size on only when
+the patch took and the caller asked for more than 1, and mlx-whisper, like faster-whisper, drops
+it above temperature 0 by itself, so the beam runs on the first pass alone.
 
 `canonical_model_name()` is what keeps one name per set of weights across backends. `MLX_REPOS`
 maps a faster-whisper size to the mlx-community repo holding it converted and `MLX_ALIASES`
@@ -469,6 +472,60 @@ available` on macOS and `Backend for --device auto: <device>` on every platform.
 `server/tests/test_mlx.py` fakes `mlx.core`, `mlx_whisper`, `huggingface_hub` and `faster_whisper`
 in `sys.modules`, so the device choice, the names, the download, the option translation, the VAD
 emulation, `detect_language()` and a switch on the Apple GPU are covered without a Mac.
+
+### The beam search (`server/mlx_beam.py`)
+
+mlx-whisper has everything a beam needs and no decoder to use it: `DecodingTask.n_group` sizes the
+batch, `MaximumLikelihoodRanker` makes the length-penalised final choice,
+`Inference.rearrange_kv_cache()` reorders the cache when the beams are shuffled, and the decoder
+itself is a `NotImplementedError`. `mlx_beam.py` fills that hole with a port of openai-whisper's
+`BeamSearchDecoder` (MIT) onto MLX, implementing the library's own `TokenDecoder` contract
+(`reset` / `update` / `finalize`). It earns its keep in Japanese because greedy decoding commits to
+a homophone before the words that would disambiguate it arrive: `敬老` comes out `経老`.
+
+Two things differ from the PyTorch original. `update()` returns `sum_logprobs` rather than mutating
+it, since an MLX array is a value. And it returns `completed` as an `mx.array`, because
+`_main_loop` hands that straight to `mx.async_eval` beside the tensors. Only each beam's best
+`beam_size + 1` continuations cross back from the GPU (`mx.argpartition`, then
+`mx.take_along_axis`): no more than that can survive the cut below, and the whole row is the
+51 866-wide vocabulary, which costs more to copy than the search it feeds.
+
+`rearrange_self_attention_only()` replaces `Inference.rearrange_kv_cache`, and it is what makes the
+beam affordable. The library's version reorders both halves of every layer's `(self_kv, cross_kv)`.
+Cross-attention keys and values are computed from the audio, not from the tokens, so all five beams
+of one audio hold identical copies of them: permuting those rows changes nothing and, on large-v3,
+copies about 1.2 GB per decoded token. Skipping it is exact, because a candidate never comes from
+another audio's beam group. Measured: that one change took beam search from 1.1x realtime to 4.1x.
+
+`enable_beam_search()` wraps `DecodingTask.__init__` instead of rewriting it: it runs the original
+with `beam_size` and `patience` stripped out, because the original raises on a beam size it cannot
+serve, then puts `self.options` back (what `DecodingResult` reports), sets `self.n_group = beam` and
+installs the decoder. Carrying the group size through as `best_of` would have been the smaller
+patch and does not work: `_verify_options()` refuses `best_of` at temperature 0, the only
+temperature beam search runs at. It is idempotent, and it stands aside when `decoding` already has
+a `BeamSearchDecoder`, so a future mlx-whisper that grows its own keeps it — that one knows the
+library's internals better than a patch does.
+
+`enable_mlx_beam_search()` in `server.py` loads the file by path, the way `run_check()` loads
+`native_host.py`, and caches whether it took, so `server.py` stays the one file and a machine
+without MLX never reads it. A failure warns and answers False, and the wrapper decodes greedily,
+which is what it did before the decoder existed: a patch that cannot be applied must cost accuracy,
+never the backend.
+
+The beam does not buy parity with the CPU. In those 180 s it fixes two of greedy decoding's three
+slips (`経老` becomes `敬老`, the wrong figure `0.5%に上昇` becomes `0.2ポイント上昇`) and leaves
+one (`線上降水帯` where the CPU writes `線状降水帯`).
+
+`server/tests/test_mlx_beam.py` needs neither a Mac nor MLX: the decoder's `update()` and
+`finalize()` against scripted logits where greedy takes the locally better token and loses, the
+cache reordering that follows the beams through the self-attention half and leaves the
+cross-attention half untouched, the wrapped constructor with a beam and without one, its
+idempotence and its retreat before a library that brought its own decoder, and `server.py` falling
+back to greedy when the patch cannot be applied. Its `mlx.core` is numpy wearing MLX's names, which
+is only safe as long as it does not drift from the library: every decoder test therefore runs a
+second time against the installed `mlx.core` when there is one, and
+`test_the_library_still_contracts_what_the_fakes_copy` pins the parts of `mlx_whisper.decoding` the
+patch reaches into, so an upstream change that moves them fails here rather than on a Mac.
 
 ## One tab at a time
 
@@ -1477,6 +1534,10 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
   context, and also a failed model switch after which the previous model could not be reloaded,
   which would leave the server running without any model. Exit code 4 (`EXIT_UPDATE`) asks the
   launcher to run `update.py` before starting again; only `POST /update` produces it.
+- Reordering a beam's KV cache must skip the cross-attention half. Those keys and values come from
+  the audio, so every beam of one audio holds the same ones and permuting them changes nothing;
+  on large-v3 the copy is about 1.2 GB per decoded token, more than the search it serves is worth
+  (1.1x realtime with it, 4.1x without). `rearrange_self_attention_only()` in `mlx_beam.py`.
 - `mlx_whisper.audio.pad_or_trim()` pads with `mx.pad`, which refuses a numpy array, so anything
   shorter than the 30 s encoder window has to be an `mx.array` first. Every language probe is
   shorter, and this broke the whole language watch in silence: a detector that raises is never what

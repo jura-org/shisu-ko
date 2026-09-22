@@ -87,10 +87,12 @@ CTranslate2 has no Metal backend, so the server decodes through MLX instead and 
 picks it as soon as `setup.sh` has installed mlx-whisper. Model names do not change — `large-v3`
 in the popup is the same weights either way, setup downloads the MLX build of whichever model you
 pick, and both backends share one cue cache. On an M1 Pro, over three minutes of Japanese news
-audio, large-v3 transcribed at 7.3x realtime on the GPU against 2.3x on the CPU, and left the
-cores to the video. What you give up is beam search: MLX has none, so decoding is greedy and gets
-a word wrong now and then where the CPU would not — three lines in those three minutes.
-`--device cpu` buys the beam search back at a third of the speed.
+audio, large-v3 transcribed at 5.0x realtime on the GPU against 2.3x on the CPU at the same beam
+size, and left the cores to the video. mlx-whisper itself has no beam search; Shisu-ko adds one,
+so the GPU searches five beams as the CPU does. It is not quite the CPU's transcript: of the three
+words greedy decoding got wrong in those three minutes, the beam fixes two and still misses one
+homophone (線上降水帯 for 線状降水帯). It costs about 15% of the speed — greedy decoding runs at
+5.9x — which `--beam-size 1` takes back.
 
 From then on the toolbar popup can start it for you: while the server is offline, the status
 line in the popup's header shows a **Start server** button. The first click asks Firefox for
@@ -507,7 +509,8 @@ server runs the model chosen at setup (`~/.shisu-ko/config.json`), else large-v3
 | `--model large-v3-turbo` | OpenAI's faster large model as the default |
 | `--model small --device cpu` | CPU-only operation |
 | `--download-model small` | Download the model now, with a progress bar, and make it the default of later starts (what setup runs after its environment check); exits instead of starting the server, with code 2 on a failure or Ctrl+C, which `run.cmd` / `run.sh` do not restart on |
-| `--device mlx` | Decode on an Apple Silicon GPU through MLX, about three times the CPU speed but without beam search. `auto` already picks it when there is no NVIDIA GPU and mlx-whisper is installed; `--device cpu` is the way back to beam search |
+| `--device mlx` | Decode on an Apple Silicon GPU through MLX, about twice the CPU speed at the same beam size. `auto` already picks it when there is no NVIDIA GPU and mlx-whisper is installed |
+| `--beam-size 1` | Decode greedily instead of searching five beams. About 15% faster on an Apple GPU, and wrong on a homophone rather more often |
 | `--compute-type int8_float16` | Halves GPU memory use; chosen by itself when less than 4.5 GB is free. MLX knows `float16` (the default there) and `float32` only |
 | `--cookies-from-browser firefox` | Age-restricted or members-only videos, or when YouTube asks for a sign-in |
 | `--cookies /path/cookies.txt` | Same, with an exported cookies file (use this inside Docker) |
@@ -616,7 +619,7 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | "The live stream has ended" | Reload the page once YouTube shows the recording; the server starts over on the video's clock. |
 | Server says "Only N MiB of GPU memory is free" or restarts by itself | Other programs (games, Wallpaper Engine, VR software) hold most of the VRAM. The server switches to int8 weights; with under about 2.5 GB free the display driver can reset under load (Windows logs LiveKernelEvent 141). Close GPU-heavy apps or type `kotoba-tech/kotoba-whisper-v2.0-faster` into the popup's model field. Cached cues survive restarts. |
 | CPU fallback, transcription far too slow | `run.cmd --check` should list one CUDA device; update the NVIDIA driver or type `small` into the popup's model field. On a Mac, `run.sh --check` should end with `Backend for --device auto: mlx`; if it says MLX is not usable, run `bash server/setup.sh` again (mlx-whisper needs Apple Silicon, not an Intel Mac). |
-| A word is wrong that the same model got right on another machine | MLX has no beam search, so on an Apple GPU Whisper decodes greedily and slips on a word now and then. Start with `--device cpu` for beam search at about a third of the speed. |
+| A word is wrong that the same model got right on another machine | The two backends do not always pick the same homophone: on an Apple GPU a word still slips now and then that faster-whisper gets right (線状降水帯 came out 線上降水帯). Both search five beams, so there is nothing to turn on; check that the server was not started with `--beam-size 1`, and `--device cpu` gives the CPU's answer at about half the speed. |
 | Mining says "AnkiConnect denied access" | Click **Yes** in the dialog Anki shows, then mine again. |
 | Mining says the card has none of the fields | Set the image/audio field names in the popup to the fields of your note type. |
 | No screenshot, only audio | The video is DRM-protected; the browser refuses to read its frames. |
@@ -655,6 +658,7 @@ addon/                Firefox extension (Manifest V3, plain JS, no build step)
 server/
   server.py           HTTP server: yt-dlp + faster-whisper (MLX on Apple Silicon) + live
                       follower + clip cutting
+  mlx_beam.py         the beam search mlx-whisper lacks; server.py loads it on the Apple GPU
   setup.cmd/.sh       setup, downloads the model     run.cmd/.sh   start (with auto-restart)
   update.py           self-update run by run.cmd/.sh, first and after the server exits with code 4
                       (POST /update): git fast-forward or newest release
@@ -713,6 +717,9 @@ and cooldown, the per-model cache files and what `/health` and `/sync` report. `
 the same for the Apple GPU with MLX faked in as well: which backend `--device auto` picks, the
 model names shared with faster-whisper, the download of the converted weights, the voice-activity
 pass the wrapper runs in mlx-whisper's stead, and a model switch on that backend — no Mac needed.
+The beam search Shisu-ko adds to mlx-whisper is covered on the same fakes: the decoder itself, the
+cache reordering that skips the cross-attention half, and the fall back to greedy decoding when the
+patch cannot be applied.
 `test_native_host.py` drives the native host behind the Start button: the message framing, the
 two commands and every malformed request, the launch on each platform with a recorded `Popen`,
 the instance lock shared with `server.py`, registration into a temporary home with a fake
@@ -749,7 +756,8 @@ Built on [faster-whisper](https://github.com/SYSTRAN/faster-whisper) and
 with [mlx-whisper](https://pypi.org/project/mlx-whisper/) on Apple Silicon,
 [yt-dlp](https://github.com/yt-dlp/yt-dlp),
 [PyAV](https://github.com/PyAV-Org/PyAV), OpenAI's [Whisper](https://github.com/openai/whisper)
-and [Kotoba-Whisper](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0). The mining flow
+and [Kotoba-Whisper](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0).
+`server/mlx_beam.py` ports openai-whisper's beam search decoder (MIT) onto MLX. The mining flow
 follows the conventions of [Yomitan](https://yomitan.wiki/), [AnkiConnect](https://foosoft.net/projects/anki-connect/)
 and [asbplayer](https://github.com/killergerbah/asbplayer).
 

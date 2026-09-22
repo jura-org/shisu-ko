@@ -40,6 +40,15 @@ def fresh_alias_table(monkeypatch):
     monkeypatch.setattr(server, "_MODEL_ALIASES", None)
 
 
+@pytest.fixture(autouse=True)
+def beam_search_off(monkeypatch):
+    # enable_mlx_beam_search() remembers its answer for the life of the process, so without this
+    # every test below would inherit whatever the first MlxWhisperModel built anywhere decided.
+    # False is the fallback this file's fakes describe: the model wrapped in greedy mlx-whisper.
+    # A test about the beam says so itself; test_mlx_beam.py covers the decoder that lifts it.
+    monkeypatch.setattr(server, "_MLX_BEAM", False)
+
+
 # --------------------------------------------------------------------------- the fake libraries
 
 def fake_faster_whisper(monkeypatch, tmp_path):
@@ -376,7 +385,7 @@ def test_faster_whispers_options_arrive_as_mlx_whispers(monkeypatch):
     (audio, kwargs), = mlx.calls
     assert audio.dtype == np.float32 and len(audio) == RATE
     assert kwargs["logprob_threshold"] == -0.8  # mlx-whisper spells it without the underscore
-    assert "beam_size" not in kwargs  # MLX has no beam search; each temperature is sampled once
+    assert "beam_size" not in kwargs  # no decoder was installed: see the beam test below
     assert "vad_filter" not in kwargs and "vad_parameters" not in kwargs  # faster-whisper's alone
     assert kwargs["path_or_hf_repo"] == model.path and kwargs["fp16"] is True
     assert kwargs["temperature"] == (0.0, 0.2) and kwargs["language"] == "ja"
@@ -390,6 +399,27 @@ def test_faster_whispers_options_arrive_as_mlx_whispers(monkeypatch):
     assert [(w.word, w.start, w.end, w.probability) for w in seg.words] == [
         ("これは", 0.5, 1.0, 0.9), ("テストです", 1.0, 1.5, 0.8)]
     assert all(isinstance(w, server.Word) for w in seg.words), "the cue builder reads real Word objects"
+
+
+@pytest.mark.parametrize("installed, asked, crosses", [
+    (True, 5, 5),
+    (True, 1, None),      # a beam of one is greedy decoding: there is nothing to search
+    (True, None, None),   # detect_language and the warm-up name no beam size at all
+    (False, 5, None),     # nothing was installed, so the library would raise NotImplementedError
+])
+def test_the_beam_size_crosses_only_when_there_is_a_decoder_for_it(monkeypatch, installed, asked, crosses):
+    # mlx-whisper ships a greedy decoder and refuses any beam_size outright; mlx_beam.py gives it
+    # one, and self.beam is whether that took. Where it did not, the option must be dropped rather
+    # than passed on, which is the fallback the rest of this file's fakes describe.
+    monkeypatch.setattr(server, "_MLX_BEAM", installed)
+    mlx = fake_mlx_whisper(monkeypatch)
+    model = make_model(monkeypatch)
+    assert model.beam is installed
+    options = {"language": "ja"}
+    if asked is not None:
+        options["beam_size"] = asked
+    model.transcribe(np.zeros(RATE, dtype=np.float32), **options)
+    assert mlx.calls[0][1].get("beam_size") == crosses
 
 
 def test_a_segment_without_word_timestamps_still_becomes_one(monkeypatch):
@@ -500,10 +530,12 @@ def test_load_model_builds_the_mlx_backend_and_warms_it_up(monkeypatch, tmp_path
     hub = fake_hub(monkeypatch, tmp_path)
     fake_mlx(monkeypatch)
     mlx = fake_mlx_whisper(monkeypatch)
+    monkeypatch.setattr(server, "_MLX_BEAM", True)  # even with the beam decoder installed:
     model, device, compute = server.load_model(mlx_args())
     assert isinstance(model, server.MlxWhisperModel) and (device, compute) == ("mlx", "float16")
     assert model.path == snapshot_dir(tmp_path, LARGE_MLX) and hub["repo_id"] == LARGE_MLX
-    # The warm-up went through MLX: two seconds of silence, no VAD, and beam_size dropped.
+    # The warm-up went through MLX: two seconds of silence and no VAD. It asks for a beam of one,
+    # which is greedy decoding, so no beam_size crosses and two seconds of silence cost one pass.
     (audio, kwargs), = mlx.calls
     assert len(audio) == 2 * RATE and kwargs["language"] == "ja" and "beam_size" not in kwargs
 

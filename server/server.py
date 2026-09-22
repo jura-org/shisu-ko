@@ -2926,6 +2926,34 @@ def download_mlx_model_files(name: str) -> str:
     return path
 
 
+_MLX_BEAM: Optional[bool] = None  # whether mlx-whisper took the beam search; asked once
+
+
+def enable_mlx_beam_search() -> bool:
+    """Give mlx-whisper the beam search it lacks, and say whether it took.
+
+    mlx_beam.py is loaded by path, the way run_check() loads native_host.py, so that server.py
+    stays the one file and a machine without MLX never reads it. A failure here is not fatal:
+    the backend falls back to greedy decoding, which is what it did before the decoder existed.
+    """
+    global _MLX_BEAM
+    if _MLX_BEAM is None:
+        try:
+            import importlib.util
+
+            spec = importlib.util.spec_from_file_location(
+                "shisuko_mlx_beam", Path(__file__).with_name("mlx_beam.py"))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            module.enable_beam_search()
+            _MLX_BEAM = True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("MLX beam search is unavailable (%s); decoding greedily, which is faster "
+                        "but mishears a homophone now and then. Use --beam-size 1 to silence this.", exc)
+            _MLX_BEAM = False
+    return _MLX_BEAM
+
+
 @dataclass
 class MlxSegment:
     """What the gates read off a segment: its span, its text, its words and the decoder's confidence.
@@ -2951,10 +2979,10 @@ class MlxInfo:
 class MlxWhisperModel:
     """faster-whisper's WhisperModel over mlx-whisper, so nothing else in the server knows the difference.
 
-    Two options do not survive the crossing. MLX has no beam search, so --beam-size is dropped and
-    each temperature is sampled once. And mlx-whisper has no vad_filter of its own: given one, this
-    runs the Silero pass faster-whisper would run, hands the decoder the speech with the silence cut
-    out and maps the timestamps back, which is what faster-whisper does with the same options.
+    One option does not survive the crossing on its own. mlx-whisper has no vad_filter: given one,
+    this runs the Silero pass faster-whisper would run, hands the decoder the speech with the
+    silence cut out and maps the timestamps back, which is what faster-whisper does with the same
+    options. `--beam-size` it does serve, through the decoder mlx_beam.py adds to the library.
     """
 
     def __init__(self, path: str, compute_type: str = "float16"):
@@ -2963,6 +2991,7 @@ class MlxWhisperModel:
         self.path = path
         self.fp16 = compute_type != "float32"
         self.dtype = mx.float16 if self.fp16 else mx.float32
+        self.beam = enable_mlx_beam_search()
 
     def _model(self):
         """The decoder's own cached model, so detect_language() never loads a second copy of the weights."""
@@ -2998,6 +3027,10 @@ class MlxWhisperModel:
                 return [], MlxInfo(language)
             audio = collect_chunks(audio, chunks, sampling_rate=SAMPLE_RATE)[0][0]
             restore = SpeechTimestampsMap(chunks, SAMPLE_RATE)
+        # mlx-whisper drops beam_size above temperature 0 by itself, exactly as faster-whisper
+        # does, so this asks for the beam only where it is used: the first, greedy-or-beam pass.
+        size = int(options.get("beam_size") or 1)
+        beam = {"beam_size": size} if self.beam and size > 1 else {}
         result = mlx_whisper.transcribe(
             np.asarray(audio, dtype=np.float32),
             path_or_hf_repo=self.path,
@@ -3012,6 +3045,7 @@ class MlxWhisperModel:
             compression_ratio_threshold=options.get("compression_ratio_threshold", 2.4),
             hallucination_silence_threshold=options.get("hallucination_silence_threshold"),
             fp16=self.fp16,
+            **beam,
         )
         segments = []
         for seg in result.get("segments") or []:
