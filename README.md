@@ -12,7 +12,7 @@ frame you were reading and the audio of the sentence. The same recording
 [with sound](docs/demo.mp4).
 
 YouTube's Japanese captions are often missing, wrong, or burned into the picture where no
-dictionary can reach them. Shisu-ko runs OpenAI's Whisper large-v3 on your GPU, keeps
+dictionary can reach them. Shisu-ko runs OpenAI's Whisper on your GPU, keeps
 transcribing a little ahead of where you are watching, and draws the result over the player as
 ordinary page text. Everything runs locally: the only network traffic is yt-dlp fetching the
 audio from YouTube, the one-time model download, and a look at GitHub for a newer release,
@@ -35,9 +35,10 @@ by `run.cmd` / `run.sh` before each start and by the extension once a day.
   deck is coloured by the card's state, green to red, and can carry an overbar in the colour of
   its pitch accent, read from the card. The deck follows your mining, and a verb is found in its
   conjugations.
-- **Your hardware, your model.** Setup asks whether you want Whisper large-v3 or small and
-  downloads it; it runs on an NVIDIA GPU, on an Apple Silicon GPU through MLX, or on the CPU,
-  whichever the server finds. The popup switches to any other model without restarting the
+- **Your hardware, your model.** Setup offers the model your machine runs best — large-v3 on an
+  NVIDIA GPU, large-v3-turbo on an Apple Silicon one, where the weights share memory with the
+  browser — or small, and downloads it; it runs on an NVIDIA GPU, on an Apple Silicon GPU through
+  MLX, or on the CPU, whichever the server finds. The popup switches to any other model without restarting the
   server: a faster-whisper size or a Hugging Face repo id of a CTranslate2 model, such as
   `kotoba-tech/kotoba-whisper-v2.0-faster` (Japanese-specialised, about 6x faster) or a small
   CPU model. `--model` only sets the default.
@@ -54,8 +55,10 @@ by `run.cmd` / `run.sh` before each start and by the extension once a day.
 - For the Docker server: Docker with the NVIDIA Container Toolkit (Docker Desktop on Windows
   has it built in). The image already contains Deno.
 - A GPU for large-v3: an NVIDIA card with about 4 GB of free VRAM (with less the server switches
-  to int8 weights by itself), or any Apple Silicon Mac, where the server decodes on the Mac's own
-  GPU through MLX. Without either, pick the small model at setup and run on the CPU.
+  to int8 weights by itself). Any Apple Silicon Mac decodes on its own GPU through MLX, and gets
+  large-v3-turbo instead: on a Mac the GPU's memory is the browser's memory, and large-v3 does not
+  fit beside the video you are watching. Without either GPU, pick the small model at setup and run
+  on the CPU.
 - Optional: [Yomitan](https://yomitan.wiki/) for lookups, [Anki](https://apps.ankiweb.net/)
   with the [AnkiConnect](https://ankiweb.net/shared/info/2055492159) add-on for mining.
 
@@ -73,9 +76,11 @@ zip, where Windows would start them without the rest of the files.
 
 Setup creates an isolated Python environment in `~/.shisu-ko/venv` and installs faster-whisper,
 yt-dlp, the CUDA runtime libraries and, on Apple Silicon, mlx-whisper; nothing else on the system
-is touched. It then asks which Whisper model the server should use, `1` for large-v3 (best
-quality, about 3 GB, wants a GPU with 4 GB or more free) or `2` for small (about 500 MB, fine on
-a CPU, less accurate), downloads it into `~/.shisu-ko/models` with a progress bar and remembers
+is touched. It then asks which Whisper model the server should use: `1` is what this machine runs
+best, large-v3 on Windows and Linux (best quality, about 3 GB, wants a GPU with 4 GB or more free)
+and large-v3-turbo on an Apple Silicon Mac (about 1.6 GB, the one that keeps up beside a browser),
+`2` is small (about 500 MB, fine on a CPU, less accurate); it downloads the choice into
+`~/.shisu-ko/models` with a progress bar and remembers
 the choice in `~/.shisu-ko/config.json`. When it says that everything is ready, close its window
 and start `run.cmd` / `run.sh`. The choice is kept even when the download fails or is stopped with
 Ctrl+C: the first start then downloads the chosen model itself, without the progress bar. The
@@ -86,21 +91,31 @@ you watch; it restarts itself if it ever crashes.
 CTranslate2 has no Metal backend, so the server decodes through MLX instead and `--device auto`
 picks it as soon as `setup.sh` has installed mlx-whisper. Model names do not change — `large-v3`
 in the popup is the same weights either way, setup downloads the MLX build of whichever model you
-pick, and both backends share one cue cache. On an M1 Pro, over three minutes of Japanese news
+pick, and both backends share one cue cache. On an idle M1 Pro, over three minutes of Japanese news
 audio, large-v3 transcribed at 5.0x realtime on the GPU against 2.3x on the CPU at the same beam
-size, and left the cores to the video. mlx-whisper itself has no beam search; Shisu-ko adds one,
-so the GPU searches five beams as the CPU does. It is not quite the CPU's transcript: of the three
-words greedy decoding got wrong in those three minutes, the beam fixes two and still misses one
-homophone (線上降水帯 for 線状降水帯). It costs about 15% of the speed — greedy decoding runs at
-5.9x — which `--beam-size 1` takes back.
+size, and left the cores to the video.
+
+A Mac's default model is large-v3-turbo, not large-v3, because the GPU's memory is the browser's
+memory. large-v3 is 2.9 GB of weights. With Chrome playing one YouTube video beside it, an M1 Pro
+took 81 seconds over a 38-second window — half the speed you are watching at, which is no use to
+anyone; the same window took 13 seconds with the browser closed. Turbo is 1.5 GB and takes 4.8
+seconds either way. It costs about one word in twenty lines. Type `large-v3` into the popup's model
+field, or pick it at setup, if you want it anyway.
+
+mlx-whisper itself has no beam search; Shisu-ko adds one, so the GPU searches five beams as the
+CPU does. It is not quite the CPU's transcript: of the three words greedy decoding got wrong in
+those three minutes of news, the beam fixes two and still misses one homophone (線上降水帯 for
+線状降水帯). What it costs depends on the speech: about 15% on read news, about 90% on dense
+conversation, where one window holds three times as many sentences to decode. `--beam-size 1`
+takes that back and mishears a homophone rather more often.
 
 From then on the toolbar popup can start it for you: while the server is offline, the status
 line in the popup's header shows a **Start server** button. The first click asks Firefox for
 permission to "exchange messages with programs other than Firefox"; allow it, and the button
 launches `server\run.cmd` in a window of its own (Windows) or `server/run.sh` in the background
 with its output in `~/.shisu-ko/server.log` (Linux/macOS), then waits for the server to answer.
-The button passes no options: the server starts with its defaults (the model chosen at setup,
-else large-v3; the GPU when there is one; no cookies), exactly as a bare `run.cmd` / `run.sh`
+The button passes no options: the server starts with its defaults (the model chosen at setup, else
+large-v3, or large-v3-turbo on an Apple GPU; the GPU when there is one; no cookies), exactly as a bare `run.cmd` / `run.sh`
 start would. The popup's model field switches the model once that default one is up; anything
 else you usually append to `run.cmd` / `run.sh` (`--device cpu`, `--cookies-from-browser`,
 `--js-runtime`, ...) needs a start by hand, see [Server options](#server-options). Firefox only
@@ -203,9 +218,10 @@ the switch in its header turns the whole extension off and on again.
 
 Only the video you are watching is transcribed. Other YouTube tabs say "subtitles are running in
 another tab" and take over the moment you click into them, so two open videos never compete for
-the GPU. A video whose speech is not in the subtitle language stops after about a minute of it
-("the speech is not in the subtitle language") and starts again by itself when the language
-comes back.
+the GPU. A video YouTube itself declares to be in another language is never downloaded at all: the
+badge says "the speech is not in the subtitle language" a second after you open it. One that
+declares nothing, and then speaks another language, stops after about a minute of it and starts
+again by itself when the subtitle language comes back.
 
 | Shortcut | Action |
 |---|---|
@@ -405,9 +421,10 @@ The **Transcription model** drawer picks the Whisper model the server runs. The 
 faster-whisper size (`large-v3`, `large-v3-turbo`, `distil-large-v3`, `medium`, `small`, ...)
 or the Hugging Face repo id `owner/name` of a CTranslate2 model
 (`kotoba-tech/kotoba-whisper-v2.0-faster`); empty means the server's own default (`--model`, else
-the model chosen at setup in `~/.shisu-ko/config.json`, else large-v3), which the placeholder
-shows. The sizes mean the same on an Apple GPU, where the server fetches the MLX build of those
-weights; a repo id must then be an MLX one (`mlx-community/whisper-large-v3-mlx`).
+the model chosen at setup in `~/.shisu-ko/config.json`, else large-v3, or large-v3-turbo on an
+Apple GPU), which the placeholder shows. The sizes mean the same on an Apple GPU, where the server
+fetches the MLX build of those weights; a repo id must then be an MLX one
+(`mlx-community/whisper-large-v3-mlx`).
 Models already downloaded are offered as suggestions. The change applies while
 a video plays: a model that is not on disk yet is downloaded from Hugging Face first, while the
 current model keeps subtitling, and once the swap is done the video's transcript starts over with
@@ -458,15 +475,27 @@ never chopped. Seeking to an untranscribed part starts a new short window there.
 are looking at is served: the extension elects one, and the others are answered without the server
 being asked at all.
 
+Where the first subtitle's seconds go, measured on an M1 Pro with large-v3-turbo and nothing else
+running: yt-dlp reads the video's metadata in 6.1 s cold and 2.1 s warm (it solves YouTube's
+JavaScript challenge, and the first video after a server start pays the cold price), the first
+bytes and the preview decode take about 1 s, voice activity detection 0.06 s, and the 20-second
+first window 3.2 s. Eleven seconds cold, seven warm.
+
 **Language.** Whisper is told which language to expect (`--language`, default Japanese), and told
-that, it will gladly turn an English talk into Japanese subtitles. So the server also asks it what
-each window's speech actually was, and once `--language-patience` seconds of speech (60 by default)
-have gone by without the subtitle language being heard, it stops transcribing that video. It keeps
-listening to every window it would have transcribed, at a tenth of the cost, and starts again the
-moment the language returns; a video that opens with an English introduction loses nothing. One
-misjudged window never costs a subtitle, because until the patience runs out every window is
-transcribed anyway. Nothing a paused video has merely listened to is recorded as transcribed, so
-a pause that was wrong costs a second listen and never a blank video.
+that, it will gladly turn an English talk into Japanese subtitles. Two things stop it, and YouTube
+goes first. YouTube states every video's default audio track. When that is not the subtitle
+language, the server refuses the video before it downloads a byte of it, and the badge says so a
+second after you open it. When it is the subtitle language, the server believes it and never
+listens, which saves about a second per window. Only for a video YouTube states nothing about does
+the server ask Whisper what each window's speech actually was; once `--language-patience` seconds
+of speech (60 by default) have gone by without the subtitle language being heard, it stops
+transcribing that video. It keeps listening to every window it would have transcribed, at a tenth
+of the cost, and starts again the moment the language returns; a video that opens with an English
+introduction loses nothing. One misjudged window never costs a subtitle, because until the patience
+runs out every window is transcribed anyway. Nothing a paused video has merely listened to is
+recorded as transcribed, so a pause that was wrong costs a second listen and never a blank video.
+`--language-patience 0` switches off both the check on YouTube's word and the listening, and
+transcribes everything.
 
 **Cues.** The server runs Silero voice activity detection on each window and drops what Whisper
 makes up over silence and music: segments without words, segments that barely overlap detected
@@ -501,17 +530,19 @@ Append options to `run.cmd` / `run.sh`, or put them in the `command:` line of `c
 The popup's **Start server** button runs `run.cmd` / `run.sh` without any of them, so it always
 starts the defaults below (the model can still be switched from the popup afterwards); a server
 that needs `--device cpu`, cookies or another option is started by hand. Without `--model` the
-server runs the model chosen at setup (`~/.shisu-ko/config.json`), else large-v3.
+server runs the model chosen at setup (`~/.shisu-ko/config.json`), else large-v3, or large-v3-turbo
+on an Apple GPU; `run.sh --default-model` prints which of the two this machine is.
 
 | Option | Effect |
 |---|---|
 | `--model kotoba-tech/kotoba-whisper-v2.0-faster` | Default model (here the Japanese-specialised distilled one, about 6x faster and lighter on memory than large-v3). The popup overrides the default with any faster-whisper size or Hugging Face repo id, without a restart |
-| `--model large-v3-turbo` | OpenAI's faster large model as the default |
+| `--model large-v3-turbo` | OpenAI's faster large model as the default; already the default on an Apple GPU |
 | `--model small --device cpu` | CPU-only operation |
 | `--download-model small` | Download the model now, with a progress bar, and make it the default of later starts (what setup runs after its environment check); exits instead of starting the server, with code 2 on a failure or Ctrl+C, which `run.cmd` / `run.sh` do not restart on |
-| `--device mlx` | Decode on an Apple Silicon GPU through MLX, about twice the CPU speed at the same beam size. `auto` already picks it when there is no NVIDIA GPU and mlx-whisper is installed |
-| `--beam-size 1` | Decode greedily instead of searching five beams. About 15% faster on an Apple GPU, and wrong on a homophone rather more often |
-| `--compute-type int8_float16` | Halves GPU memory use; chosen by itself when less than 4.5 GB is free. MLX knows `float16` (the default there) and `float32` only |
+| `--device mlx` | Decode on an Apple Silicon GPU through MLX, about twice the CPU speed at the same beam size; the default model there is large-v3-turbo. `auto` already picks it when there is no NVIDIA GPU and mlx-whisper is installed |
+| `--beam-size 1` | Decode greedily instead of searching five beams. About 15% faster on read news speech and about 90% on dense conversation, and wrong on a homophone rather more often |
+| `--compute-type int8_float16` | Halves GPU memory use; chosen by itself when less than 4.5 GB is free. MLX knows `float16` (the default there) and `float32` only, so on an Apple GPU the smaller default model is what keeps memory down |
+| `--default-model` | Print the model a bare start would load on this machine, ignoring `~/.shisu-ko/config.json`, and exit. What `setup.sh` asks to name its first choice |
 | `--cookies-from-browser firefox` | Age-restricted or members-only videos, or when YouTube asks for a sign-in |
 | `--cookies /path/cookies.txt` | Same, with an exported cookies file (use this inside Docker) |
 | `--lookahead 0` | Transcribe to the end of the video instead of stopping 15 minutes ahead |
@@ -519,13 +550,13 @@ server runs the model chosen at setup (`~/.shisu-ko/config.json`), else large-v3
 | `--max-cue-chars 26` | Characters per cue before it is split (default 30; 26 is the Netflix Japanese limit) |
 | `--max-cue-seconds 7` / `--min-cue-seconds 0.8` | Longest and shortest cue (defaults 7, Netflix's own maximum, and 0.8); shorter ones are extended or merged |
 | `--initial-prompt "こんにちは。今日は、いい天気ですね。"` | Nudges Whisper towards punctuated output |
-| `--language-patience 60` | Seconds of speech in another language before a video's subtitles stop (0 = never listen for it, transcribe everything) |
+| `--language-patience 60` | Seconds of speech in another language before a video's subtitles stop. It governs YouTube's declaration as well: 0 means neither the declaration nor the speech is checked and everything is transcribed |
 | `--lyrics off` | Transcribe a window in which the speech detector hears under a second of speech with the detector as before (blank when it heard nothing). The default `auto` transcribes such a window without the detector when its audio is not silent (sung lyrics, speech over music) and Whisper hears the target language in it, under stricter gates |
 | `--idle-minutes 30` | Release the decoded audio of a video nobody has synced for this long |
 | `--retry-after 30` | Seconds before a failed audio fetch is retried, and the wait before a model name that failed to download or load is tried again |
 | `--js-runtime deno` | JavaScript runtime for yt-dlp: auto, node, deno, bun, or name:path |
 | `--allow-remote-ejs` | Lets yt-dlp fetch updated YouTube challenge-solver scripts from GitHub |
-| `--check` | Print environment diagnostics (CUDA, MLX and the backend `--device auto` would pick, yt-dlp's JavaScript runtime, downloaded models, whether the popup's Start button has its launcher registered) and exit |
+| `--check` | Print environment diagnostics (CUDA, MLX and the backend `--device auto` would pick, yt-dlp's JavaScript runtime, downloaded models, the model a bare start would run, whether the popup's Start button has its launcher registered) and exit |
 | `--no-update` | Start without looking for a newer version of Shisu-ko first (`run.cmd` / `run.sh`). The popup's **Update** button is refused too, since the launcher would restart the server without updating |
 
 `run.cmd` / `run.sh` set `SHISUKO_LAUNCHER=1` for the server they start. Only with it does
@@ -593,13 +624,13 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | No subtitles until the toolbar icon is clicked | Firefox has not granted access to youtube.com yet. Open the popup and click **Allow on YouTube**. |
 | Nothing happens on YouTube at all | Check the switch in the popup header; Alt+Shift+S may have turned Shisu-ko off. |
 | Badge says "subtitles are running in another tab" | One video is transcribed at a time. Click into this tab, or close the other one. |
-| Badge says "the speech is not in the subtitle language" | The server heard a minute of another language and stopped; it starts again when the subtitle language returns. For a video that really does mix languages, start the server with `--language-patience 0`. |
+| Badge says "the speech is not in the subtitle language" | Either YouTube declares this video's audio to be another language, in which case it was refused before it was downloaded, or the server heard a minute of another language and stopped, in which case it starts again when the subtitle language returns. For a video that really does mix languages, or one YouTube has mislabelled, start the server with `--language-patience 0`. |
 | Badge says "No speech found in this video" | The whole video, from its start, was transcribed and nothing was heard: a silent clip, an instrumental, a song Whisper does not hear as Japanese, or, with `--lyrics off`, any song. |
 | A music video shows no subtitles | Since 0.11.3 a window the speech detector hears next to nothing in (under a second of speech) is transcribed without it when its audio is not silent and Whisper hears Japanese in it, so sung lyrics appear. A video watched before that gets its lines on the next visit: the server transcribes it again where nothing was heard (a result saved by 0.11.2) or from the start (older results); nothing needs deleting from `~/.shisu-ko/cache`. A song Whisper does not hear as Japanese stays blank, as does loud non-speech (rain, a crowd, an engine). A server started with `--lyrics off` transcribes such windows with the detector as before, so a sung one stays blank. |
 | Badge says "Shisu-ko server offline" | Start `server\run.cmd` or `docker\up.cmd`, or click **Start server** in the popup. Check the server URL in the popup. |
 | **Start server** says "launcher not registered" | Run `server\setup.cmd` (Windows) or `bash server/setup.sh` once, or start the server by hand once: `run.cmd` / `run.sh` register the launcher with Firefox on every start. `run.cmd --check` prints "Start button launcher: registered at …" once it is. |
 | **Start server** says "Allow Shisu-ko to talk to its launcher …" | Firefox's permission prompt was declined. Click the button again and allow "Exchange messages with programs other than Firefox"; the permission is also under Add-ons and themes > Shisu-ko > Permissions and data. |
-| **Start server** says "No answer from the server after 90 s" | The launch did not lead to a listening server, or the server is still downloading or loading its model: the button starts the defaults, so a first start downloads the default model unless setup already did (large-v3 is 3 GB), and a CPU load takes minutes. Look at the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS) before clicking again; clicking again while it loads is harmless, the launcher reports it as already starting. If the server is up but the popup still says offline, the server URL under Anki, clips and server points elsewhere. |
+| **Start server** says "No answer from the server after 90 s" | The launch did not lead to a listening server, or the server is still downloading or loading its model: the button starts the defaults, so a first start downloads the default model unless setup already did (large-v3 is 3 GB, large-v3-turbo on a Mac about 1.6 GB), and a CPU load takes minutes. Look at the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS) before clicking again; clicking again while it loads is harmless, the launcher reports it as already starting. If the server is up but the popup still says offline, the server URL under Anki, clips and server points elsewhere. |
 | The banner or **Update** says the server cannot update itself | The server was not started by `run.cmd` / `run.sh` (Docker, Nix, `python server.py` by hand: it has no launcher to run `update.py` after the exit), was started with `--no-update` or `SHISUKO_NO_UPDATE`, or is a 0.8.0 server, which predates the button. The banner names the first of those causes whatever the actual one, because the server only reports that it cannot. Update it the way it was started: `docker compose build`, `nix run` with the new revision, or a plain restart of `run.cmd` / `run.sh`, which updates before every start. A `run.sh` that updated itself from before 0.9.0 keeps running its old loop, so its first server is refused too; restart `run.sh` once by hand (`run.cmd` reads its new loop as soon as it has updated and needs no restart). |
 | "The server restarted but still runs X; look at its window: update.py said why" | The launcher ran `update.py` but it could not update: local changes git would overwrite, a diverged branch, a detached HEAD, no network, or a release zip that could not be downloaded. Its message is in the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS); fix that and click **Update** again, or update by hand (`git pull`, or unpack the release). |
 | **Update** ends with "No answer from the server 120 s after the update" | The server exited for the update but nothing answered within two minutes: the new version is still loading its model (a CPU load takes minutes, and a new default model is downloaded first), or it did not start (the new version crashed, or `update.py` could not reinstall the requirements). Look at the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS). A server that is still loading answers by itself in a while and the popup's status line follows; otherwise fix what the log says and click **Start server**, which is back on the status line. |
@@ -619,7 +650,8 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | "The live stream has ended" | Reload the page once YouTube shows the recording; the server starts over on the video's clock. |
 | Server says "Only N MiB of GPU memory is free" or restarts by itself | Other programs (games, Wallpaper Engine, VR software) hold most of the VRAM. The server switches to int8 weights; with under about 2.5 GB free the display driver can reset under load (Windows logs LiveKernelEvent 141). Close GPU-heavy apps or type `kotoba-tech/kotoba-whisper-v2.0-faster` into the popup's model field. Cached cues survive restarts. |
 | CPU fallback, transcription far too slow | `run.cmd --check` should list one CUDA device; update the NVIDIA driver or type `small` into the popup's model field. On a Mac, `run.sh --check` should end with `Backend for --device auto: mlx`; if it says MLX is not usable, run `bash server/setup.sh` again (mlx-whisper needs Apple Silicon, not an Intel Mac). |
-| A word is wrong that the same model got right on another machine | The two backends do not always pick the same homophone: on an Apple GPU a word still slips now and then that faster-whisper gets right (線状降水帯 came out 線上降水帯). Both search five beams, so there is nothing to turn on; check that the server was not started with `--beam-size 1`, and `--device cpu` gives the CPU's answer at about half the speed. |
+| Subtitles fall further and further behind on a Mac, although the GPU is being used | The model is too large for the memory left over by the browser. large-v3 on an M1 Pro runs at half playback speed with one YouTube video playing, because the GPU's memory is the browser's memory. Type `large-v3-turbo` into the popup's model field; it is the default for new installs and runs at eight times playback speed with the browser open. |
+| A word is wrong that the same model got right on another machine | On a Mac, check the model first: the default there is large-v3-turbo, whose decoder is a quarter of large-v3's and which mishears about one word in twenty lines; type `large-v3` into the popup's model field if the machine can afford it. Beyond that the two backends do not always pick the same homophone (線状降水帯 came out 線上降水帯 on the GPU). Both search five beams, so there is nothing to turn on; check that the server was not started with `--beam-size 1`, and `--device cpu` gives the CPU's answer at about half the speed. |
 | Mining says "AnkiConnect denied access" | Click **Yes** in the dialog Anki shows, then mine again. |
 | Mining says the card has none of the fields | Set the image/audio field names in the popup to the fields of your note type. |
 | No screenshot, only audio | The video is DRM-protected; the browser refuses to read its frames. |

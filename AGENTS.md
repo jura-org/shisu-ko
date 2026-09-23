@@ -89,8 +89,17 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
 - A transcription backend is `transcribe()` and `detect_language()`, and nothing else in the server
   may know which one is loaded. `--device` names it, `resolve_device()` is the single place `auto`
   becomes one of `cuda`, `mlx` and `cpu`, and `canonical_model_name()` gives one set of weights one
-  name whatever backend holds them, so neither the cue cache nor the popup splits by backend. See
-  "How the Apple GPU works".
+  name whatever backend holds them, so neither the cue cache nor the popup splits by backend. The
+  built-in `--model` is the backend's, not the machine's alone: `default_model_for()` answers
+  `MLX_DEFAULT_MODEL` (large-v3-turbo) on the Apple GPU and `DEFAULT_MODEL` (large-v3) elsewhere,
+  and a model chosen at setup outranks both. See "How the Apple GPU works".
+- A video's language is settled before its audio, not after. `declared_language(info)` reads
+  YouTube's own `language` field; a video it names as something other than `--language` is refused
+  in `Fetcher.download_once()` before a byte is downloaded, and one it names as `--language` never
+  reaches the audio detector. The detector is the fallback for a video YouTube names nothing for,
+  and nothing else changed about it. A refusal writes the same session state the detector writes
+  and nothing to the cache. `--language-patience 0` must switch all of it off, the metadata refusal
+  included. See "How the server schedules work".
 - `enabled` in the settings is the master switch (the header toggle in the popup, Alt+Shift+S).
   Off must mean nothing happens on YouTube pages: no `/sync`, no overlay, no native-caption
   hiding, no arrow-key handling, no Anki polling, no mining (the cues outlive the switch, so
@@ -114,7 +123,7 @@ publish-addon.cmd  submits a version to the public AMO listing; docs/amo/ holds 
   faster-whisper's table, so that the choice outlives a failed or interrupted download and the
   first start fetches that model rather than the built-in default, after it for a repo id, which
   may be a typo or a PyTorch checkpoint; read by `parse_args()` (`resolve_default_model()`:
-  `--model`, else the config's model, else `DEFAULT_MODEL` large-v3; `read_config()` never
+  `--model`, else the config's model, else `default_model_for(args.device)`; `read_config()` never
   raises and ignores anything but a JSON object); Docker and Nix pass `--model` and never read
   it), plus what the Start
   button brought: `server-<port>.lock` (`hold_instance_lock()` /
@@ -297,12 +306,36 @@ own `--lyrics` and its record of the cache shape, `replay_cues.py` taking a lyri
 through the lyrics gates, and `dump_words.py` deciding the lyrics path per window (with
 `faster_whisper` faked in `sys.modules`) and marking the record.
 
-Language watch: when `--language-patience` is above 0 (default 60) every window's speech-only
-samples (`speech_samples()`, capped at 30 s) go through `model.detect_language()` before
-transcription. `language_vote()` is the pure state machine over `Session.foreign_seconds`,
-`heard` and `language_paused`: a foreign vote below the patience still transcribes, so one
-misdetection never costs a subtitle; at the patience the session pauses, and every planned window
-is then only listened to, until the target language is heard again.
+Language watch. YouTube goes first, the audio only where YouTube says nothing.
+
+`declared_language(info)` reads `info["language"]`, the default audio track the uploader declared,
+as a bare lowercase code (`en-US` -> `en`), else None. It was right on all four videos tested (`ja`,
+`ja`, `ja`, `en`), and it is the only field in the metadata worth reading: `automatic_captions`
+lists some 157 languages for every video, because YouTube offers to machine-translate its own
+transcript into all of them.
+
+A video YouTube names as something other than `--language`, with the patience above 0, is refused
+in `Fetcher.download_once()` before `process_ie_result`, so before one byte is downloaded.
+`Fetcher.fetch()` catches `ForeignLanguage` and writes the state the audio detector would have
+produced — `heard`, `language_paused`, `status: ready`, `duration` from `duration_hint` — so the
+overlay says what it always said and the extension needs no change. Verified on a running server: a
+TEDx talk refused one second after the sync, nothing written to the audio cache. It used to cost
+the whole download, the whole decode and 60 seconds of forced Japanese out of English speech before
+the patience ran out. A video whose audio is already cached never calls `download()` and so never
+meets this test; the detector below still covers it.
+
+A video YouTube names as `--language` never reaches the audio detector at all: `Transcriber.process()`
+asks `watch_language()` only while `s.declared_language != args.language`. That pass cost about
+1.0 s a window, and turbo does not shrink it, because turbo shrinks the decoder and detection is an
+encoder pass. The cost of trusting the declaration is that an English stretch inside a video
+YouTube calls Japanese is now transcribed as Japanese for its whole length.
+
+The audio detector stays, unchanged, as the fallback for a video YouTube names nothing for: every
+window's speech-only samples (`speech_samples()`, capped at 30 s) go through
+`model.detect_language()` before transcription. `language_vote()` is the pure state machine over
+`Session.foreign_seconds`, `heard` and `language_paused`: a foreign vote below the patience still
+transcribes, so one misdetection never costs a subtitle; at the patience the session pauses, and
+every planned window is then only listened to, until the target language is heard again.
 
 What a paused session listens to goes into `Session.probed`, never into `covered`, and `probed`
 is never written to the cache. That is the invariant that keeps a wrong pause cheap: `covered`
@@ -311,8 +344,8 @@ and go permanently blank. `planned_ranges()` is the union the planners walk; hea
 language again empties `probed` and offers that audio back. `lookahead_for()` keeps the probes
 within `LANGUAGE_PROBE_AHEAD` (90 s) of the playhead rather than `--lookahead`. A detector that
 raises is never what silences a video: the window is transcribed unjudged. `--language-patience 0`
-skips detection entirely and also refuses to restore a pause from the cache, so it really is the
-cure the README offers. `/sync` and `/sessions` report `heard` and `language_paused`; the cache
+skips detection entirely, skips the metadata refusal with it and refuses to restore a pause from
+the cache, so it really is the cure the README offers. `/sync` and `/sessions` report `heard` and `language_paused`; the cache
 stores them under `language_state`, discarded when `--language` changes. `retranscribe.py` sets
 the patience to 0. `server/tests/test_language.py` covers the rules with a scripted model.
 
@@ -348,8 +381,9 @@ the live cues and changes the session token so the client starts over on the vid
 The popup's `model` setting names the Whisper model the server should run; `--model` is only the
 default. The content script sends it with every `/sync` (`modelForSync()`, trimmed, empty for the
 default), and `App.request_model()` stores the wish: an empty name becomes the operator's
-`--model` (that is `--model`, else the model chosen at setup in `config.json`, else large-v3,
-resolved once in `parse_args()`; not validated, it may be a folder), an invalid name is not
+`--model` (that is `--model`, else the model chosen at setup in `config.json`, else this machine's
+built-in default: large-v3-turbo on the Apple GPU, large-v3 elsewhere, resolved once in
+`parse_args()`; not validated, it may be a folder), an invalid name is not
 stored (`model_state()` answers that request with `MODEL_NAME_HINT`), a valid one is stored as
 its canonical alias (`canonical_model_name()`, built lazily from `faster_whisper.utils._MODELS`:
 alias -> repo id -> first alias, so `large` and `Systran/faster-whisper-large-v3` are
@@ -421,10 +455,36 @@ GPU driver and no registry in the suite) and the text of `setup.cmd` / `setup.sh
 ## How the Apple GPU works
 
 CTranslate2 has no Metal backend, so on Apple Silicon faster-whisper decodes on the CPU. MLX runs
-the same Whisper weights on the GPU. Measured on an M1 Pro over 180 s of Japanese news audio, with
-identical windows and the identical cue pipeline: faster-whisper large-v3 on `--device cpu` (int8,
-beam size 5) at 2.3x realtime, MLX large-v3 (float16) at 5.0x with the same beam and 5.9x greedy,
-and the cores stay free for the video that is playing. Hence `--device auto` prefers it to the CPU.
+the same Whisper weights on the GPU and leaves the cores to the video that is playing. Hence
+`--device auto` prefers it to the CPU. Measured on an M1 Pro over 180 s of Japanese news audio,
+identical windows and identical cue pipeline, nothing else running: faster-whisper large-v3 on
+`--device cpu` (int8, beam size 5) at 2.3x realtime, MLX large-v3 (float16) at 5.0x with the same
+beam and 5.9x greedy.
+
+Measure with a browser playing a video or the number describes nothing, because the GPU's memory is
+the browser's memory. One 38 s window of Japanese conversation, M1 Pro, Chrome playing one YouTube
+video:
+
+| model | weights | idle | with Chrome playing |
+|---|---|---|---|
+| large-v3 | 2.9 GB | 13.0 s | 81.0 s (0.47x realtime) |
+| large-v3-turbo | 1.5 GB | 4.8 s | 4.8 s (7.9x realtime) |
+
+0.47x is below playback speed, so large-v3 on a Mac never catches the viewer up. The cause is
+memory, not GPU contention: compressed memory rose from 1.9 GB to 14.8 GB between the two large-v3
+runs, while Chrome works the GPU exactly as hard during the turbo runs, which cost 0.99x of their
+idle time. Turbo has 4 decoder layers against large-v3's 32. It pays one word for them: over that
+window both models write the same 22 lines, differing in `釣りあたり` where large-v3 heard
+`次あたり`.
+
+`MLX_DEFAULT_MODEL` (`large-v3-turbo`) therefore stands beside `DEFAULT_MODEL` (`large-v3`), and
+`default_model_for(device="auto")` chooses between them through `resolve_device()`.
+`resolve_default_model()` calls it, and a model chosen at setup still wins over the backend's
+default: the viewer who asked for large-v3 gets large-v3, on the Apple GPU too. `run_check(device)`
+reports whichever is built in, and `server.py --default-model` prints that name alone and exits,
+ignoring `config.json`, so `setup.sh` names its first menu choice by asking rather than by keeping
+a copy of the rule (`setup.cmd` is unchanged: there is no MLX on Windows). `retranscribe.py`'s
+`--model` follows the same default.
 
 `resolve_device()` is the single place `auto` is decided: `cuda` when there is an NVIDIA GPU, else
 `mlx` when `mlx_available()` (darwin, `mlx.core`, `mlx_whisper`, `mx.metal.is_available()`), else
@@ -515,6 +575,12 @@ never the backend.
 The beam does not buy parity with the CPU. In those 180 s it fixes two of greedy decoding's three
 slips (`経老` becomes `敬老`, the wrong figure `0.5%に上昇` becomes `0.2ポイント上昇`) and leaves
 one (`線上降水帯` where the CPU writes `線状降水帯`).
+
+What the beam costs depends on the audio, and one figure for it is a lie. It is about 15% on the
+read news speech above and about 90% on dense conversation: 15.1 s against 8.0 s greedy over the
+38 s window. The cost is per decoder step, and a conversational window holds roughly three times as
+many segments as a news one. The temperature fallback is the obvious suspect and it is innocent:
+pinning `temperature=[0.0]` left that window at 15.1 s against 17.0 s.
 
 `server/tests/test_mlx_beam.py` needs neither a Mac nor MLX: the decoder's `update()` and
 `finalize()` against scripted logits where greedy takes the locally better token and loses, the
@@ -1215,9 +1281,9 @@ already-parsed old `main()` has no register call), so it is the start after the 
 setup, that registers. In `run.cmd` the call sits on its own line before the
 `update.py ... & goto loop` line; in `run.sh` after the update, which rewrites the wrapper.
 `launch()` passes no arguments to the launcher: a server the button started runs on `server.py`'s
-defaults (`--model` from `config.json`, else large-v3; `--device auto`), and the popup's model
-setting only takes effect after that default model is loaded.
-`run_check()` in `server.py` loads `native_host.py` by path and prints `status_text()`.
+defaults (`--model` from `config.json`, else `default_model_for()`; `--device auto`), and the
+popup's model setting only takes effect after that default model is loaded.
+`run_check(device)` in `server.py` loads `native_host.py` by path and prints `status_text()`.
 
 Extension side: the popup's flow is `startFlow.state`, `idle -> requesting -> starting ->
 waiting -> idle` once `/health` answers, or `failed` with the reason on the detail line and the
@@ -1418,9 +1484,13 @@ because only the VAD uses it). `nix run .#check`, `nix run .#tests`, `nix build 
 `nix develop` for a shell with Python, web-ext, Node and Deno. `.#server-cpu` is the CUDA-free variant.
 Native server (Windows): `server\setup.cmd` once (it asks for large-v3 or small and downloads it),
 then `server\run.cmd [options]`.
-Native server (Linux/macOS): `bash server/setup.sh`, then `server/run.sh`.
+Native server (Linux/macOS): `bash server/setup.sh`, then `server/run.sh`. Its first menu choice is
+whatever `server.py --default-model` prints, so an Apple GPU is offered large-v3-turbo and every
+other machine large-v3.
 Diagnostics: `server\run.cmd --check` (also says which backend `--device auto` picks, whether the
 Start button's launcher is registered and which model a bare start runs).
+This machine's built-in default model: `server.py --default-model` prints it and exits, ignoring
+`config.json`, which is the choice it is about to be compared with.
 Music videos: `--lyrics auto` (default) transcribes a window the speech detector hears next to
 nothing in (under `LYRICS_MAX_SPEECH_S`, 1 s) without the detector when its audio is not silent
 and the language head hears the target language in it; `--lyrics off` transcribes such windows
@@ -1537,7 +1607,16 @@ that contains `#movie_player.html5-video-player > video` with `?v=<video id>` in
 - Reordering a beam's KV cache must skip the cross-attention half. Those keys and values come from
   the audio, so every beam of one audio holds the same ones and permuting them changes nothing;
   on large-v3 the copy is about 1.2 GB per decoded token, more than the search it serves is worth
-  (1.1x realtime with it, 4.1x without). `rearrange_self_attention_only()` in `mlx_beam.py`.
+  (1.1x realtime with it, 4.1x without, both on an idle machine).
+  `rearrange_self_attention_only()` in `mlx_beam.py`.
+- A speed measurement taken on an idle Mac describes nothing. The Apple GPU's memory is the
+  browser's memory, and the browser is where the video plays: large-v3 ran a 38 s window in 13 s
+  alone and 81 s with Chrome playing one video, which is below playback speed. Every MLX figure in
+  this file says whether a browser was running, and a new one must.
+- YouTube's `automatic_captions` says nothing about a video's language: it lists some 157 of them
+  for every video, because YouTube offers to machine-translate its own transcript into all of them.
+  The uploader's declared default audio track, `info["language"]`, is the field that means
+  something (`declared_language()`).
 - `mlx_whisper.audio.pad_or_trim()` pads with `mx.pad`, which refuses a numpy array, so anything
   shorter than the 30 s encoder window has to be an `mx.array` first. Every language probe is
   shorter, and this broke the whole language watch in silence: a detector that raises is never what

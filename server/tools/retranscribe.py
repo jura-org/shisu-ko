@@ -8,7 +8,8 @@ is what the live server would produce for the same video. Writes <video_id>.new.
     python server/tools/retranscribe.py 2q3XN2rYEGE --out /tmp/new
 
 --model follows the server's own default: the model chosen at setup (~/.shisu-ko/config.json),
-else large-v3, so a measurement without the flag runs the model the server runs.
+else this machine's built-in default, so a measurement without the flag runs the model the
+server runs (large-v3-turbo on an Apple GPU, large-v3 elsewhere).
 """
 from __future__ import annotations
 
@@ -46,7 +47,7 @@ def parse_args(argv=None):
     p.add_argument("video_ids", nargs="+")
     p.add_argument("--out", required=True, help="directory for the new cue and speech files")
     p.add_argument("--cache", default=str(server.CACHE_DIR), help="directory holding <video_id>.<ext> audio")
-    p.add_argument("--model", default=None, help="Whisper model (default: the model chosen at setup (config.json), else large-v3)")
+    p.add_argument("--model", default=None, help="Whisper model (default: the model chosen at setup (config.json), else this machine's built-in default: large-v3-turbo on an Apple GPU, large-v3 elsewhere)")
     p.add_argument("--device", default="auto")
     p.add_argument("--compute-type", default="auto")
     p.add_argument("--language", default="ja")

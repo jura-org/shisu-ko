@@ -85,6 +85,13 @@ MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}(/[A-Za-z0-9][A-Za-
 MODEL_NAME_HINT = ("not a model name: use a faster-whisper size (large-v3, large-v3-turbo, small, ...) "
                    "or a Hugging Face repo id like owner/name")
 DEFAULT_MODEL = "large-v3"  # --model when neither the flag nor config.json names one
+# ... except on the Apple GPU, where large-v3's 2.9 GB of weights share unified memory with the
+# browser the viewer is watching in. Once they no longer fit, every decoder step pages them:
+# measured on an M1 Pro, one window took 13 s with nothing else running and 81 s with Chrome
+# playing a single video, which is below real time and no use to anyone. large-v3-turbo has four
+# decoder layers instead of thirty-two and 1.5 GB of weights, so it fits and stays at 7.9x real
+# time with the browser running, for one misheard word in the twenty-two lines of that window.
+MLX_DEFAULT_MODEL = "large-v3-turbo"
 CACHE_FORMAT = 3  # bumped when cue fields change; older caches are ignored and transcribed again
 SPEECH_SYNC_BACK = 30.0   # seconds of speech intervals sent behind the playhead
 SPEECH_SYNC_AHEAD = 120.0  # ... and ahead of it
@@ -1012,6 +1019,9 @@ class Session:
     foreign_seconds: float = 0.0
     heard: Optional[str] = None
     language_paused: bool = False
+    # What YouTube states the default audio track is (declared_language()), or None when it states
+    # nothing. Equal to --language means the audio detector never has to run for this video.
+    declared_language: Optional[str] = None
     # Windows a paused session has only listened to. Kept apart from `covered` and never written
     # to the cache: when the language comes back they are forgotten, so a wrong pause costs a
     # second listen instead of leaving the video permanently blank.
@@ -1295,6 +1305,29 @@ def stream_bytes_per_second(hook_data: dict, fallback_abr: float) -> float:
     return float(abr) * 1000.0 / 8.0
 
 
+class ForeignLanguage(Exception):
+    """YouTube says this video is not the subtitle language, so nothing of it is fetched."""
+
+    def __init__(self, language: str):
+        super().__init__(language)
+        self.language = language
+
+
+def declared_language(info) -> Optional[str]:
+    """The language YouTube states for a video's default audio track, as a bare code, or None.
+
+    yt-dlp passes the uploader's declaration through as `language`; it is a plain two-letter code
+    or a tagged one (en-US). Only the primary subtag is compared, since the target is a Whisper
+    language code. Nothing else in the metadata is worth asking: `automatic_captions` lists some
+    157 languages for every video, because YouTube offers to machine-translate its own transcript
+    into all of them, so the keys say nothing about what was spoken.
+    """
+    value = info.get("language") if hasattr(info, "get") else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip().replace("_", "-").split("-")[0].lower() or None
+
+
 class Fetcher:
     def __init__(self, args):
         self.args = args
@@ -1342,7 +1375,20 @@ class Fetcher:
             path = find_cached_audio(s.video_id)
             if path is None:
                 log.info("[%s] downloading audio", s.video_id)
-                path = self.download(s)
+                try:
+                    path = self.download(s)
+                except ForeignLanguage as foreign:
+                    # The same two fields the audio detector sets, so the overlay says the same
+                    # thing; ready with no cues, because there is nothing more to wait for.
+                    with s.lock:
+                        s.heard = foreign.language
+                        s.language_paused = True
+                        s.duration = s.duration_hint
+                        s.status = "ready"
+                    log.info("[%s] YouTube calls this video %s, not %s; nothing is transcribed%s",
+                             s.video_id, foreign.language, self.args.language,
+                             f": {s.title}" if s.title else "")
+                    return
                 if path is None:
                     self.follow_live(s)  # returns when the stream ends or nobody watches any more
                     return
@@ -1483,9 +1529,16 @@ class Fetcher:
             info = ydl.extract_info(url, download=False)
             hint, abr = info.get("duration"), info.get("abr")
             state["abr"] = float(abr) if isinstance(abr, (int, float)) else 0.0
+            language = declared_language(info)
             with s.lock:
                 s.title = info.get("title") or ""
                 s.duration_hint = float(hint) if isinstance(hint, (int, float)) else 0.0
+                s.declared_language = language
+            # Before a single byte: a video YouTube itself calls another language would otherwise
+            # cost the whole download and decode, and sixty seconds of forced Japanese out of
+            # English speech, before the audio detector's patience ran out.
+            if language is not None and language != self.args.language and self.args.language_patience > 0:
+                raise ForeignLanguage(language)
             if info.get("is_live"):
                 return None
             try:
@@ -2016,15 +2069,31 @@ class Transcriber(threading.Thread):
             log.warning("[%s] VAD failed (%s); treating the whole window as speech", s.video_id, exc)
             speech = [[start, end]]
 
-        # Detection costs an encoder pass, so --language-patience 0 must not reach it at all.
+        # Detection costs an encoder pass of its own, about a second a window on large-v3 and the
+        # same on turbo, whose smaller decoder does not shrink the encoder. It buys nothing on a
+        # video YouTube has already named: declared_language() agreed with --language before the
+        # audio was fetched, and a video that disagreed was never fetched at all. So it runs only
+        # where it is still the only evidence there is, which is a video YouTube names nothing for.
         wanted = True
         if float(getattr(args, "language_patience", 0.0) or 0.0) > 0:
-            try:
-                wanted = self.watch_language(s, audio, speech, start, end)
-            except Exception:  # noqa: BLE001
-                # Between setting s.busy and the transcribe call nothing may raise: the window
-                # would be replanned for ever with busy stuck on it.
-                log.exception("[%s] language watch failed; transcribing the window", s.video_id)
+            if s.declared_language != args.language:
+                try:
+                    wanted = self.watch_language(s, audio, speech, start, end)
+                except Exception:  # noqa: BLE001
+                    # Between setting s.busy and the transcribe call nothing may raise: the window
+                    # would be replanned for ever with busy stuck on it.
+                    log.exception("[%s] language watch failed; transcribing the window", s.video_id)
+            elif s.language_paused:
+                # YouTube names this video the target language, so a pause the detector left
+                # behind has nothing behind it any more: a cache written before the metadata was
+                # read, or before this version. language_vote() is the only other thing that
+                # lifts a pause and it no longer runs here, so without this the video stays
+                # blank for ever.
+                with s.lock:
+                    s.language_paused, s.heard, s.foreign_seconds, s.probed = False, None, 0.0, []
+                log.info("[%s] YouTube calls this video %s; lifting the pause left in its cache",
+                         s.video_id, s.declared_language)
+                self.app.save_cache(s)
         if not wanted:
             with s.lock:
                 # Heard, not written. This goes to `probed`, not `covered`: the planner moves on,
@@ -3461,18 +3530,25 @@ def configured_model():
     return chosen if isinstance(chosen, str) and chosen else None
 
 
-def resolve_default_model(args):
-    """Fill in --model when the flag was not given: the model chosen at setup, else DEFAULT_MODEL.
+def default_model_for(device: str = "auto") -> str:
+    """The built-in --model for the backend that will run it; see MLX_DEFAULT_MODEL for why it differs."""
+    return MLX_DEFAULT_MODEL if resolve_device(device) == "mlx" else DEFAULT_MODEL
 
+
+def resolve_default_model(args):
+    """Fill in --model when the flag was not given: the model chosen at setup, else this machine's default.
+
+    A choice made at setup wins over the backend's default, on the Apple GPU too: the viewer who
+    asked for large-v3 gets large-v3, and the popup says how it is doing.
     Docker and Nix pass --model (WHISPER_MODEL) and never read config.json. Like the flag, the
     configured name is not validated: it may be a folder, which is the operator's to name.
     """
     if not args.model:
-        args.model = configured_model() or DEFAULT_MODEL
+        args.model = configured_model() or default_model_for(getattr(args, "device", "auto"))
     return args
 
 
-def run_check() -> None:
+def run_check(device: str = "auto") -> None:
     print(f"Python {sys.version.split()[0]} at {sys.executable}")
     print(f"Data directory: {APP_DIR}")
     print(f"NVIDIA library directories registered: {len(NVIDIA_DIRS)}")
@@ -3515,7 +3591,7 @@ def run_check() -> None:
     models = sorted(p.name for p in MODELS_DIR.glob("models--*")) if MODELS_DIR.is_dir() else []
     print("Downloaded models: " + (", ".join(models) if models else "none yet (setup or the first start downloads one)"))
     chosen = configured_model()
-    print(f"Default model: {chosen or DEFAULT_MODEL} " + ("(chosen at setup)" if chosen else "(built-in default)"))
+    print(f"Default model: {chosen or default_model_for(device)} " + ("(chosen at setup)" if chosen else "(built-in default)"))
     # The native-messaging host behind the popup's "Start server" button lives next to this file;
     # loaded by path so a missing or broken native_host.py only costs this one line.
     try:
@@ -3563,6 +3639,8 @@ def parse_args(argv=None):
     p.add_argument("--allow-remote-ejs", action="store_true", help="let yt-dlp fetch updated challenge-solver scripts from GitHub")
     p.add_argument("--log-level", default="INFO")
     p.add_argument("--check", action="store_true", help="print environment diagnostics and exit")
+    p.add_argument("--default-model", action="store_true",
+                   help="print this machine's built-in default model and exit, ignoring config.json; setup asks this rather than keeping a copy of the rule")
     p.add_argument("--download-model", metavar="NAME", help="download NAME now, showing progress, and make it the default model for later starts; used by setup")
     p.add_argument("--no-update", action="store_true", help="start without looking for a newer version first (run.cmd / run.sh skip server/update.py) and refuse the popup's Update button (POST /update answers 409), since the launcher would restart the server without updating")
     return resolve_default_model(p.parse_args(argv))
@@ -3585,8 +3663,13 @@ def main() -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
+    if getattr(args, "default_model", False):
+        # The built-in default, not what a start would load: setup.sh reads this to name the
+        # choice it is about to offer, and config.json is what that choice will write.
+        print(default_model_for(args.device))
+        return
     if args.check:
-        run_check()
+        run_check(args.device)
         return
     if getattr(args, "download_model", None) is not None:
         sys.exit(run_download_model(args.download_model, args.device))

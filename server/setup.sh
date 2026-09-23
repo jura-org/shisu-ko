@@ -22,17 +22,24 @@ fi
 "${VENV}/bin/python" "${HERE}/server.py" --check
 
 # The model the server starts with, downloaded now so the first start is not the wait; the popup
-# can switch to another one later. The check above said whether there is a CUDA device. An EOF on
-# read (stdin closed or redirected from an empty file) takes large-v3 instead of asking forever;
-# `yes 1 | bash setup.sh` picks it the same way.
+# can switch to another one later. The check above said whether there is a CUDA device. The first
+# choice is whatever a bare start would load here, asked of server.py rather than spelled out
+# again: on the Apple GPU that is large-v3-turbo, which fits beside the browser, and elsewhere
+# large-v3. An EOF on read (stdin closed or redirected from an empty file) takes it instead of
+# asking forever; `yes 1 | bash setup.sh` picks it the same way.
+BEST="$("${VENV}/bin/python" "${HERE}/server.py" --default-model 2>/dev/null || echo large-v3)"
+case "$BEST" in
+  large-v3-turbo) BEST_LINE="large-v3-turbo  about 1.6 GB, the one that keeps up on an Apple GPU beside a browser";;
+  *)              BEST_LINE="large-v3        best quality, about 3 GB, wants a GPU with 4 GB or more free";;
+esac
 echo
 echo "Which Whisper model should the server use? (the popup can switch later)"
-echo "  1  large-v3  best quality, about 3 GB, wants a GPU with 4 GB or more free"
-echo "  2  small     about 500 MB, fine on a CPU, less accurate"
+echo "  1  ${BEST_LINE}"
+echo "  2  small           about 500 MB, fine on a CPU, less accurate"
 while :; do
   read -r -p "Type 1 or 2: " pick || pick=1
   case "$pick" in
-    1) MODEL=large-v3; break;;
+    1) MODEL="$BEST"; break;;
     2) MODEL=small; break;;
   esac
 done
