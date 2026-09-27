@@ -75,14 +75,32 @@ requires 2-Step Verification on that account for publishing and updating items.
    refuses to create a key, the project sits in an organization that forbids keys (the policy
    `iam.disableServiceAccountKeyCreation`, the default for organizations created since
    3 May 2024); a project under **No organization** has no such policy.
-6. Link the account to the publisher: open the Developer Dashboard,
-   https://chrome.google.com/webstore/devconsole, with the same Google account (if it belongs to
-   more than one publisher, switch to Shisu-ko's first), go to **Account**, paste the service
-   account's email address into the **Service account** field and click **Add a service account**.
-   A publisher takes only one service account.
-7. Copy the publisher id: the same **Account** page shows it as **Publisher ID** under **Profile**
-   (Google's API guide calls the place **Publisher** > **Settings**), and it is the id in the
-   Dashboard's address, `https://chrome.google.com/webstore/devconsole/<publisher id>`.
+6. Link the account to Shisu-ko's publisher. Open the Developer Dashboard,
+   https://chrome.google.com/webstore/devconsole, with the same Google account. First pick the
+   publisher that owns Shisu-ko in the **Publisher** pull-down at the top right, since a Google
+   account can belong to more than one and the service account works for the one it is added to
+   alone, and check that **PUBLISHER** > **Items** in the menu on the left lists Shisu-ko. Then
+   open that publisher's own settings page, **PUBLISHER** > **Settings**, the page that also shows
+   its **Publisher ID**. In its **Service account** section, paste the service account's email
+   address into the box **Enter an email address** and click **Add a service account**. A
+   publisher takes only one service account.
+
+   Not **Create a new publisher**: the **ACCOUNT** > **Profile** page has a section **Publisher
+   creation** (German **Erstellung von Publishern**) whose button **Create a new publisher**
+   (**Neuen Publisher erstellen**) makes a second, empty publisher, whatever address is typed
+   there, and links nothing to Shisu-ko's. A Google account may create a new publisher once, and
+   deleting that publisher does not give the chance back. If it happened anyway, nothing is
+   broken: Shisu-ko and its publisher are as they were, and the new publisher owns no item. The
+   allowance is spent either way, so leave the empty publisher, or pick it in the pull-down and
+   rename it on its own **PUBLISHER** > **Settings** page so that it is not mistaken for
+   Shisu-ko's; then pick Shisu-ko's publisher again and add the service account as above. Never
+   use **Delete developer account**: it deletes the developer account, not one publisher.
+   Deleting a publisher cannot be undone and deletes the one picked in the pull-down, so do it, if
+   at all, only with the empty publisher picked there and its **PUBLISHER** > **Items** empty.
+7. Copy the publisher id: the same **PUBLISHER** > **Settings** page shows it as **Publisher ID**,
+   with Shisu-ko's publisher still picked in the **Publisher** pull-down (every publisher has an id
+   of its own, and the workflow needs the one of the publisher that owns Shisu-ko). It is also the
+   id in the Dashboard's address, `https://chrome.google.com/webstore/devconsole/<publisher id>`.
 8. Store both in the repository. On GitHub, open jura-org/shisu-ko > **Settings** > **Secrets and
    variables** (in the sidebar's **Security** section) > **Actions**. On the **Secrets** tab click
    **New repository secret**, enter the name `CWS_SERVICE_ACCOUNT_JSON`, paste the whole content of
@@ -164,8 +182,9 @@ JSON` or `the token request failed: HTTP 400 ...`.
   older version or its review is cancelled, and for a staged version that means someone publishes
   it in the Dashboard. To withdraw the older review instead:
   `gh workflow run cws-listing.yml -R jura-org/shisu-ko -f cancel_review=true`. When that run
-  fails, its log says whether the review was cancelled first: if it was, the schedule takes over;
-  if not, run it again.
+  fails, its log says whether the review was cancelled first. If not, run it again. If it was, the
+  failure is one of those under *When a request failed* below: if the Dashboard's **Package** tab
+  holds the version as a draft, submit it there by hand; if not, the schedule takes over.
 - **staged** (warning): this version passed its review and waits to be published, which happens
   only when someone submitted it in the Dashboard with publishing deferred. Publish it there within
   30 days, after which it returns to a draft that needs a new review.
@@ -182,7 +201,7 @@ JSON` or `the token request failed: HTTP 400 ...`.
   workflow submits nothing until it is back. Read why in the Dashboard and in the store's email,
   then appeal there, or fix it in a release and upload that release's
   `shisu-ko-<version>-chrome.zip` in the Dashboard by hand (**Package** > **Upload New Package**,
-  then **Submit for Review**).
+  then **Submit for review**).
 - **No key** (warning on a release, `this release did not go to the Chrome Web Store`; error on a
   run by hand): set up the key as above, then run the workflow by hand.
 
@@ -195,24 +214,31 @@ why)`; before that, GitHub's own `Process completed with exit code 1` (or 2) sta
 
 - The token request or `fetchStatus` failed: the sign-in did not work. Check that the secret holds
   the whole key file, that the key still exists and is enabled on the account's **Keys** tab, that
-  the Chrome Web Store API is enabled in its project, that the Dashboard's **Account** page lists
-  the service account, and that `CWS_PUBLISHER_ID` is the publisher id.
-- The upload failed: nothing reached the store. Fix what it refused; the schedule tries again within
-  three hours, or run the workflow by hand.
+  the Chrome Web Store API is enabled in its project, and, with Shisu-ko's publisher picked in the
+  Dashboard's **Publisher** pull-down, that its **PUBLISHER** > **Settings** page lists the service
+  account under **Service account** and shows `CWS_PUBLISHER_ID` as its **Publisher ID** (steps 6
+  and 7).
+- The upload failed (`the upload failed: ...`): look at the Dashboard's **Package** tab first. If
+  it holds the version as a draft, an earlier run's publish failed, and the store refuses the same
+  version as a new upload: submit that draft there by hand, as in the publish case below. If it
+  does not, nothing reached the store. Fix what it refused; the schedule tries again within three
+  hours, or run the workflow by hand.
 - The store was still reading the upload when the wait ended (`the upload is still IN_PROGRESS
   after 300 s: not submitting it`): the zip did reach the store, and the store may finish reading
   it afterwards. Look at the Dashboard's **Package** tab. If it holds the version as a draft, submit
-  it there by hand (**Submit for Review**), as in the next case, since the store refuses the same
+  it there by hand (**Submit for review**), as in the next case, since the store refuses the same
   version as a new upload. If it does not, the schedule uploads it again within three hours, or run
   the workflow by hand.
-- The upload went in and the publish failed, for example over something the Dashboard wants for
-  this version, such as a permission's justification in the **Privacy** tab: the Dashboard now
-  holds the version as a draft, and the store refuses the same version as a new upload, so every
-  later run fails the same way. Fix what it names in the Dashboard and submit the draft there by
-  hand (**Submit for Review**).
+- The upload went in and the publish failed (`publish failed: ...`), for example over something
+  the Dashboard wants for this version, such as a permission's justification in the **Privacy**
+  tab: the Dashboard now holds the version as a draft, and the store refuses the same version as a
+  new upload, so every later run, the schedule's too, fails at the upload (`the upload failed:
+  ...`) and nothing tries again by itself. Fix what it names in the Dashboard and submit the draft
+  there by hand (**Submit for review**).
 
-When the submission that failed was one past a rejected older version, the schedule does not try
-again at all: once the cause is fixed, run the workflow by hand.
+When the upload failed on a submission past a rejected older version, the schedule does not try
+again at all: once the cause is fixed, run the workflow by hand. A failed publish is submitted in
+the Dashboard as above, whatever came before it.
 
 ## Keeping the key safe
 
@@ -245,8 +271,11 @@ Developer Dashboard and stays as it is there until someone changes it by hand:
 - **Distribution**: the visibility (public, unlisted or private) and the regions. The API always
   publishes with the visibility of the last publish: after a change of visibility in the Dashboard,
   the API cannot publish until one version has been published there by hand with the new setting.
-- **Account**: the service account (step 6) and the email notifications. Rejection and take-down
-  emails are on by default; emails for a published or staged version can be turned on there.
+- **PUBLISHER** > **Settings**, with Shisu-ko's publisher picked in the **Publisher** pull-down:
+  the service account (step 6) and the **Publisher ID** (step 7). Not **ACCOUNT** > **Profile**,
+  whose **Create a new publisher** makes a second, empty publisher (step 6).
+- The email notifications: rejection and take-down emails are on by default; emails for a
+  published or staged version can be turned on in the Dashboard's settings.
 
 ## Store rules
 
@@ -259,7 +288,8 @@ Developer Dashboard and stays as it is there until someone changes it by hand:
   `build.test.mjs` also holds the manifest's name within 75 characters and its description within
   132 (it has 131).
 - One submission is reviewed at a time, and a staged version returns to a draft after 30 days. A
-  publisher can cancel six reviews a day and link one service account.
+  publisher can cancel six reviews a day and link one service account. A Google account can create
+  a new publisher once, and deleting that publisher does not give it back (step 6).
 
 ## When the schedule is switched off
 
