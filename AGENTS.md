@@ -300,6 +300,11 @@ Full process: `docs/dev/updates-and-release.md`.
   (`gh workflow run amo-listing.yml -f tag=v<version>`) for the newest release only, never by a tag.
 - web-ext runs pinned to one exact version (`web-ext@10.7.0`) in every workflow and in
   `publish-addon.cmd` / `sign-addon.cmd`.
+- The actions run on Node 24, one major each across the workflows: `actions/checkout@v7`,
+  `actions/setup-node@v7`, `actions/setup-python@v7`, `actions/upload-artifact@v7`,
+  `softprops/action-gh-release@v3`. A new action gets its first Node 24 major in
+  `release-workflows.test.mjs`. setup-node sets `package-manager-cache: false` in every job that
+  holds a key or writes to the releases.
 - Every release goes to the Chrome Web Store by itself: `.github/workflows/cws-listing.yml` uploads
   the release's own Chrome zip (the highest release, never rebuilt) through `scripts/cws.mjs`,
   store API v2 only, with the repository secret `CWS_SERVICE_ACCOUNT_JSON` and the repository
