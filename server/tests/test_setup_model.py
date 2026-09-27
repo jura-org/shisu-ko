@@ -488,7 +488,8 @@ def test_setup_cmd_asks_then_downloads_then_says_it_is_done():
     download = index_of(lines, lambda l: l == '"%VENV%\\Scripts\\python.exe" "%~dp0server.py" --download-model %MODEL%', "download")
     done = index_of(lines, lambda l: l == "echo Close this window and start run.cmd.", "the last line")
     cookies = index_of(lines, lambda l: l == '"%VENV%\\Scripts\\python.exe" "%~dp0server.py" --setup-cookies', "--setup-cookies")
-    assert check < choice < pick < cookies < download < done
+    amd = index_of(lines, lambda l: "amd_setup.py" in l and not l.startswith("REM"), "amd_setup.py")
+    assert check < choice < pick < cookies < download < amd < done
     # choice's errorlevel is the key's number, or 255 when it cannot read one (stdin closed or
     # empty), and "if errorlevel N" means N or more: 3 is tested first, so that 255 takes large-v3
     # like setup.sh's EOF fallback, then 2; the pick is the first thing after choice that looks at
@@ -507,6 +508,18 @@ def test_setup_cmd_asks_then_downloads_then_says_it_is_done():
     assert [l for l in lines[done + 1:] if l] == ["pause"]
     assert not any("downloaded on the first start" in l for l in lines)
     assert any("1  large-v3" in l for l in lines) and any("2  small" in l for l in lines)
+    # The AMD engine's offer runs once the model is there, with the venv's Python and nothing on
+    # its command line, on a line of its own after the download's failure block has closed: only
+    # comments and blank echoes lie between them, so no if-block holds it. Nothing after it reads
+    # its errorlevel or leaves early, so neither a no nor a failure there can end the setup short
+    # of "Setup is complete".
+    assert lines[amd] == '"%VENV%\\Scripts\\python.exe" "%~dp0amd_setup.py"'
+    closed = failed + 5
+    assert lines[closed] == ")" and closed < amd
+    assert all(l.startswith("REM ") or l == "echo." for l in lines[closed + 1:amd])
+    assert lines[amd + 1:done - 1] == ["echo."]
+    after = [l.lower() for l in lines[amd + 1:]]
+    assert not any("errorlevel" in l or "exit" in l or "goto" in l for l in after)
 
 
 def test_setup_sh_asks_then_downloads_then_says_it_is_done():
@@ -524,13 +537,30 @@ def test_setup_sh_asks_then_downloads_then_says_it_is_done():
     failed = text.index('echo "The model could not be downloaded. Check the connection and run setup.sh again,"\n'
                         '  echo "or start ./run.sh: the server then downloads $MODEL itself, without a progress bar."')
     exit_line = text.index("exit 1", failed)
+    closed = text.index("\nfi\n", exit_line)
+    # The AMD engine's offer: its own line, after the download's if-block has closed, and `|| true`
+    # so that under set -e neither a failure nor a crash in it ends the setup before its last lines.
+    amd_call = '\n"${VENV}/bin/python" "${HERE}/amd_setup.py" || true\n'
+    amd = text.index(amd_call)
+    calls = [l for l in text.splitlines() if "amd_setup.py" in l and not l.startswith("#")]
+    assert calls == [amd_call.strip("\n")], "amd_setup.py is called once, with the venv's Python and no arguments"
     complete = text.index('echo "Setup is complete: the $MODEL model is downloaded and everything is ready."')
     last = text.index('echo "Close this window and start ./run.sh."')
-    assert check < loop < read < large < small < done_loop < cookies < download < failed < exit_line < complete < last
+    assert check < loop < read < large < small < done_loop < cookies < download < failed < exit_line < closed < amd < complete < last
+    between = text[closed + len("\nfi\n"):amd].splitlines()
+    assert all(l.startswith("#") or l == "echo" for l in between), "nothing but comments and a blank line before it"
+    assert text[amd + len(amd_call):complete] == "echo\n"
     assert text.rstrip("\n").endswith('echo "Close this window and start ./run.sh."')
     assert "downloaded on the first start" not in text
     assert "1  large-v3" in text and "2  small" in text
     assert "also downloads it on its first start" not in text and not any("also downloads it" in l for l in cmd_lines())
+
+
+def test_the_amd_helper_both_setups_call_is_there():
+    # Neither setup looks at the call's verdict, so a missing file would only print Python's
+    # "can't open file" and go on to "Setup is complete": its absence shows here instead.
+    assert (SERVER_DIR / "amd_setup.py").is_file()
+    assert '"%~dp0amd_setup.py"' in "\n".join(cmd_lines()) and '"${HERE}/amd_setup.py"' in sh_text()
 
 
 def test_setup_scripts_offer_the_same_two_models():

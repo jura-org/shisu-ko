@@ -3,7 +3,8 @@
 # the loop the popup's Update button relies on: register, update, start the server with
 # SHISUKO_LAUNCHER=1, and after an exit with code 4 update again (which replaces run.sh with a
 # longer file while it runs), register again and start again, until the server exits 0.
-# Then it runs the real server/setup.sh unattended against stubs, as `yes 1 | bash setup.sh`.
+# Then it runs the real server/setup.sh unattended against stubs, as `yes 1 | bash setup.sh`,
+# with an amd_setup.py that fails, which must not keep the setup from finishing.
 # Only stdlib Python, bash and a scratch HOME are needed; nothing outside the temp directory
 # is touched. Usage: bash scripts/launcher-smoke.sh   (exit 0 = every step happened in order)
 set -euo pipefail
@@ -98,6 +99,23 @@ if args == ["--setup-cookies"]:
     line += f" answers={answers}"
 Path(os.environ["SMOKE_LOG"]).open("a").write(line + "\n")
 EOF
+# The AMD engine's offer comes after the model download and before the last line. The stub asks
+# its question as amd_setup.py does, where it finds a card, logs how many answers it read (0: the
+# EOF setup.sh gives an unattended run, not the "1" of `yes`), and then fails, as a crash would:
+# setup.sh must still say it is complete and end with 0.
+cat > "$SETUP/amd_setup.py" <<'EOF'
+import os, sys
+from pathlib import Path
+print("amd_setup stub: fails on purpose")
+answers = 0
+try:
+    input("Download the AMD engine? [y/N] ")
+    answers = 1
+except EOFError:
+    pass
+Path(os.environ["SMOKE_LOG"]).open("a").write(f"amd_setup args={' '.join(sys.argv[1:])} answers={answers}\n")
+sys.exit(1)
+EOF
 
 # Without pipefail the status is setup.sh's, not that of `yes` ending on the closed pipe.
 set +o pipefail
@@ -108,8 +126,13 @@ cat "$SETUP_LOG"
 expected="register args=--register --verbose
 server args=--check
 server args=--setup-cookies answers=0
-server args=--download-model large-v3"
+server args=--download-model large-v3
+amd_setup args= answers=0"
 if [ "$code" -ne 0 ]; then echo "FAIL: setup.sh should end with 0"; cat "$WORK/setup.out"; exit 1; fi
-if [ "$(cat "$SETUP_LOG")" != "$expected" ]; then echo "FAIL: setup.sh did not run these steps, the cookie question ending at an EOF:"; echo "$expected"; exit 1; fi
+if [ "$(cat "$SETUP_LOG")" != "$expected" ]; then echo "FAIL: setup.sh did not run these steps, the cookie and AMD questions ending at an EOF:"; echo "$expected"; exit 1; fi
 grep -q "Setup is complete: the large-v3 model is downloaded" "$WORK/setup.out" || { echo "FAIL: setup.sh did not say it is complete"; exit 1; }
-echo "OK: setup.sh under \`yes 1\` picks large-v3, gives the cookie question an EOF and finishes"
+# A grep that finds nothing must reach the FAIL line below, not end the script under pipefail.
+amd_at="$(grep -n "^amd_setup stub: fails on purpose" "$WORK/setup.out" | cut -d: -f1 || true)"
+done_at="$(grep -n "^Setup is complete:" "$WORK/setup.out" | cut -d: -f1)"
+if [ -z "$amd_at" ] || [ "$amd_at" -ge "$done_at" ]; then echo "FAIL: setup.sh did not offer the AMD engine before its last lines"; cat "$WORK/setup.out"; exit 1; fi
+echo "OK: setup.sh under \`yes 1\` picks large-v3, gives the cookie and AMD questions an EOF, and finishes when amd_setup.py fails"
