@@ -83,7 +83,25 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   its canonical alias (`canonical_model_name()`: `large`, `Systran/faster-whisper-large-v3` and
   `large-v3` are one model) and resolved through `faster_whisper.download_model()` before it is
   loaded. A raw client string must never reach `WhisperModel()`, which also opens local
-  directories; only the operator's `--model` may be a folder, and it skips the download.
+  directories; only the operator's `--model` may be a folder, and it skips the download. A
+  Kitsune name (`kitsune_name()`: a `KITSUNE_REPOS` base plus an optional precision) is reduced to
+  `base` or `base-<short precision>` and resolved through `kitsune_download_plan()` to its repo and
+  folder; `kitsune_engine.load()` gets only the folder that download returned, or the operator's
+  `--model` folder (`is_kitsune_model()` reads its `config.json`).
+- `server.py` imports without PyTorch (it touches torch only lazily: `kitsune_runtime_line()` for
+  `--check`, `release_torch_memory()` through `sys.modules`). The models' code lives in `server/kitsune_engine.py`,
+  loaded by path (`kitsune_engine()`, registered in `sys.modules` before `exec_module`), which
+  imports them only inside the functions that load and run a model: its pure helpers (unpacking,
+  timings, chunks, segments) and `test_kitsune.py` need numpy alone, as CI has.
+  `server/kitsune_setup.py` is stdlib only and never imports `server.py`. Without torch a Kitsune
+  name is refused before its download (`kitsune_runtime_missing()`, `KITSUNE_INSTALL_HINT`).
+- A Kitsune model is Japanese only: `load_kitsune_model()` refuses another `--language`, and the
+  model says `detects_language`, `sings` and `takes_prompt` are False. `process()` then skips the
+  language watch, never takes the lyrics path nor leaves unsung stretches uncovered, and
+  `transcribe_options()` passes no initial prompt, so `retry_prompt_skips()` never decodes twice;
+  `dump_words.py` reads the same flags and helper. Quantised weights are unpacked at load (16-bit
+  on a GPU, fp32 on the CPU), so every precision runs everywhere and the W8A8 / W4A4 activations stay 16-bit; the
+  `-w8a8` and `-w8a16` spellings (byte-identical files) are one model and one cue cache.
 - `enabled` in the settings is the master switch (the header toggle in the popup, Alt+Shift+S). Off
   must mean nothing happens on YouTube pages: no `/sync`, no overlay, no native-caption hiding, no
   arrow-key handling, no Anki polling, no mining (the cues outlive the switch, so Alt+Shift+M would
