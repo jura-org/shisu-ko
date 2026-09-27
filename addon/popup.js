@@ -11,8 +11,8 @@ const YOUTUBE_ORIGINS = ["*://www.youtube.com/*", "*://m.youtube.com/*", "*://yo
 // The server's own rule for a model name (MODEL_NAME_RE in server.py), mirrored for an early hint
 // only: the server decides, and a name the rule refuses would otherwise be taken for a directory.
 const MODEL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}(\/[A-Za-z0-9][A-Za-z0-9._-]{0,95})?$/;
-const MODEL_HINT = "Applies while a video plays. A model not downloaded yet is fetched from Hugging Face on first use (faster-whisper/CTranslate2 format only).";
-const MODEL_NAME_HINT = "Use a model size such as large-v3 or a Hugging Face repo id such as owner/name";
+const MODEL_HINT = "Applies while a video plays. A model not downloaded yet is fetched from Hugging Face on first use (a Kitsune model, or a faster-whisper/CTranslate2 one).";
+const MODEL_NAME_HINT = "Use a model such as kitsune-0.6b or large-v3, or a Hugging Face repo id such as owner/name";
 // A model load takes seconds to minutes; while the popup is open its status line follows along.
 const HEALTH_REFRESH_MS = 2000;
 // The deck hint is a snapshot of Anki at the last ask, and the options page (the same popup.html)

@@ -246,10 +246,15 @@
         <!-- The server validates the name; popup.js only mirrors the rule for an early hint and
              adds the models already downloaded (from /health) to the suggestions. -->
         <label class="row field">
-          <span class="lead">Whisper model <span class="soft">size or Hugging Face repo id</span></span>
+          <span class="lead">Model <span class="soft">Kitsune, Whisper size or Hugging Face repo id</span></span>
           <input type="text" id="model" list="model-suggestions" spellcheck="false" placeholder="server default">
         </label>
         <datalist id="model-suggestions">
+          <option value="kitsune-0.6b"></option>
+          <option value="kitsune-0.6b-int8"></option>
+          <option value="kitsune-0.3b"></option>
+          <option value="kitsune-0.3b-int8"></option>
+          <option value="kitsune-0.1b"></option>
           <option value="large-v3"></option>
           <option value="large-v3-turbo"></option>
           <option value="kotoba-tech/kotoba-whisper-v2.0-faster"></option>
