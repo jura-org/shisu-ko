@@ -1,6 +1,6 @@
 # Server runtime: live streams, models, the Start button, the update step
 
-The parts of the server that are not cue building. Read the matching section before changing `LiveFollower`, `switch_model_if_wanted()`, `server/native_host.py`, `server/update.py`, `POST /update`, the launchers, the experimental AMD engine (`rocm_engine()`, `server/amd_setup.py`) or any way out of the server process (`hard_exit()`, `finish()`).
+The parts of the server that are not cue building. Read the matching section before changing `LiveFollower`, `switch_model_if_wanted()`, the Kitsune engine (`server/kitsune_engine.py`, `load_kitsune_model()`, `server/kitsune_setup.py`), `server/native_host.py`, `server/update.py`, `POST /update`, the launchers, the experimental AMD engine (`rocm_engine()`, `server/amd_setup.py`) or any way out of the server process (`hard_exit()`, `finish()`).
 
 ## How live streams work
 
@@ -24,7 +24,7 @@ the live cues and changes the session token so the client starts over on the vid
 
 ## How model switching works
 
-The popup's `model` setting names the Whisper model the server should run; `--model` is only the
+The popup's `model` setting names the model (Whisper or Kitsune) the server should run; `--model` is only the
 default. The content script sends it with every `/sync` (`modelForSync()`, trimmed, empty for the
 default), and `App.request_model()` stores the wish: an empty name becomes the operator's
 `--model` (that is `--model`, else the model chosen at setup in `config.json`, else large-v3,
@@ -151,6 +151,102 @@ and the README's "YouTube sign-in" say exactly this, so a change here changes th
 install has no setup and no venv, so `run.sh` refuses there; its command is
 `nix run . -- --save-cookies-from-browser firefox` (the flake's loop stops on exit 0 and 2 like
 `run.sh`).
+
+## How the Kitsune-Transcribe models work
+
+Kitsune-Transcribe's students (github.com/Multysquid/Kitsune-Transcribe) are not Whisper models:
+the Transcribe family is `CohereAsrForConditionalGeneration` (FastConformer encoder, Transformer
+decoder, `family "aed"`), the Parakeet family `ParakeetForCTC` (FastConformer encoder, CTC head,
+`family "ctc"`). CTranslate2 converts neither, so they run on PyTorch and transformers, in
+`server/kitsune_engine.py`. `server.py` stays importable without torch: it loads the engine by
+path (`kitsune_engine()`, registered in `sys.modules` before `exec_module` for its dataclasses),
+and the engine imports torch only inside the functions that load and run a model. Its pure parts
+(unpacking, timings, chunks, segments) are numpy only and tested in `test_kitsune.py` without torch.
+
+**Names.** `KITSUNE_REPOS` maps `kitsune-0.6b` / `-0.3b` / `-0.1b` to their repos
+(`Multy123/kitsune-transcribe-<size>`). A repo's root holds the training run's bf16 export (the
+bare name), each precision a folder of its own as `python -m kitsune.quant export` writes it
+(`KITSUNE_FORMATS`: `fp16`, `int8` -> `int8-w8a16`, `fp8` -> `fp8-w8a8`, `nvfp4` -> `nvfp4-w4a16`,
+`mxfp4` -> `mxfp4-w4a4`). `kitsune_name()` parses a name into (base, short precision);
+`canonical_model_name()` gives `base` or `base-<short>`, so `-int8-w8a8` and `-int8-w8a16` are one
+model: kitsune.quant writes their files byte-identical, and the server keeps activations 16-bit,
+so the two formats run the same here. The canonical name is also the cue cache's model, so every
+precision keeps cues of its own. All names pass `MODEL_NAME_RE`; the popup's copy is unchanged.
+
+**Download.** `download_model_files()` refuses a Kitsune name while `kitsune_runtime_missing()`
+(torch, transformers, safetensors not importable): the download would be gigabytes for a model
+that cannot load, and the popup shows `KITSUNE_INSTALL_HINT`. Otherwise `kitsune_download_plan()`
+names the repo, the folder and `KITSUNE_FILES` in it, and `snapshot_download()` fetches only
+those; `require_kitsune_files()` refuses a folder the repo does not have ("may not be published
+yet"). `run_download_model()` (setup) takes Kitsune names like sizes: the choice goes to
+`config.json` before the download, with `kitsune_size()` in the announcement. `downloaded_models()`
+lists a Kitsune repo's root and folders that hold a package (`kitsune_downloaded()`).
+
+**Load.** `load_model()` hands a Kitsune name, or a folder whose `config.json` names one of the
+two architectures (`is_kitsune_model()`, the operator's `--model` may be one), to
+`load_kitsune_model()`: `--language` must be `ja`, the files come from `download_model_files()`
+(cached), `kitsune_engine.load()` builds the model, a GPU failure falls back to the CPU, and a
+2-second warm-up runs. `compute_type` in `/health` reads `bfloat16`, or `int8-w8a16 weights,
+bfloat16`; `/health` also says `engine: "kitsune"`. A switch away frees the model and calls
+`release_torch_memory()` (PyTorch caches freed GPU memory).
+
+In the engine, `read_package()` checks the folder before torch is imported. A plain export (or
+the fp16 variant, whose keys are HF's) loads with `from_pretrained()`. A quantised variant is
+built from its config under `no_init_weights()`, and `variant_state_dict()` unpacks every layer
+`quantization.json` names (`dequantize()`: int8 and fp8 per output row, nvfp4 E2M1 codes times an
+E4M3 scale per 16 times the FP32 tensor scale, mxfp4 E2M1 times a power of two per 32; fp8 and E4M3
+scales read as their bytes through `E4M3_VALUES`, since numpy has no float8); a pointwise conv's
+`.linear` layer goes back to its Conv1d key and shape; tied keys may be missing, nothing else. The
+weights then go to the compute dtype (`pick_dtype()`: bf16 on a GPU that has it, fp16 for the
+fp16 variant, fp32 on the CPU; `--compute-type bfloat16/float16/float32` overrides) with norms and
+BatchNorm left fp32 under autocast (`cast_for_inference()`, kitsune.quant's fp16 recipe). So every
+format runs everywhere with the numbers its weights hold; activation quantisation is not
+emulated, and GPU memory and speed are the 16-bit model's.
+
+**Decoding.** `KitsuneModel.transcribe()` has `WhisperModel.transcribe()`'s shape: it runs the same
+Silero detector (`vad_parameters`, capped at `MAX_CHUNK_S` = 28 s per interval), joins speech
+across pauses up to `CHUNK_GAP_S` into chunks of at most 28 s (`plan_chunks()`; the Cohere
+feature extractor splits audio above 30 s, and the students never saw more), and decodes each
+chunk greedily, as the students were evaluated. The features are the package's own processor's.
+- CTC: encoder, the CTC head in fp32 outside autocast, log-softmax as `z - logsumexp(z)`
+  (`kitsune.ctc_student.ctc_log_probs`), then `ctc_spans()`: a run per token of the greedy path.
+  A word starts at its first frame and ends `CTC_TAIL_S` after its last, never past the next word.
+- AED: encoder once, `generate()` with the teacher pass's decoder prompt (`AED_PROMPT`), max
+  new tokens `16 + 10 x seconds` and the repetition stop, then one teacher-forced pass over the
+  result. Its cross-attention (recomputed from the q/k projections through hooks, so the attention
+  backend does not matter; the upper half of the layers) is normalised per head, median filtered
+  and aligned by DTW (`attention_boundaries()`, Whisper's `find_alignment`), and
+  `cap_durations()` shortens a word that spans a pause (`WORD_BASE_S` + `WORD_CHAR_S` per
+  character: a first word or one after punctuation keeps its end, any other its start).
+Words are groups of tokens (`group_tokens()`: a character split over byte-fallback tokens stays
+whole; the text is the decoded prefix's increment). `make_segments()` cuts them at sentence marks
+and pauses of `SEGMENT_GAP_S`; `no_speech_prob` is 0 and `avg_logprob` the words' mean log
+probability.
+
+**What the transcriber does differently.** A Kitsune model says `detects_language = False`,
+`sings = False`, `takes_prompt = False`. `process()` skips the language watch for it (no language
+head; `detect_language()` raises), never takes the lyrics path or leaves unsung stretches
+uncovered (the lyrics gates read Whisper's confidence figures), and `transcribe_options()` passes
+no initial prompt, so `retry_prompt_skips()` never decodes a window twice. `dump_words.py` takes
+its options and its lyrics decision from the same helpers and loads a Kitsune model through
+`load_kitsune_model()`.
+
+**Installing.** `server/kitsune_setup.py` (stdlib only, never imports `server.py`) installs
+PyTorch from its own index (`cu128` where `nvidia-smi -L` lists a GPU, `cpu` elsewhere, PyPI on
+macOS) and `server/requirements-kitsune.txt` into the interpreter running it; exit 1 when they do
+not import afterwards. `setup.cmd` / `setup.sh` run it only for a Kitsune pick, before the
+download, and a failure ends setup. `update.py` installs a changed `requirements-kitsune.txt`
+only where torch is importable. The Docker image installs torch (`TORCH_INDEX` build argument,
+cu128 by default) and copies `kitsune_engine.py`; the Nix package has no torch.
+
+**Measured on real weights** (a scratch venv, CPU, a 49 s clip of five eval utterances): the
+Cohere teacher through the AED path wrote every Japanese line correctly with plausible word
+times; the Parakeet anchor packaged as `ParakeetForCTC` through the CTC path likewise; int8, fp8,
+nvfp4 and mxfp4 variants of the anchor, packed per the WP5 recipes, decoded an 18 s passage
+word for word like the bf16 export, and a T-0.6B nvfp4 variant loaded with its 262 layers and
+its tied head. Not yet measured: a trained student, the cue geometry `cue_stats.py` reports for
+Kitsune against large-v3, and the gates' word-probability thresholds (`VAD_GATE_PROB` and the
+like were tuned on Whisper's probabilities).
 
 ## How the Start server button works
 

@@ -39,7 +39,7 @@ The demo recording in the README shows the expected behaviour: https://github.co
      git clone https://github.com/Multysquid/shisu-ko && cd shisu-ko
      bash server/setup.sh          # creates ~/.shisu-ko/venv and installs faster-whisper, yt-dlp, numpy
                                    # (if it stops at "venv": sudo apt install python3-venv);
-                                   # it then asks "Which Whisper model should the server use?":
+                                   # it then asks "Which model should the server use?":
                                    # type 2 (small, about 500 MB), and it downloads that model into
                                    # ~/.shisu-ko/models with a progress bar and keeps the choice in
                                    # ~/.shisu-ko/config.json; where Firefox is installed it asks

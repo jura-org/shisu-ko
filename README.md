@@ -35,12 +35,13 @@ by `run.cmd` / `run.sh` before each start and by the extension once a day.
   deck is coloured by the card's state, green to red, and can carry an overbar in the colour of
   its pitch accent, read from the card. The deck follows your mining, and a verb is found in its
   conjugations.
-- **Your hardware, your model.** Setup asks whether you want Whisper large-v3 or small and
-  downloads it. The popup switches to any other model without restarting the server (on Windows
-  the experimental [AMD engine](#amd-graphics-cards-experimental) restarts it): a faster-whisper
-  size or a Hugging Face repo id of a CTranslate2 model, such as
-  `kotoba-tech/kotoba-whisper-v2.0-faster` (Japanese-specialised, about 6x faster) or a small
-  CPU model. `--model` only sets the default.
+- **Your hardware, your model.** Setup asks whether you want Whisper large-v3 or small, or a
+  [Kitsune-Transcribe](#kitsune-transcribe-models) model (small Japanese-only models distilled
+  from Cohere Transcribe), and downloads it. The popup switches to any other model without
+  restarting the server (on Windows the experimental [AMD engine](#amd-graphics-cards-experimental)
+  restarts it): a Kitsune model in any of its precisions, a faster-whisper size or a Hugging Face
+  repo id of a CTranslate2 model, such as `kotoba-tech/kotoba-whisper-v2.0-faster`
+  (Japanese-specialised, about 6x faster) or a small CPU model. `--model` only sets the default.
 - **Native, Nix or Docker.** A one-time setup script on Windows, Linux and macOS, a Nix flake,
   or a container with GPU support. All of them share the same model folder. When the native
   server is not running, a button in the popup starts it (Firefox).
@@ -78,8 +79,10 @@ zip, where Windows would start them without the rest of the files.
 
 Setup creates an isolated Python environment in `~/.shisu-ko/venv` and installs faster-whisper,
 yt-dlp and the CUDA runtime libraries; nothing else on the system is touched. It then asks which
-Whisper model the server should use, `1` for large-v3 (best quality, about 3 GB, wants a GPU with
-4 GB or more free) or `2` for small (about 500 MB, fine on a CPU, less accurate), downloads it
+model the server should use, `1` for Whisper large-v3 (best quality, about 3 GB, wants a GPU with
+4 GB or more free), `2` for Whisper small (about 500 MB, fine on a CPU, less accurate), `3` for
+kitsune-0.6b or `4` for kitsune-0.1b (Japanese only; setup first installs PyTorch for them, see
+[Kitsune-Transcribe models](#kitsune-transcribe-models)), downloads it
 into `~/.shisu-ko/models` with a progress bar and remembers the choice in
 `~/.shisu-ko/config.json`. Where Firefox is installed it also asks whether the server should send
 Firefox's YouTube cookies with every download: YouTube refuses some downloads ("Sign in to confirm
@@ -512,7 +515,9 @@ box, an outline, and the transcript docked left:
 | Transcript panel side | Docks the panel right or left; the subtitle moves out of its way |
 | Reset style | Restores the seven settings above and nothing else |
 
-The **Transcription model** drawer picks the Whisper model the server runs. The field takes a
+The **Transcription model** drawer picks the model the server runs. The field takes a
+Kitsune-Transcribe model (`kitsune-0.6b`, `kitsune-0.3b-int8`, ...; see
+[Kitsune-Transcribe models](#kitsune-transcribe-models)), a
 faster-whisper size (`large-v3`, `large-v3-turbo`, `distil-large-v3`, `medium`, `small`, ...)
 or the Hugging Face repo id `owner/name` of a CTranslate2 model
 (`kotoba-tech/kotoba-whisper-v2.0-faster`); empty means the server's own default (`--model`, else
@@ -665,9 +670,9 @@ work. The server only listens on 127.0.0.1 and answers browser requests
 only from the extension itself or from pages served on this machine, so an arbitrary website
 cannot drive downloads and transcription; `/update` is narrower still and takes browser
 requests from the extension alone, never from a page, so nothing served on this machine can
-restart the server. A model name is validated (a size alias or
-`owner/name`, never a path) and resolved through faster-whisper's own download before anything
-is loaded, so a request can never point the server at a local folder.
+restart the server. A model name is validated (a Kitsune name, a size alias or
+`owner/name`, never a path) and resolved through the server's Kitsune table or faster-whisper's
+own download before anything is loaded, so a request can never point the server at a local folder.
 
 ### YouTube sign-in
 
@@ -697,6 +702,54 @@ secondary account is the careful choice. The Docker image never takes the browse
 `config.json` (it has none to read): Docker users export a `cookies.txt` into the data folder and
 add `--cookies /data/cookies.txt` to the `command:` line. Toolbox and distrobox share your home
 folder and its Firefox, so there the saved browser is used as on the host.
+
+## Kitsune-Transcribe models
+
+[Kitsune-Transcribe](https://github.com/Multysquid/Kitsune-Transcribe) distils Cohere Transcribe
+into small Japanese-only speech recognisers that run on an 8 GB consumer GPU, or on a CPU. The
+server runs them next to Whisper; pick one at setup or type its name in the popup's
+Transcription model field.
+
+| Name | What it is |
+|---|---|
+| `kitsune-0.6b`, `kitsune-0.3b`, `kitsune-0.1b` | the student of that size, in bf16 (about 1.2 GB, 600 MB, 200 MB) |
+| `kitsune-0.6b-fp16` | the same weights in fp16 |
+| `kitsune-0.6b-int8` (also `-int8-w8a16`, `-int8-w8a8`) | 8-bit integer weights, about half the download |
+| `kitsune-0.6b-fp8` (also `-fp8-w8a8`) | 8-bit float weights |
+| `kitsune-0.6b-nvfp4` (also `-nvfp4-w4a16`, `-nvfp4-w4a4`) | 4-bit NVFP4 weights, about a third of the download |
+| `kitsune-0.6b-mxfp4` (also `-mxfp4-w4a4`) | 4-bit MXFP4 weights |
+
+Every precision works for every size, on an NVIDIA GPU and on the CPU (an AMD or Apple GPU is not
+used: there the model runs on the CPU, the AMD engine being Whisper's). The server unpacks the weights
+into 16 bits when it loads them (bf16 on a GPU that has it, else fp16; fp32 on the CPU), so a
+smaller precision saves download and disk, not GPU memory or time, and the W8A8/W4A4 formats run
+with 16-bit activations. Two spellings that differ only in the activations (`-int8-w8a16` and
+`-int8-w8a8`) load the same files and count as one model.
+
+What to know:
+
+- **PyTorch.** Kitsune models are not Whisper models and do not run on CTranslate2; the server
+  runs them on PyTorch and transformers. Setup installs both when you pick a Kitsune model
+  (`server/kitsune_setup.py`: the CUDA build where it finds an NVIDIA GPU, about 3 GB, else the
+  CPU build). To add them later, run
+  `~/.shisu-ko/venv/Scripts/python server/kitsune_setup.py` (`venv/bin/python` on Linux/macOS);
+  `--status` says what is installed. Without PyTorch the popup says so when you pick a Kitsune
+  model, and nothing is downloaded. `run.cmd --check` reports it too. The Docker image includes
+  PyTorch; the Nix package does not.
+- **Japanese only.** A Kitsune model refuses to start with another `--language`. It has no
+  language detector, so the language watch (`--language-patience`) does not pause a video in
+  another language, and it has no lyrics mode (`--lyrics`): music without detected speech stays
+  blank. `--initial-prompt`, `--beam-size` and the other decoding options are Whisper's; a
+  Kitsune model decodes greedily, as it was evaluated.
+- **Word timings.** The cue builder needs every word's start and end. A Parakeet-family student
+  (a CTC model) reads them off its 80 ms frames; a Transcribe-family student gets them from its
+  decoder's attention, aligned as Whisper aligns its own word timestamps.
+- **Licence.** The Kitsune students are released for non-commercial use (their training data
+  requires it); see the model card in each model's repo.
+
+`--compute-type` takes `bfloat16`, `float16` or `float32` for a Kitsune model. The models live in
+the repos `Multy123/kitsune-transcribe-<size>`, the bf16 export at the root and each precision in
+a folder of its own; `--model` also takes a local folder holding such a package.
 
 ## AMD graphics cards (experimental)
 
@@ -882,6 +935,8 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | "Loading model X…" stays on the video for a long time | A model picked in the popup is downloaded first, at your connection speed (large-v3 is 3 GB, small about 500 MB); the current model keeps subtitling meanwhile, and the transcript starts over once the new one is in. The popup's status line follows along. |
 | "Shisu-ko: model X: unknown model size" or "… was not found on Hugging Face" | The name in the popup's Transcription model field is not a faster-whisper size or an existing `owner/name` repo. Fix the name there; the previous model keeps running meanwhile. |
 | "Shisu-ko: model X: … not a CTranslate2/faster-whisper model" | The repo holds a PyTorch checkpoint, not converted weights. Convert it with `ct2-transformers-converter`, or pick a `*-ct2` or `faster-whisper` repo of the same model. |
+| "Shisu-ko: model kitsune-…: Kitsune models run on PyTorch, which is not installed" | Run `server/kitsune_setup.py` with the venv's Python (see [Kitsune-Transcribe models](#kitsune-transcribe-models)), or setup again picking a Kitsune model, then pick the model again. |
+| "Shisu-ko: model kitsune-…: its repo has no … folder" (or "no model at its root") | That size or precision is not published (yet). Pick another one. |
 | Server log says it has no model left and exits with code 3 | A switch failed and the previous model could not be reloaded either (usually GPU memory). The launcher restarts the server on its `--model`; fix or clear the name in the popup. |
 | Popup says "X was not found on this computer; the preset is used" or that a font name is letters, digits, spaces, dots, hyphens and underscores | Install the font, or type its family name exactly as the operating system lists it. Quotes, commas and other punctuation are refused; in both cases the preset font applies until the name resolves. |
 | "yt-dlp needs Node.js or Deno" | Install [Node.js](https://nodejs.org/) 20+ or [Deno](https://deno.com/), then restart the server. |
@@ -930,6 +985,9 @@ addon/                Firefox extension (Manifest V3, plain JS, no build step)
                       of content.js
 server/
   server.py           HTTP server: yt-dlp + faster-whisper + live follower + clip cutting
+  kitsune_engine.py   the Kitsune-Transcribe models on PyTorch behind faster-whisper's interface:
+                      packages, quantised weights, CTC and cross-attention word timings
+  kitsune_setup.py    installs PyTorch and transformers for them, run by setup (stdlib only)
   setup.cmd/.sh       setup, downloads the model     run.cmd/.sh   start (with auto-restart)
   amd_setup.py        the experimental AMD engine, run by setup: looks for a card, installs
                       CTranslate2 for ROCm into ~/.shisu-ko/rocm and tests it (stdlib only)
@@ -1032,7 +1090,10 @@ its hints and when Anki is asked).
 Built on [faster-whisper](https://github.com/SYSTRAN/faster-whisper) and
 [CTranslate2](https://github.com/OpenNMT/CTranslate2), [yt-dlp](https://github.com/yt-dlp/yt-dlp),
 [PyAV](https://github.com/PyAV-Org/PyAV), OpenAI's [Whisper](https://github.com/openai/whisper)
-and [Kotoba-Whisper](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0). The mining flow
+and [Kotoba-Whisper](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0), and for the Kitsune
+models on [PyTorch](https://pytorch.org/), [transformers](https://github.com/huggingface/transformers),
+[Cohere Transcribe](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) and NVIDIA's
+[Parakeet](https://huggingface.co/nvidia/parakeet-tdt_ctc-0.6b-ja). The mining flow
 follows the conventions of [Yomitan](https://yomitan.wiki/), [AnkiConnect](https://foosoft.net/projects/anki-connect/)
 and [asbplayer](https://github.com/killergerbah/asbplayer).
 

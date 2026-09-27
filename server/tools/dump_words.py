@@ -105,8 +105,14 @@ def main(argv=None) -> int:
     end = min(args.end or total, total)
     print(f"[{args.video_id}] {total:.0f}s decoded; dumping {args.start:.0f}-{end:.0f}s", flush=True)
 
-    model = WhisperModel(args.model, device=args.device, compute_type=args.compute_type,
-                         download_root=str(server.MODELS_DIR))
+    if server.is_kitsune_model(args.model):
+        # A Kitsune model loads as the server loads it (kitsune_engine.py, on PyTorch).
+        load_args = SimpleNamespace(model=args.model, language=args.language, device=args.device,
+                                    compute_type=args.compute_type, cpu_threads=0)
+        model = server.load_kitsune_model(load_args, args.model)[0]
+    else:
+        model = WhisperModel(args.model, device=args.device, compute_type=args.compute_type,
+                             download_root=str(server.MODELS_DIR))
     lyrics_args = worker_args(args)
     # sung_in_target() lives on the transcriber and asks the App's model; the App's own worker
     # thread idles, since no session is ever registered with it.
@@ -121,16 +127,9 @@ def main(argv=None) -> int:
         # The same decision and the same call Transcriber.process() makes, so the dump is what the
         # server would have seen: a window it would take the lyrics path on is decoded without the
         # detector, and the record says so.
-        lyrics = (server.wants_lyrics(lyrics_args, chunk, speech, start, stop)
+        lyrics = (getattr(model, "sings", True) and server.wants_lyrics(lyrics_args, chunk, speech, start, stop)
                   and worker.sung_in_target(stub, chunk, start, stop))
-        vad = {"vad_filter": False} if lyrics else {"vad_filter": True, "vad_parameters": server.vad_parameters()}
-        options = dict(
-            language=args.language, task="transcribe", beam_size=args.beam_size,
-            word_timestamps=True, condition_on_previous_text=False,
-            initial_prompt=None if lyrics else (args.initial_prompt or None),
-            temperature=[0.0, 0.2, 0.4, 0.6], no_speech_threshold=0.6, log_prob_threshold=-1.0,
-            compression_ratio_threshold=2.4, hallucination_silence_threshold=2.0, **vad,
-        )
+        options = server.transcribe_options(lyrics_args, model, lyrics)
         segments, _info = model.transcribe(chunk, **options)
         segments, skipped, spliced = list(segments), 0.0, 0
         if not lyrics:

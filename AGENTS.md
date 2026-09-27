@@ -7,7 +7,8 @@ The detail behind every section lives in `docs/dev/` (index: `docs/dev/README.md
 ## What this project is
 
 Shisu-ko shows live Japanese subtitles on YouTube in Firefox and Chrome. A local Python server transcribes
-the video's audio with Whisper (faster-whisper / CTranslate2) a little ahead of the playhead; the
+the video's audio with Whisper (faster-whisper / CTranslate2), or with a Kitsune-Transcribe student
+(PyTorch, `server/kitsune_engine.py`), a little ahead of the playhead; the
 extension renders the cues as real DOM text so Yomitan can scan them, and can mine a screenshot
 plus sentence audio into the newest Anki card via AnkiConnect.
 
@@ -20,6 +21,9 @@ server/       server.py (single file) + setup/run scripts + update.py; runtime d
               (stdlib only); Firefox and Chrome run it through native-host.cmd / native-host.sh
               amd_setup.py: installs and tests the experimental AMD GPU engine (stdlib only;
               setup runs it after the model download)
+              kitsune_engine.py: the Kitsune-Transcribe models on PyTorch (loaded by path, torch
+              imported lazily); kitsune_setup.py installs PyTorch + requirements-kitsune.txt
+              (stdlib only; setup runs it for a Kitsune pick, before the download)
 docker/       Windows wrappers for docker compose, WSL Docker Engine installer
 docs/dev/     developer docs: the full design of each subsystem, its reasons and measurements
 docs/cws/     Chrome Web Store setup: the service account and publisher id cws-listing.yml needs
@@ -79,8 +83,17 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   its first `await` and by nothing else.
 - A client's model name (`model` in `/sync`) must match `MODEL_NAME_RE` and contain no `..`, else it
   gets `MODEL_NAME_HINT` and is never stored. A valid name is reduced by `canonical_model_name()`
-  and resolved through `faster_whisper.download_model()`. A raw client string must never reach
-  `WhisperModel()`; only the operator's `--model` may be a folder.
+  and resolved through `faster_whisper.download_model()`, or, for a Kitsune name, through
+  `KITSUNE_REPOS` and `kitsune_download_plan()`. A raw client string must never reach
+  `WhisperModel()` or `kitsune_engine.load()`; only the operator's `--model` may be a folder.
+- `server.py` imports without torch: PyTorch and transformers live in `server/kitsune_engine.py`,
+  which `kitsune_engine()` loads by path and which imports torch only inside the functions that
+  load and run a model (its pure helpers and `test_kitsune.py` need numpy alone). A Kitsune model
+  is Japanese only (another `--language` is refused), has no language watch, no lyrics path and no
+  initial prompt (`detects_language`, `sings`, `takes_prompt` are False); `process()` and
+  `dump_words.py` read those flags, and `transcribe_options()` builds both callers' options.
+  Quantised weights are unpacked at load (16-bit on a GPU, fp32 on the CPU): every precision runs on every machine, and
+  `-w8a8` / `-w8a16` spellings (byte-identical files) are one model.
 - `enabled` is the master switch (popup header toggle, Alt+Shift+S). Off means nothing happens on
   YouTube pages: no `/sync`, no overlay, no native-caption hiding, no arrow keys, no Anki polling,
   no mining, no known word marked, no status badge switched, no `cardStatus` ask
@@ -143,7 +156,9 @@ a lyrics window), `build_cues()` and `merge_segments()`. Rules that must not reg
 **Server runtime** (`docs/dev/server-runtime.md`). Live streams: `Fetcher.follow_live()`,
 `LiveFollower`, `DashLiveSource`, `Session.live_audio`; live sessions are never cached. Model
 switching: `App.request_model()` and `App.switch_model_if_wanted()`, run before every window,
-never during one. The Start button: `startServer()` in `background.js`, the native host's
+never during one. Kitsune models: `kitsune_name()`, `kitsune_download_plan()`,
+`load_kitsune_model()`, and in `kitsune_engine.py` `read_package()`, `dequantize()`,
+`ctc_spans()`, `attention_boundaries()`, `KitsuneModel.transcribe()`. The Start button: `startServer()` in `background.js`, the native host's
 `handle()` and `launch()`, the instance lock `hold_instance_lock()` / `try_lock()`. The update
 step: `server/update.py`, `POST /update`, exit code 4. The AMD engine (experimental):
 `rocm_engine()` at import, the crash guard and `check_rocm_import()`, `hard_exit()` / `finish()`
@@ -204,6 +219,9 @@ where it finds an AMD card (next to an NVIDIA GPU only with `--yes`). By hand, w
 Python: `server/amd_setup.py` (look, ask, install, test), `--yes` (no question; exit 1 unless the
 engine ends up working), `--probe` (test again; exit 1 when it fails), `--status`, `--remove`
 (back to the default engine); see `docs/dev/server-runtime.md`.
+Kitsune-Transcribe models (Japanese only, PyTorch): setup installs PyTorch for a Kitsune pick; by
+hand, with the venv's Python: `server/kitsune_setup.py` (`--cpu`, `--force`, `--status`). Names:
+`kitsune-0.6b` / `-0.3b` / `-0.1b` (bf16), plus `-fp16`, `-int8`, `-fp8`, `-nvfp4`, `-mxfp4`.
 
 Docker: `docker\up.cmd`, `docker\logs.cmd`, `docker\down.cmd` (or `docker compose up -d` etc.).
 `up.cmd` keeps a minimized "Shisu-ko WSL keep-alive" window open when Docker Engine runs inside
@@ -305,7 +323,9 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
 
 ## Making changes
 
-1. Keep `server.py` a single dependency-light file (stdlib + numpy + faster-whisper + yt-dlp + PyAV).
+1. Keep `server.py` a single dependency-light file (stdlib + numpy + faster-whisper + yt-dlp + PyAV);
+   PyTorch and transformers in `kitsune_engine.py`, imported lazily (server.py touches them only
+   lazily too: `kitsune_runtime_line()` for `--check`, `release_torch_memory()`).
 2. Bump `version` in `addon/manifest.json` and `VERSION` in `server/server.py` together, inside
    the change's last commit, with its entry in `docs/amo/release-notes.md`; the release notes and
    `reviewer-notes.md` must each stay within AMO's 3,000 characters (see "Release"; `npm test`

@@ -17,7 +17,7 @@ player, so cues line up whatever latency the viewer is watching at.
 
 Endpoints
   GET  /health   -> {ok, version, model, default_model, model_loading, model_error, models, device, compute_type,
-                     language, launcher}
+                     engine, language, launcher}
   POST /sync     -> {ok, session, status, error, duration, title, live, covered, speech, cues, next, busy,
                      model, model_loading, model_error, heard, language_paused}
   GET  /clip?video_id=..&start=..&end=..&format=mp3|wav -> audio clip of a sentence (mining)
@@ -76,7 +76,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.15.0"
+VERSION = "0.16.0"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -113,9 +113,30 @@ VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,20}$")
 # A faster-whisper size or a Hugging Face repo id. WhisperModel() also opens local directories, so
 # anything else (paths, "..") is refused before it can point the server at an arbitrary folder.
 MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}(/[A-Za-z0-9][A-Za-z0-9._-]{0,95})?$")
-MODEL_NAME_HINT = ("not a model name: use a faster-whisper size (large-v3, large-v3-turbo, small, ...) "
-                   "or a Hugging Face repo id like owner/name")
+MODEL_NAME_HINT = ("not a model name: use a Kitsune model (kitsune-0.6b, kitsune-0.3b-int8, ...), a faster-whisper "
+                   "size (large-v3, large-v3-turbo, small, ...) or a Hugging Face repo id like owner/name")
 DEFAULT_MODEL = "large-v3"  # --model when neither the flag nor config.json names one
+# Kitsune-Transcribe's Japanese students (kitsune_engine.py), by name. Each repo holds the training
+# run's bf16 export at its root (the bare name) and each precision in a folder of its own, as
+# `python -m kitsune.quant export` writes it: kitsune-0.6b-int8 loads <repo>/int8-w8a16.
+KITSUNE_REPOS = {
+    "kitsune-0.6b": "Multy123/kitsune-transcribe-0.6b",
+    "kitsune-0.3b": "Multy123/kitsune-transcribe-0.3b",
+    "kitsune-0.1b": "Multy123/kitsune-transcribe-0.1b",
+}
+# A precision's short name -> its folder. The W8A8 / W4A4 files are byte-identical to the W8A16 /
+# W4A16 ones (the formats differ in the activations, which the server keeps 16-bit), so both
+# spellings load one folder and are one model to the server.
+PROBE_WHISPER_MODEL = "tiny"  # what --probe-gpu tests the AMD engine with when config.json names a Kitsune model
+KITSUNE_FORMATS = {"fp16": "fp16", "int8": "int8-w8a16", "fp8": "fp8-w8a8", "nvfp4": "nvfp4-w4a16", "mxfp4": "mxfp4-w4a4"}
+KITSUNE_FORMAT_ALIASES = {"bf16": "", "int8-w8a16": "int8", "int8-w8a8": "int8", "fp8-w8a8": "fp8",
+                          "nvfp4-w4a16": "nvfp4", "nvfp4-w4a4": "nvfp4", "mxfp4-w4a4": "mxfp4"}
+# The files of a Kitsune package that the server fetches (config, processor, tokenizer, weights, recipe, card).
+KITSUNE_FILES = ("config.json", "generation_config.json", "processor_config.json", "preprocessor_config.json",
+                 "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "model.safetensors",
+                 "quantization.json", "student_meta.json", "README.md", "MODEL_CARD.md")
+KITSUNE_INSTALL_HINT = ("Kitsune models run on PyTorch, which is not installed for this server: run server/setup.cmd "
+                        "(setup.sh) again and pick a Kitsune model, or install it with server/kitsune_setup.py")
 # The browsers yt-dlp reads cookies from (yt_dlp.cookies.SUPPORTED_BROWSERS), the names
 # --save-cookies-from-browser takes and config.json's "cookies_from_browser" may hold.
 COOKIE_BROWSERS = ("brave", "chrome", "chromium", "edge", "firefox", "opera", "safari", "vivaldi", "whale")
@@ -168,6 +189,8 @@ os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 # through: a failed download is reported by friendly_model_error() with its own words.
 os.environ.setdefault("HF_HUB_VERBOSITY", "error")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+# transformers (Kitsune models only) logs advice meant for training code at warning level.
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 NVIDIA_DIRS = add_nvidia_dll_dirs()
 
@@ -2536,6 +2559,36 @@ def wants_lyrics(args, audio, speech, start: float, end: float) -> bool:
     return speech_seconds(speech, start, end) < LYRICS_MAX_SPEECH_S and rms(audio) >= LYRICS_MIN_RMS
 
 
+def transcribe_options(args, model, lyrics: bool) -> dict:
+    """The options of a window's model.transcribe() call: Transcriber.process() and dump_words.py
+    both take them from here, so the A/B rig decodes what the server does.
+
+    A Kitsune model reads the VAD options alone and gets no prompt (its decoder prompt is fixed,
+    `takes_prompt`), so retry_prompt_skips() never decodes a window twice for it.
+    """
+    options = dict(
+        language=args.language,
+        task="transcribe",
+        beam_size=args.beam_size,
+        word_timestamps=True,
+        condition_on_previous_text=False,
+        initial_prompt=(args.initial_prompt or None) if getattr(model, "takes_prompt", True) else None,
+        temperature=[0.0, 0.2, 0.4, 0.6],
+        no_speech_threshold=0.6,
+        log_prob_threshold=-1.0,
+        compression_ratio_threshold=2.4,
+        hallucination_silence_threshold=2.0,
+    )
+    if lyrics:
+        # No prompt on this path. The lyrics gates were measured on unprompted decodes, and the
+        # blocklist holds no sentence of the prompt, so a noisy window the language head lets
+        # through could echo the prompt itself into the cache with nothing to catch it.
+        options.update(vad_filter=False, initial_prompt=None)
+    else:
+        options.update(vad_filter=True, vad_parameters=vad_parameters())
+    return options
+
+
 def unsung_stretches(audio, start: float, end: float, speech, cues,
                      min_seconds: float = LYRICS_MIN_STRETCH_S) -> list:
     """The parts of a talk window, at least `min_seconds` long, that the detector heard nothing in
@@ -2706,9 +2759,10 @@ class Transcriber(threading.Thread):
             log.warning("[%s] VAD failed (%s); treating the whole window as speech", s.video_id, exc)
             speech = [[start, end]]
 
-        # Detection costs an encoder pass, so --language-patience 0 must not reach it at all.
+        # Detection costs an encoder pass, so --language-patience 0 must not reach it at all. A
+        # model without a language head (Kitsune: Japanese only) has nothing to watch with.
         wanted = True
-        if float(getattr(args, "language_patience", 0.0) or 0.0) > 0:
+        if float(getattr(args, "language_patience", 0.0) or 0.0) > 0 and getattr(self.app.model, "detects_language", True):
             try:
                 wanted = self.watch_language(s, audio, speech, start, end)
             except Exception:  # noqa: BLE001
@@ -2731,27 +2785,10 @@ class Transcriber(threading.Thread):
         # noise and a foreign song stay with the detector, which decodes nothing of them. The
         # language watch above cast no vote on such a window, and the head's verdict here is no
         # vote either: a foreign song never pauses.
-        lyrics = wants_lyrics(args, audio, speech, start, end) and self.sung_in_target(s, audio, start, end)
-        options = dict(
-            language=args.language,
-            task="transcribe",
-            beam_size=args.beam_size,
-            word_timestamps=True,
-            condition_on_previous_text=False,
-            initial_prompt=args.initial_prompt or None,
-            temperature=[0.0, 0.2, 0.4, 0.6],
-            no_speech_threshold=0.6,
-            log_prob_threshold=-1.0,
-            compression_ratio_threshold=2.4,
-            hallucination_silence_threshold=2.0,
-        )
-        if lyrics:
-            # No prompt on this path. The lyrics gates were measured on unprompted decodes, and the
-            # blocklist holds no sentence of the prompt, so a noisy window the language head lets
-            # through could echo the prompt itself into the cache with nothing to catch it.
-            options.update(vad_filter=False, initial_prompt=None)
-        else:
-            options.update(vad_filter=True, vad_parameters=vad_parameters())
+        # A model whose gates this path has no figures for (Kitsune) never takes it.
+        lyrics = (getattr(self.app.model, "sings", True) and wants_lyrics(args, audio, speech, start, end)
+                  and self.sung_in_target(s, audio, start, end))
+        options = transcribe_options(args, self.app.model, lyrics)
         try:
             segments, _info = self.app.model.transcribe(audio, **options)
             segs = list(segments)
@@ -2788,10 +2825,10 @@ class Transcriber(threading.Thread):
         # window went its way and nothing of the singing was decoded. Its loud unheard stretches are
         # not covered; the planner brings each back as a window of its own, where wants_lyrics()
         # sees next to no speech. Only a window that the speech heard in it kept from the lyrics
-        # path: one the head refused (or --lyrics off) is covered whole, or it would be planned
-        # for ever.
+        # path: one the head refused (or --lyrics off, or a model without the path) is covered
+        # whole, or it would be planned for ever.
         unsung: list = []
-        if not lyrics and getattr(args, "lyrics", "auto") == "auto" \
+        if not lyrics and getattr(args, "lyrics", "auto") == "auto" and getattr(self.app.model, "sings", True) \
                 and speech_seconds(speech, start, end) >= LYRICS_MAX_SPEECH_S:
             unsung = unsung_stretches(audio, start, new_end, speech, fresh)
 
@@ -2867,6 +2904,7 @@ class App:
                 "models": downloaded_models(),
                 "device": self.device,
                 "compute_type": self.compute_type,
+                "engine": "kitsune" if getattr(self.model, "family", None) else "whisper",
             }
         return {"ok": True, "version": VERSION, **state, "language": self.args.language,
                 "launcher": self.update_blocker() is None}
@@ -2996,6 +3034,7 @@ class App:
         log.info("Switching from model '%s' to '%s'", previous, wanted)
         self.model = None
         gc.collect()  # CTranslate2 gives the GPU memory back once the last reference is gone
+        release_torch_memory()  # PyTorch (a Kitsune model) keeps it cached until asked
         try:
             loaded = load_model(self.args, wanted, path=prepared[1])
         except Exception as exc:  # noqa: BLE001
@@ -3058,8 +3097,10 @@ class App:
     def prepare_model(self, name: str) -> None:
         """Download (or locate) the files of `name` and hand them to the transcriber; runs on its own thread."""
         try:
-            if name == self.default_model and os.path.isdir(name):
-                path = name  # the operator's --model is a folder (see request_model): nothing to download
+            if operator_folder(self.args, name):
+                path = operator_folder(self.args, name)  # the operator's --model is a folder (see request_model): nothing to download
+            elif is_kitsune_model_named(name) and kitsune_language_error(self.args):
+                raise ValueError(kitsune_language_error(self.args))  # before gigabytes of a model that cannot load
             else:
                 path = download_model_files(name)
         except Exception as exc:  # noqa: BLE001
@@ -3722,14 +3763,36 @@ def model_alias_tables() -> tuple:
     return _MODEL_ALIASES
 
 
+def kitsune_name(name) -> Optional[tuple]:
+    """(base, precision) of a Kitsune model name, else None: kitsune-0.6b is ("kitsune-0.6b", ""), the
+    bf16 export; kitsune-0.6b-int8-w8a8 is ("kitsune-0.6b", "int8"). A repo id of KITSUNE_REPOS is its
+    base name. An unknown precision gives ("kitsune-0.6b", None), which download_model_files() refuses."""
+    if not isinstance(name, str):
+        return None
+    for base, repo in KITSUNE_REPOS.items():
+        if name in (base, repo):
+            return base, ""
+        if name.startswith(base + "-"):
+            suffix = name[len(base) + 1:]
+            if suffix in KITSUNE_FORMATS:
+                return base, suffix
+            return base, KITSUNE_FORMAT_ALIASES.get(suffix)
+    return None
+
+
 def canonical_model_name(name):
     """One name per set of weights: large-v3 for Systran/faster-whisper-large-v3, large and itself.
 
     faster-whisper's size aliases and their repo ids load the same files, so the server compares,
-    reports and caches under the first alias of the repo. Anything it does not know passes through.
+    reports and caches under the first alias of the repo. A Kitsune name comes out as its base
+    plus its precision's short name (kitsune-0.6b-int8 for -int8-w8a8, kitsune-0.6b for its repo
+    id or -bf16). Anything it does not know passes through.
     """
     if not isinstance(name, str):
         return name
+    kit = kitsune_name(name)
+    if kit is not None and kit[1] is not None:
+        return kit[0] + (f"-{kit[1]}" if kit[1] else "")
     forward, reverse = model_alias_tables()
     return reverse.get(forward.get(name, name), name)
 
@@ -3741,9 +3804,30 @@ def model_spellings(name) -> list:
     popup can match whatever spelling the viewer typed without a table of its own. A name the
     table does not know is its own only spelling.
     """
+    kit = kitsune_name(name)
+    if kit is not None and kit[1] is not None:
+        base, fmt = kit
+        if not fmt:
+            return [base, f"{base}-bf16", KITSUNE_REPOS[base]]
+        return [f"{base}-{fmt}"] + [f"{base}-{alias}" for alias, short in KITSUNE_FORMAT_ALIASES.items() if short == fmt]
     forward, _ = model_alias_tables()
     repo = forward.get(name, name)
     return [alias for alias, target in forward.items() if target == repo] + [repo]
+
+
+def kitsune_downloaded(repo_dir: Path, base: str) -> set:
+    """The Kitsune names whose files are in the hub folder of `base`'s repo: the bare name for a
+    root package, base-<short> for each precision folder."""
+    names = set()
+    folders = {folder: short for short, folder in KITSUNE_FORMATS.items()}
+    for snap in (repo_dir / "snapshots").glob("*"):
+        if (snap / "config.json").is_file() and (snap / "model.safetensors").exists():
+            names.add(base)
+        for sub in snap.glob("*"):
+            short = folders.get(sub.name)
+            if short and (sub / "config.json").is_file() and (sub / "model.safetensors").exists():
+                names.add(f"{base}-{short}")
+    return names
 
 
 def downloaded_models() -> list:
@@ -3754,7 +3838,11 @@ def downloaded_models() -> list:
     for p in MODELS_DIR.glob("models--*"):
         parts = p.name[len("models--"):].split("--")
         if p.is_dir() and len(parts) == 2 and all(parts):
-            names.add(canonical_model_name("/".join(parts)))
+            kit = kitsune_name("/".join(parts))
+            if kit is not None:
+                names |= kitsune_downloaded(p, kit[0])
+            else:
+                names.add(canonical_model_name("/".join(parts)))
     return sorted(names)
 
 
@@ -3773,12 +3861,123 @@ def download_model_files(name: str) -> str:
     here touches the GPU, so it runs beside the working model. A repo that is not a converted
     model (a PyTorch checkpoint, say) comes back without model.bin and is refused before
     WhisperModel() can choke on it.
+
+    A Kitsune name fetches its package from its repo instead (kitsune_download_plan()), once PyTorch
+    is there to run it: without it the download would be gigabytes for a model that cannot load.
     """
+    if kitsune_name(name) is not None:
+        missing = kitsune_runtime_missing()
+        if missing:
+            raise ValueError(missing)
+        from huggingface_hub import snapshot_download
+
+        repo, folder, patterns = kitsune_download_plan(name)
+        root = snapshot_download(repo, cache_dir=str(MODELS_DIR), allow_patterns=patterns)
+        path = os.path.join(root, folder) if folder else root
+        require_kitsune_files(path, name, folder)
+        return path
     from faster_whisper import download_model
 
     path = download_model(name, cache_dir=str(MODELS_DIR))
     require_model_bin(path, name)
     return path
+
+
+def kitsune_download_plan(name: str) -> tuple:
+    """(repo id, folder or "" for the root, the files to fetch) of a Kitsune name; ValueError for an unknown precision."""
+    base, fmt = kitsune_name(name)
+    if fmt is None:
+        raise ValueError(f"unknown precision in '{name}': use {base} (bf16) or "
+                         + ", ".join(f"{base}-{short}" for short in KITSUNE_FORMATS))
+    folder = KITSUNE_FORMATS[fmt] if fmt else ""
+    return KITSUNE_REPOS[base], folder, [f"{folder}/{f}" if folder else f for f in KITSUNE_FILES]
+
+
+def require_kitsune_files(path: str, name: str, folder: str = "") -> None:
+    """Refuse a download that brought no package: the repo has no such precision (or no bf16 export at its root)."""
+    for needed in ("config.json", "model.safetensors"):
+        if not os.path.isfile(os.path.join(path, needed)):
+            # The popup puts "Shisu-ko: model <name>: " in front of this, so the name is not repeated.
+            where = f"no {folder} folder" if folder else "no model at its root"
+            raise ValueError(f"its repo has {where} ({needed} is missing); it may not be published yet")
+
+
+def kitsune_runtime_missing() -> Optional[str]:
+    """KITSUNE_INSTALL_HINT while PyTorch, transformers or safetensors cannot be imported, else None."""
+    import importlib.util
+
+    for module in ("torch", "transformers", "safetensors"):
+        try:
+            found = importlib.util.find_spec(module) is not None
+        except (ImportError, ValueError):
+            found = False
+        if not found:
+            return KITSUNE_INSTALL_HINT
+    return None
+
+
+_KITSUNE_ENGINE = None
+
+
+def kitsune_engine():
+    """kitsune_engine.py from next to this file, loaded by path (server.py runs as a script, and under
+    another module name in the tests). It imports numpy alone; torch only once a model loads."""
+    global _KITSUNE_ENGINE
+    if _KITSUNE_ENGINE is None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("shisuko_kitsune_engine", Path(__file__).with_name("kitsune_engine.py"))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module  # before exec: its dataclasses look their module up there
+        spec.loader.exec_module(module)
+        _KITSUNE_ENGINE = module
+    return _KITSUNE_ENGINE
+
+
+def is_kitsune_model(name, path: Optional[str] = None) -> bool:
+    """Whether `name` (or the folder `path` holds it in) is a Kitsune model: a KITSUNE_REPOS name, or a folder
+    whose config.json names one of the students' architectures. For the operator's own names alone
+    (--model, dump_words.py's): a client's name must never be probed as a directory, so load_model()
+    asks is_kitsune_folder() only of a prepared path or the operator's --model."""
+    return is_kitsune_model_named(name) or is_kitsune_folder(path or name)
+
+
+def is_kitsune_model_named(name) -> bool:
+    return kitsune_name(name) is not None
+
+
+def is_kitsune_folder(folder) -> bool:
+    return isinstance(folder, str) and os.path.isdir(folder) and kitsune_engine().architecture_of(folder) is not None
+
+
+def operator_folder(args, name) -> Optional[str]:
+    """The operator's --model folder when `name` is that model (as given, or its canonical form, which
+    the App keeps: a folder named like kitsune-0.6b-int8-w8a8 is kitsune-0.6b-int8 there), else None.
+    A client's name is never looked up on disk: only the folder the operator named is returned."""
+    model = getattr(args, "model", None)
+    if not isinstance(model, str) or name not in (model, canonical_model_name(model)):
+        return None
+    return model if os.path.isdir(model) else None
+
+
+def kitsune_language_error(args) -> Optional[str]:
+    """Why a Kitsune model cannot serve this server's --language, or None for Japanese."""
+    language = getattr(args, "language", "ja")
+    if language == "ja":
+        return None
+    return (f"Kitsune-Transcribe models transcribe Japanese only; --language is '{language}'. "
+            "Pick a Whisper model for other languages")
+
+
+def release_torch_memory() -> None:
+    """Give a freed Kitsune model's GPU memory back to the driver; PyTorch keeps it cached otherwise."""
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def friendly_model_error(exc: BaseException, name: str) -> str:
@@ -3787,7 +3986,9 @@ def friendly_model_error(exc: BaseException, name: str) -> str:
     low = msg.lower()
     if "invalid model size" in low:
         return f"unknown model size '{name}'; use a size such as large-v3 or a Hugging Face repo id owner/name"
-    if "no model.bin" in low:
+    # The server's own one-line reasons, which say what to do already.
+    if msg == KITSUNE_INSTALL_HINT or any(s in low for s in ("no model.bin", "unknown precision", "japanese only",
+                                                             "may not be published yet")):
         return msg
     if "404" in msg or "not found" in low:
         return f"'{name}' was not found on Hugging Face"
@@ -3804,6 +4005,20 @@ MODEL_SIZES = {
     "large-v3-turbo": "about 1.6 GB", "medium": "about 1.5 GB", "distil-large-v3": "about 1.5 GB",
     "small": "about 500 MB", "base": "about 150 MB", "tiny": "about 75 MB",
 }
+# A Kitsune precision's download next to its bf16 export: 1 byte a weight for int8
+# and fp8, half a byte and its scales for the 4-bit formats; the kept tensors stay 16-bit.
+KITSUNE_SIZE_SHARE = {"": 1.0, "fp16": 1.0, "int8": 0.55, "fp8": 0.55, "nvfp4": 0.33, "mxfp4": 0.32}
+
+
+def kitsune_size(name: str) -> str:
+    base, fmt = kitsune_name(name)
+    mb = {"kitsune-0.6b": 1230, "kitsune-0.3b": 610, "kitsune-0.1b": 210}.get(base)
+    if mb is None or fmt not in KITSUNE_SIZE_SHARE:
+        return "size unknown"
+    mb *= KITSUNE_SIZE_SHARE[fmt]
+    return f"about {mb / 1000:.1f} GB" if mb >= 1000 else f"about {int(round(mb, -1))} MB"
+
+
 # The files of a converted model, the list faster_whisper.download_model() gives snapshot_download().
 MODEL_FILE_PATTERNS = ("config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*")
 
@@ -3834,28 +4049,46 @@ def run_download_model(name: str) -> int:
         print(f"'{name}' is {MODEL_NAME_HINT}")
         return 2
     try:
-        from faster_whisper import utils as fw_utils
-        from huggingface_hub import snapshot_download
+        from huggingface_hub import snapshot_download  # faster-whisper's dependency, installed with it
     except Exception as exc:  # noqa: BLE001
         print(f"faster-whisper is not installed for {sys.executable} ({exc}); run setup first")
         return 2
     name = canonical_model_name(name)
-    sizes = dict(getattr(fw_utils, "_MODELS", None) or {})
-    repo_id = name if "/" in name else sizes.get(name)
-    if repo_id is None:
-        print(f"unknown model size '{name}': faster-whisper knows {', '.join(sizes) or 'no sizes at all'}; "
-              "a Hugging Face repo id is written owner/name")
-        return 2
+    folder = ""
+    if kitsune_name(name) is not None:
+        # A Kitsune name is known by its table, like a faster-whisper size, and its files are its
+        # package's (kitsune_download_plan()). PyTorch is not needed to download it: setup
+        # installs it first all the same (kitsune_setup.py), and a start without it says so.
+        try:
+            repo_id, folder, patterns = kitsune_download_plan(name)
+        except ValueError as exc:
+            print(exc)
+            return 2
+        alias, size = True, kitsune_size(name)
+    else:
+        try:
+            from faster_whisper import utils as fw_utils
+        except Exception as exc:  # noqa: BLE001
+            print(f"faster-whisper is not installed for {sys.executable} ({exc}); run setup first")
+            return 2
+        sizes = dict(getattr(fw_utils, "_MODELS", None) or {})
+        repo_id = name if "/" in name else sizes.get(name)
+        if repo_id is None:
+            print(f"unknown model size '{name}': faster-whisper knows {', '.join(sizes) or 'no sizes at all'}; "
+                  "a Hugging Face repo id is written owner/name; Kitsune models are " + ", ".join(KITSUNE_REPOS))
+            return 2
+        patterns = list(MODEL_FILE_PATTERNS)
+        alias, size = name in sizes, MODEL_SIZES.get(name, "size unknown")
     # A size from faster-whisper's own table names a converted model that WhisperModel() fetches
     # by itself, so the choice is kept before the download: a start after a failed or interrupted
     # one then downloads this model, not the built-in default, as setup promises. A repo id is
     # kept only once its files were seen, since a typo or a PyTorch checkpoint would make every
-    # later start exit 2; a size whose repo turns out that way is taken back again.
-    alias = name in sizes
+    # later start exit 2; a size whose repo turns out that way is taken back again. A Kitsune
+    # name is kept early too, like a size.
     previous = configured_model()
     if alias:
         write_config({"model": name})
-    print(f"Downloading {name} ({MODEL_SIZES.get(name, 'size unknown')}) into {MODELS_DIR} ...", flush=True)
+    print(f"Downloading {name} ({size}) into {MODELS_DIR} ...", flush=True)
     # The download runs on a thread of its own, waited for in short steps, so that Ctrl+C is
     # honoured at once: snapshot_download() fetches the files through a thread pool that joins its
     # workers on the way out, and an interrupt raised inside it would only surface once the file
@@ -3864,7 +4097,7 @@ def run_download_model(name: str) -> int:
 
     def fetch() -> None:
         try:
-            outcome.append(snapshot_download(repo_id, cache_dir=str(MODELS_DIR), allow_patterns=list(MODEL_FILE_PATTERNS)))
+            outcome.append(snapshot_download(repo_id, cache_dir=str(MODELS_DIR), allow_patterns=patterns))
         except BaseException as exc:  # noqa: BLE001
             outcome.append(exc)
 
@@ -3884,7 +4117,11 @@ def run_download_model(name: str) -> int:
     try:
         if isinstance(result, BaseException):
             raise result
-        require_model_bin(result, name)
+        if folder or kitsune_name(name) is not None:
+            result = os.path.join(result, folder) if folder else result
+            require_kitsune_files(result, name, folder)
+        else:
+            require_model_bin(result, name)
     except Exception as exc:  # noqa: BLE001
         if alias and not isinstance(result, BaseException):
             write_config({"model": previous})  # the files came, but they are no model
@@ -3903,10 +4140,16 @@ def load_model(args, name: Optional[str] = None, path: Optional[str] = None, str
     resolves the name itself, which is fine for the operator's --model (a size, a repo or a folder).
     `strict` (--probe-gpu) means no CPU fallback, and a failed warm-up raises instead of warning.
     With the AMD engine, a model loaded and warmed up on the GPU resets the crash guard.
+    A Kitsune model loads through load_kitsune_model() instead.
     """
+    name = name or args.model
+    # A folder is looked at only when the server prepared it or the operator named it (--model): a
+    # client's name reaches here without a path from reload_model(), and must not be probed on disk.
+    local = path or operator_folder(args, name)
+    if is_kitsune_folder(local) or is_kitsune_model_named(name):
+        return load_kitsune_model(args, name, path, strict)
     from faster_whisper import WhisperModel
 
-    name = name or args.model
     device = args.device
     if device == "auto":
         device = "cuda" if cuda_available() else "cpu"
@@ -3956,6 +4199,61 @@ def load_model(args, name: Optional[str] = None, path: Optional[str] = None, str
         if ROCM_ACTIVE and device == "cuda":
             clear_rocm_starts()  # the AMD engine got through: the crash guard starts counting from zero
     return model, device, compute
+
+
+def load_kitsune_model(args, name: str, path: Optional[str] = None, strict: bool = False):
+    """(model, device, compute label) of a Kitsune model, loaded by kitsune_engine.py on PyTorch.
+
+    The files come from download_model_files() (cached after the first time) unless `path` holds
+    them or the operator's --model is the folder itself. Only Japanese: another --language is
+    refused before anything loads. The GPU is PyTorch's CUDA; with the AMD engine on, it sees no
+    GPU and the model runs on the CPU.
+    """
+    wrong_language = kitsune_language_error(args)
+    if wrong_language:
+        raise ValueError(wrong_language)
+    missing = kitsune_runtime_missing()
+    if missing:
+        raise ValueError(missing)
+    engine = kitsune_engine()
+    if path is None:
+        path = operator_folder(args, name) or download_model_files(name)
+    if args.device != "cpu":
+        mem = gpu_memory_mb()
+        if mem:
+            log.info("GPU memory: %d MiB free of %d MiB", *mem)
+            if mem[0] < CRITICAL_VRAM_MB:
+                log.warning("Very little GPU memory is free (%d MiB); close other GPU apps if the model does not load "
+                            "or runs slowly, or run with --device cpu", mem[0])
+    log.info("Loading Kitsune model '%s' (PyTorch); models are stored in %s", name, MODELS_DIR)
+    try:
+        model = engine.load(path, device=args.device, compute=args.compute_type, cpu_threads=args.cpu_threads)
+    except ImportError as exc:
+        # transformers without the architecture (too old), or a torch whose import fails. Not an
+        # ImportError to the caller: start_app() reads that as CTranslate2's own, the AMD engine's.
+        raise ValueError(f"PyTorch / transformers cannot run this model ({exc}); run server/kitsune_setup.py "
+                         "--force with the venv's Python") from exc
+    except Exception as exc:  # noqa: BLE001
+        if args.device == "cpu" or strict or isinstance(exc, engine.PackageError):
+            raise
+        log.warning("Loading on the GPU failed (%s). Falling back to the CPU, which is slow for large models.", exc)
+        release_torch_memory()
+        model = engine.load(path, device="cpu", compute="auto", cpu_threads=args.cpu_threads)
+    try:
+        t0 = time.time()
+        model.transcribe(np.zeros(SAMPLE_RATE * 2, dtype=np.float32), language="ja", vad_filter=False)
+        log.info("Model ready on %s (%s; warm-up took %.1fs)", model.device, model.compute_label, time.time() - t0)
+    except Exception as exc:  # noqa: BLE001
+        if strict:
+            raise
+        log.warning("Warm-up transcription failed: %s", exc)
+    if ROCM_ACTIVE:
+        # main() counted this start for the AMD engine's crash guard, and PyTorch never touches the
+        # ROCm runtime: a start that got here did not crash it, so the count goes back to zero as
+        # after a Whisper model's warm-up on the GPU. Left counted, two Kitsune starts would turn
+        # the engine off as if it had crashed.
+        clear_rocm_starts()
+    return model, model.device, model.compute_label
 
 
 def count_rocm_start() -> bool:
@@ -4184,6 +4482,13 @@ def run_probe_gpu(args) -> int:
     if count < 1:
         return failed("no AMD GPU visible to the ROCm engine")
     args.device = "cuda"
+    if is_kitsune_model(args.model):
+        # The test is of CTranslate2's ROCm build, which runs Whisper alone; a Kitsune model (setup's
+        # pick, in config.json) runs on PyTorch and would load on the CPU here. Whisper's smallest
+        # model (about 75 MB) stands in, and config.json keeps the Kitsune choice.
+        print(f"The model chosen at setup, {args.model}, runs on PyTorch, not on this engine; "
+              f"testing with {PROBE_WHISPER_MODEL} instead", flush=True)
+        args.model = PROBE_WHISPER_MODEL
     try:
         _model, device, compute = load_model(args, strict=True)
     except Exception as exc:  # noqa: BLE001
@@ -4489,6 +4794,21 @@ def rocm_engine_line() -> Optional[str]:
     return f"GPU engine: AMD ROCm installed but not used: {ROCM_REASON}" if installed else None
 
 
+def kitsune_runtime_line() -> str:
+    """What --check says about the Kitsune models' runtime: PyTorch and transformers, and whether PyTorch sees a GPU."""
+    if kitsune_runtime_missing():
+        return "Kitsune models: PyTorch not installed (server/kitsune_setup.py installs it; Whisper models work without)"
+    try:
+        import torch
+        import transformers
+
+        gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+        return (f"Kitsune models: PyTorch {torch.__version__}, transformers {transformers.__version__}, "
+                + (f"GPU {gpu}" if gpu else "no CUDA GPU (CPU only)"))
+    except Exception as exc:  # noqa: BLE001
+        return f"Kitsune models: PyTorch import failed: {exc}"
+
+
 def run_check() -> None:
     print(f"Python {sys.version.split()[0]} at {sys.executable}")
     print(f"Data directory: {APP_DIR}")
@@ -4515,6 +4835,7 @@ def run_check() -> None:
         print(f"faster-whisper {faster_whisper.__version__}")
     except Exception as exc:  # noqa: BLE001
         print(f"faster-whisper import failed: {exc}")
+    print(kitsune_runtime_line())
     try:
         import yt_dlp.version
 
@@ -4561,12 +4882,17 @@ def port_number(text: str) -> int:
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="Shisu-ko: local Whisper transcription server for the Firefox extension")
+    p = argparse.ArgumentParser(description="Shisu-ko: local transcription server for the Firefox extension")
     p.add_argument("--host", default="127.0.0.1", help="bind address (keep it local)")
     p.add_argument("--port", type=port_number, default=8790, help="default 8790 (8765 is left free for AnkiConnect)")
-    p.add_argument("--model", default=None, help="faster-whisper model size or CTranslate2 repo, e.g. large-v3, large-v3-turbo, kotoba-tech/kotoba-whisper-v2.0-faster (default: the model chosen at setup (config.json), else large-v3)")
+    p.add_argument("--model", default=None, help="a Kitsune-Transcribe model (Japanese only, needs PyTorch), e.g. kitsune-0.6b, kitsune-0.3b-int8, kitsune-0.1b-nvfp4; "
+                                                 "a faster-whisper model size or CTranslate2 repo, e.g. large-v3, large-v3-turbo, kotoba-tech/kotoba-whisper-v2.0-faster; "
+                                                 "or a local folder holding either (default: the model chosen at setup (config.json), else large-v3)")
     p.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
-    p.add_argument("--compute-type", default="auto", help="float16, int8_float16, int8, ... (auto = float16 on GPU, int8 on CPU)")
+    p.add_argument("--compute-type", default="auto", help="Whisper: float16, int8_float16, int8, ... (auto = float16 on GPU, int8 on CPU); "
+                                                          "Kitsune: bfloat16, float16 or float32 (auto = bfloat16 on a GPU that has it, else float16, "
+                                                          "and float16 for an -fp16 model; float32 on CPU); "
+                                                          "a Kitsune model's weight precision is in its name")
     p.add_argument("--language", default="ja")
     p.add_argument("--language-patience", type=float, default=60.0,
                    help="seconds of speech in another language before subtitles stop for that video (0 = never detect, always transcribe)")

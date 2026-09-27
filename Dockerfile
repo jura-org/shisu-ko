@@ -27,11 +27,18 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY server/requirements.txt ./
+COPY server/requirements.txt server/requirements-kitsune.txt ./
 RUN pip install -r requirements.txt \
     && pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 
-COPY server/server.py ./
+# The Kitsune-Transcribe models run on PyTorch (kitsune_engine.py): its CUDA 12.8 build, which runs
+# on the CPU as well, about 3 GB more image. For a smaller CPU-only image, build with
+# --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cpu
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cu128
+RUN pip install torch --index-url "${TORCH_INDEX}" \
+    && pip install -r requirements-kitsune.txt
+
+COPY server/server.py server/kitsune_engine.py ./
 
 VOLUME ["/data"]
 EXPOSE 8790
