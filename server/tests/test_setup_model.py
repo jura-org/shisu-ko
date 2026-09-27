@@ -483,17 +483,31 @@ def index_of(lines, predicate, what):
 def test_setup_cmd_asks_then_downloads_then_says_it_is_done():
     lines = cmd_lines()
     check = index_of(lines, lambda l: l.endswith('"%~dp0server.py" --check'), "--check")
-    choice = index_of(lines, lambda l: l == 'choice /c 12 /n /m "Type 1 or 2: "', "choice")
-    pick = index_of(lines, lambda l: l == 'if errorlevel 3 (set "MODEL=large-v3") else if errorlevel 2 (set "MODEL=small") else (set "MODEL=large-v3")', "the pick")
+    choice = index_of(lines, lambda l: l == 'choice /c 1234 /n /m "Type 1, 2, 3 or 4: "', "choice")
+    pick = index_of(lines, lambda l: l == ('if errorlevel 5 (set "MODEL=large-v3") else if errorlevel 4 (set "MODEL=kitsune-0.1b") '
+                                           'else if errorlevel 3 (set "MODEL=kitsune-0.6b") else if errorlevel 2 (set "MODEL=small") '
+                                           'else (set "MODEL=large-v3")'), "the pick")
+    kitsune = index_of(lines, lambda l: l == '  "%VENV%\\Scripts\\python.exe" "%~dp0kitsune_setup.py"', "kitsune_setup.py")
     download = index_of(lines, lambda l: l == '"%VENV%\\Scripts\\python.exe" "%~dp0server.py" --download-model %MODEL%', "download")
     done = index_of(lines, lambda l: l == "echo Close this window and start run.cmd.", "the last line")
     cookies = index_of(lines, lambda l: l == '"%VENV%\\Scripts\\python.exe" "%~dp0server.py" --setup-cookies', "--setup-cookies")
     amd = index_of(lines, lambda l: "amd_setup.py" in l and not l.startswith("REM"), "amd_setup.py")
-    assert check < choice < pick < cookies < download < amd < done
+    assert check < choice < pick < kitsune < cookies < download < amd < done
     # choice's errorlevel is the key's number, or 255 when it cannot read one (stdin closed or
-    # empty), and "if errorlevel N" means N or more: 3 is tested first, so that 255 takes large-v3
-    # like setup.sh's EOF fallback, then 2; the pick is the first thing after choice that looks at
-    # errorlevel (a set inside an if-block resets it to 0).
+    # empty), and "if errorlevel N" means N or more: 5 is tested first, so that 255 takes large-v3
+    # like setup.sh's EOF fallback, then 4, 3 and 2; the pick is the first thing after choice that
+    # looks at errorlevel (a set inside an if-block resets it to 0).
+    # PyTorch is installed only for a Kitsune model, before its download, and a failure ends setup.
+    assert lines[kitsune - 2] == 'if not "%MODEL:kitsune-=%"=="%MODEL%" ('
+    assert lines[kitsune + 1:kitsune + 8] == [
+        "  if errorlevel 1 (",
+        "    echo PyTorch could not be installed for the Kitsune model. Check the connection and run",
+        "    echo setup.cmd again, or pick a Whisper model.",
+        "    pause",
+        "    exit /b 1",
+        "  )",
+        ")",
+    ]
     assert pick == choice + 1
     errorlevel_tests = [i for i, l in enumerate(lines) if l.startswith("if errorlevel") and i > choice]
     assert errorlevel_tests[0] == pick
@@ -527,10 +541,16 @@ def test_setup_sh_asks_then_downloads_then_says_it_is_done():
     assert text.startswith("#!/usr/bin/env bash\n") and "set -euo pipefail" in text
     check = text.index('"${HERE}/server.py" --check')
     loop = text.index("while :; do")
-    read = text.index('read -r -p "Type 1 or 2: " pick || pick=1')
+    read = text.index('read -r -p "Type 1, 2, 3 or 4: " pick || pick=1')
     large = text.index("1) MODEL=large-v3; break;;")
     small = text.index("2) MODEL=small; break;;")
-    done_loop = text.index("done", small)
+    kit6 = text.index("3) MODEL=kitsune-0.6b; break;;")
+    kit1 = text.index("4) MODEL=kitsune-0.1b; break;;")
+    done_loop = text.index("done", kit1)
+    # PyTorch only for a Kitsune model, before its download; a failure ends setup.
+    kitsune = text.index('  kitsune-*)\n    echo\n    if ! "${VENV}/bin/python" "${HERE}/kitsune_setup.py"; then\n'
+                         '      echo "PyTorch could not be installed for the Kitsune model. Check the connection and run"\n'
+                         '      echo "setup.sh again, or pick a Whisper model."\n      exit 1\n    fi;;\nesac\n')
     # Its own line, and never the end of setup under set -e: the model download still follows.
     cookies = text.index('\n"${VENV}/bin/python" "${HERE}/server.py" --setup-cookies || true\n')
     download = text.index('if ! "${VENV}/bin/python" "${HERE}/server.py" --download-model "$MODEL"; then')
@@ -546,7 +566,8 @@ def test_setup_sh_asks_then_downloads_then_says_it_is_done():
     assert calls == [amd_call.strip("\n")], "amd_setup.py is called once, with the venv's Python and no arguments"
     complete = text.index('echo "Setup is complete: the $MODEL model is downloaded and everything is ready."')
     last = text.index('echo "Close this window and start ./run.sh."')
-    assert check < loop < read < large < small < done_loop < cookies < download < failed < exit_line < closed < amd < complete < last
+    assert check < loop < read < large < small < kit6 < kit1 < done_loop < kitsune < cookies < download < failed \
+        < exit_line < closed < amd < complete < last
     between = text[closed + len("\nfi\n"):amd].splitlines()
     assert all(l.startswith("#") or l == "echo" for l in between), "nothing but comments and a blank line before it"
     assert text[amd + len(amd_call):complete] == "echo\n"
@@ -563,14 +584,18 @@ def test_the_amd_helper_both_setups_call_is_there():
     assert '"%~dp0amd_setup.py"' in "\n".join(cmd_lines()) and '"${HERE}/amd_setup.py"' in sh_text()
 
 
-def test_setup_scripts_offer_the_same_two_models():
+def test_setup_scripts_offer_the_same_four_models():
     cmd = "\n".join(cmd_lines())
     sh = sh_text()
     for text in (cmd, sh):
-        assert "large-v3  best quality, about 3 GB, wants a GPU with 4 GB or more free" in text
-        assert "small     about 500 MB, fine on a CPU, less accurate" in text
-        assert "Which Whisper model should the server use? (the popup can switch later)" in text
+        assert "1  large-v3      Whisper: best quality, about 3 GB, wants a GPU with 4 GB or more free" in text
+        assert "2  small         Whisper: about 500 MB, fine on a CPU, less accurate" in text
+        assert "3  kitsune-0.6b  Kitsune-Transcribe: Japanese only, about 1.2 GB, plus PyTorch (about 3 GB)" in text
+        assert "4  kitsune-0.1b  Kitsune-Transcribe: Japanese only, about 200 MB, plus PyTorch, fine on a CPU" in text
+        assert "Which model should the server use? (the popup can switch later)" in text
     assert server.MODEL_SIZES["large-v3"] == "about 3 GB" and server.MODEL_SIZES["small"] == "about 500 MB"
+    assert server.kitsune_size("kitsune-0.6b") == "about 1.2 GB" and server.kitsune_size("kitsune-0.1b") == "about 210 MB"
+    assert (SERVER_DIR / "kitsune_setup.py").is_file() and (SERVER_DIR / "requirements-kitsune.txt").is_file()
 
 
 # --- server/tools/retranscribe.py: its --model default is the server's ---------------------------

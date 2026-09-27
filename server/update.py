@@ -14,6 +14,7 @@ Stdlib only, on purpose: it runs before the requirements are (re)installed.
 """
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import os
@@ -33,6 +34,8 @@ ROOT = Path(__file__).resolve().parent.parent  # the checkout: server/, addon/, 
 NETWORK_TIMEOUT = 20.0  # seconds per request
 FETCH_TIMEOUT = 60.0    # git fetch may have to negotiate a bit longer
 MAX_ZIP_BYTES = 64 * 1024 * 1024  # a release zip is a few MB; anything bigger is not ours
+KITSUNE_REQUIREMENTS = "requirements-kitsune.txt"
+REQUIREMENT_FILES = ("requirements.txt", KITSUNE_REQUIREMENTS)  # under server/, each installed when it changed
 
 
 def say(message: str) -> None:
@@ -64,13 +67,24 @@ def manifest_version(text: str) -> Optional[str]:
     return version if isinstance(version, str) else None
 
 
+def read_text(path: Path) -> str:
+    """A file's text, "" when it is not there."""
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
 def looks_like_checkout(root: Path) -> bool:
     return (root / "server" / "server.py").is_file() and (root / "addon" / "manifest.json").is_file()
 
 
-def install_requirements(root: Path) -> None:
-    """Install server/requirements.txt into the interpreter running this script."""
-    requirements = root / "server" / "requirements.txt"
+def install_requirements(root: Path, name: str = "requirements.txt") -> None:
+    """Install server/<name> into the interpreter running this script.
+
+    requirements-kitsune.txt (the Kitsune models' transformers) only where kitsune_setup.py has
+    installed PyTorch: a Whisper-only venv never asked for it.
+    """
+    requirements = root / "server" / name
+    if name == KITSUNE_REQUIREMENTS and importlib.util.find_spec("torch") is None:
+        return
     if sys.prefix == sys.base_prefix:  # not a venv: never touch a system Python
         say(f"the Python requirements changed; install them with: python -m pip install -r {requirements}")
         return
@@ -134,7 +148,7 @@ def update_git(root: Path) -> bool:
     except subprocess.CalledProcessError:
         say(f"this checkout has commits that are not on {upstream}; not updating it automatically")
         return False
-    old_requirements = git_file(root, old, "server/requirements.txt")
+    old_requirements = {name: git_file(root, old, f"server/{name}") for name in REQUIREMENT_FILES}
     old_manifest = git_file(root, old, "addon/manifest.json")
     try:
         git(root, "merge", "--ff-only", "--quiet", upstream)
@@ -145,8 +159,9 @@ def update_git(root: Path) -> bool:
     say(f"updated Shisu-ko {old[:7]} -> {new[:7]}:")
     for line in git(root, "log", "--oneline", "--no-decorate", f"{old}..{new}").splitlines()[:15]:
         say(f"  {line}")
-    if git_file(root, new, "server/requirements.txt") != old_requirements:
-        install_requirements(root)
+    for name in REQUIREMENT_FILES:
+        if git_file(root, new, f"server/{name}") != old_requirements[name]:
+            install_requirements(root, name)
     report_extension_change(old_manifest, git_file(root, new, "addon/manifest.json"))
     return True
 
@@ -224,9 +239,8 @@ def update_zip(root: Path) -> bool:
     except Exception as exc:  # noqa: BLE001
         say(f"the download failed ({exc}); starting the current version")
         return False
-    requirements = root / "server" / "requirements.txt"
     manifest = root / "addon" / "manifest.json"
-    old_requirements = requirements.read_text(encoding="utf-8") if requirements.is_file() else ""
+    old_requirements = {name: read_text(root / "server" / name) for name in REQUIREMENT_FILES}
     old_manifest = manifest.read_text(encoding="utf-8") if manifest.is_file() else ""
     try:
         count = unpack_over(archive, root)
@@ -235,8 +249,9 @@ def update_zip(root: Path) -> bool:
             f"Download {zip_url} and unpack it over this folder to repair it")
         return False
     say(f"updated Shisu-ko {local} -> {tag.lstrip('v')} ({count} files)")
-    if requirements.read_text(encoding="utf-8") != old_requirements:
-        install_requirements(root)
+    for name in REQUIREMENT_FILES:
+        if read_text(root / "server" / name) != old_requirements[name]:
+            install_requirements(root, name)
     report_extension_change(old_manifest, manifest.read_text(encoding="utf-8"))
     return True
 
