@@ -191,6 +191,22 @@ in `publish-addon.cmd` / `sign-addon.cmd`, the places that give it the AMO key o
 listing workflow also refuses tags before v0.14.2: 0.14.1 is a listed version of its own, waiting
 for its review, and `0.14.1.1` would disable it.
 
+The actions run on Node 24, at one major each in every workflow: `actions/checkout@v7`,
+`actions/setup-node@v7`, `actions/setup-python@v7`, `actions/upload-artifact@v7` and
+`softprops/action-gh-release@v3`. GitHub runs an action built for Node 20 on Node 24 with a
+warning on every run and takes Node 20 off its runners
+([changelog](https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/)).
+None of the majors changed what the workflows do. checkout keeps its token in a file of its own
+under `$RUNNER_TEMP` from v6 on, which nothing here reads (the workflows call `gh` with `GH_TOKEN`
+and never push with git), and from v7 on refuses a fork's pull request under `workflow_run` or
+`pull_request_target`, where `cws-listing.yml` checks out only its own commit. setup-node restores
+and saves an npm cache by itself from v5 on, but only once `package.json` names npm in
+`packageManager` or `devEngines.packageManager`, which it does not; the jobs that hold the AMO key
+or the store's, or write to the releases (`release.yml`, `amo-listing.yml`, `amo-xpi.yml`,
+`cws-listing.yml`), set `package-manager-cache: false` all the same, as actions/setup-node advises
+for a job with privileges. setup-python v7 drops only the `pip-install` input, upload-artifact v7
+still zips unless told otherwise, and action-gh-release v3 changes nothing but its Node.
+
 The Chrome Web Store gets every release by itself, from `.github/workflows/cws-listing.yml`, and
 store installs get it once the store's review has passed, which can take days; until then they keep
 the badge and the popup's store note (see "Chrome." above). Unlike the AMO listing there is nothing
@@ -326,7 +342,11 @@ unsigned stand-in in, from a step without a condition; that the listing workflow
 tag, the v0.14.2 floor and that it is the newest, then builds, stamps, lints and submits in that
 order, and fails for a disabled number; that `amo-xpi.yml` only downloads, fails when the release
 is not there, looks past the unsigned stand-in, checks the build before it attaches and deletes
-the stand-in after, warns on a missing file and fails on a rejected one; that web-ext is pinned to one version in all of them; that `publish-addon.cmd`
+the stand-in after, warns on a missing file and fails on a rejected one; that web-ext is pinned to one version in all of them; that every action in every
+workflow file is one it knows the first Node 24 major of, at that major or a later one, at one
+major across the files and named by it (`owner/repo@v<major>`); that setup-node in `release.yml`,
+`amo-listing.yml`, `amo-xpi.yml` and `cws-listing.yml` sets `package-manager-cache: false` and no
+`cache:`; that `publish-addon.cmd`
 takes only a major.minor.patch version and v-digits-dots tags (git allows `&`, `|`, `<`, `>` in a
 tag name, and cmd.exe would run them), fetches the tags, checks the newest tag and the tree
 before it builds, stamps, reads the stamp back and submits, and `sign-addon.cmd` checks the
