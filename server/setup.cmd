@@ -1,7 +1,8 @@
 @echo off
 setlocal
 REM One-time setup: creates an isolated Python environment under %USERPROFILE%\.shisu-ko
-REM and installs faster-whisper, yt-dlp and the CUDA runtime libraries.
+REM and installs faster-whisper, yt-dlp and the CUDA runtime libraries; where it finds an AMD
+REM graphics card, amd_setup.py offers the experimental AMD engine as well.
 
 set "ROOT=%USERPROFILE%\.shisu-ko"
 set "VENV=%ROOT%\venv"
@@ -88,6 +89,12 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+REM An AMD graphics card can run the server through CTranslate2's ROCm build (experimental).
+REM amd_setup.py looks for one, asks before it downloads anything and says what went wrong, if
+REM anything did. Its errorlevel is not looked at: the setup that has just succeeded must not
+REM end on it.
+echo.
+"%VENV%\Scripts\python.exe" "%~dp0amd_setup.py"
 echo.
 echo Setup is complete: the %MODEL% model is downloaded and everything is ready.
 echo Close this window and start run.cmd.

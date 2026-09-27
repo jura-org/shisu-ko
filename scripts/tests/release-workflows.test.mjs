@@ -331,6 +331,32 @@ test("every release goes to the Chrome Web Store by itself, the newest one, as t
   // A refused upload or publish is fixed in the Developer Dashboard, and the errors say so.
   const error = (label) => branch(label).find((line) => line.startsWith('echo "::error::'));
   for (const label of ["submit", "waiting", "rejected-older"]) assert.match(error(label), /Developer Dashboard/);
+  // A refused upload leaves nothing on the store, and a later run uploads again. A refused publish
+  // leaves the version as a draft that the store refuses as a new upload, so every later run fails
+  // the same way: that draft is submitted in the Dashboard by hand, and no error sends anyone to
+  // wait for the schedule or to run the workflow again for it. Each error tells the two apart by
+  // the words scripts/cws.mjs starts their lines with (scripts/tests/cws.test.mjs holds those),
+  // the upload's first, so that what follows the publish's words is about the publish alone.
+  for (const label of ["submit", "waiting", "rejected-older"]) {
+    const text = error(label);
+    const refusedUpload = text.indexOf("'the upload failed'");
+    const refusedPublish = text.indexOf("'publish failed'");
+    assert.ok(refusedUpload >= 0 && refusedPublish > refusedUpload, `${label}: the error names a failed upload, then a failed publish`);
+    const publishCase = text.slice(refusedPublish);
+    assert.match(publishCase, /as a draft.*Developer Dashboard.*Privacy.*submit the draft there with Submit for review/, label);
+    assert.doesNotMatch(publishCase, /schedule|three hours|gh workflow run|by hand/, label);
+    // A later run meets that draft at the upload, which the store then refuses: the upload's case
+    // sends the reader to the Dashboard's Package tab first, and to the draft if it holds one,
+    // before it says that nothing reached the store.
+    const uploadCase = text.slice(refusedUpload, refusedPublish);
+    assert.match(uploadCase, /Package tab.*as a draft.*submit that draft there with Submit for review.*if it does not, nothing reached the store/, label);
+  }
+  // Only a failed upload waits for the schedule, and only where the schedule submits: never past a
+  // rejected older version, whose error sends the reader to a run by hand (below).
+  for (const label of ["submit", "waiting"]) {
+    const text = error(label);
+    assert.match(text.slice(text.indexOf("'the upload failed'"), text.indexOf("'publish failed'")), /the schedule .*within three hours/, label);
+  }
   // "rejected-older" uploads only in a run by hand or in the first run of this version's own
   // release: a re-run of any tag's release workflow, another tag's release and the schedule reach
   // the warning. That arm never uploads and never fails, and says to read the review and then run

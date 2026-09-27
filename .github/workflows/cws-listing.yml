@@ -129,7 +129,11 @@ jobs:
       # run ends after the rejection goes up that way too. The schedule, which no one starts, a
       # re-run of a release workflow (for AMO's .xpi, say) and another tag's release only warn and
       # leave it to someone who has read the review. An upload or a publish the store refuses fails
-      # the run, the schedule's too, and the error says what to do: nothing else tells anyone. This
+      # the run, the schedule's too, and the error says what to do: nothing else tells anyone. A
+      # refused upload leaves nothing on the store, and a later run uploads again; a refused publish
+      # leaves the version as a draft that the store refuses as a new upload, so every later run
+      # fails at the upload, and that draft is submitted in the Developer Dashboard by hand. The
+      # error says so for each, and sends a failed upload to the Dashboard's Package tab first. This
       # version staged waits for a person to publish it in the Developer Dashboard, so it warns. A
       # rejection or a take-down needs a person too, and fails a release's run and a run by hand;
       # the schedule, which meets it eight times a day until the next release or the end of the
@@ -153,7 +157,7 @@ jobs:
           case "$state" in
             submit)
               if ! state="$(node scripts/cws.mjs submit "dist/release/shisu-ko-$VERSION-chrome.zip" "$VERSION")"; then
-                echo "::error::$VERSION did not reach the Chrome Web Store (the lines above say why): if the store refused the upload or the publish, fix what it refused in the Chrome Web Store Developer Dashboard, and the schedule uploads and submits $VERSION again within three hours; or submit the draft there by hand once it holds $VERSION"
+                echo "::error::$VERSION did not reach the Chrome Web Store (the lines above say why). If they say 'the upload failed', look at the Package tab of the Chrome Web Store Developer Dashboard: if it holds $VERSION as a draft (an earlier run's publish was refused), the store refuses the same version as a new upload and every later run fails the same way, so fix what the Dashboard asks for and submit that draft there with Submit for review; if it does not, nothing reached the store: the schedule tries again within three hours, or run cws-listing.yml by hand (gh workflow run cws-listing.yml). If they say 'publish failed', the upload went in, and the store holds $VERSION as a draft that it refuses as a new upload: fix what the Chrome Web Store Developer Dashboard asks for (for example the permission justifications in its Privacy tab) and submit the draft there with Submit for review. Any other line: docs/cws/README.md, When a request failed"
                 exit 1
               fi
               echo "::notice::$VERSION is submitted to the Chrome Web Store ($state); the store publishes it once its review has passed"
@@ -161,7 +165,7 @@ jobs:
             waiting)
               if [ "$CANCEL_REVIEW" = true ]; then
                 if ! state="$(node scripts/cws.mjs submit "dist/release/shisu-ko-$VERSION-chrome.zip" "$VERSION" --cancel-review)"; then
-                  echo "::error::$VERSION did not reach the Chrome Web Store (the lines above say why, and whether the waiting review was cancelled before that): once it is cancelled, the schedule uploads and submits $VERSION within three hours, so if the store refused the upload or the publish, fix what it refused in the Chrome Web Store Developer Dashboard; if it was not cancelled, run this workflow by hand with cancel_review again"
+                  echo "::error::$VERSION did not reach the Chrome Web Store (the lines above say why, and whether the waiting review was cancelled before that). If it was not cancelled, run this workflow by hand with cancel_review again (gh workflow run cws-listing.yml -f cancel_review=true). If it was, and the lines say 'the upload failed', look at the Package tab of the Chrome Web Store Developer Dashboard: if it holds $VERSION as a draft (an earlier run's publish was refused), the store refuses the same version as a new upload and every later run fails the same way, so fix what the Dashboard asks for and submit that draft there with Submit for review; if it does not, nothing reached the store: the schedule uploads and submits $VERSION within three hours. If they say 'publish failed', the upload went in, and the store holds $VERSION as a draft that it refuses as a new upload: fix what the Chrome Web Store Developer Dashboard asks for (for example the permission justifications in its Privacy tab) and submit the draft there with Submit for review. Any other line: docs/cws/README.md, When a request failed"
                   exit 1
                 fi
                 echo "::notice::the waiting review is cancelled and $VERSION is submitted to the Chrome Web Store in its place ($state); the store publishes it once its review has passed"
@@ -184,7 +188,7 @@ jobs:
             rejected-older)
               if [ "$EVENT" = workflow_dispatch ] || { [ "$EVENT" = workflow_run ] && [ "$RELEASE_TAG" = "v$VERSION" ] && [ "$RUN_ATTEMPT" = 1 ]; }; then
                 if ! state="$(node scripts/cws.mjs submit "dist/release/shisu-ko-$VERSION-chrome.zip" "$VERSION")"; then
-                  echo "::error::$VERSION did not reach the Chrome Web Store (the lines above say why): if the store refused the upload or the publish, fix what it refused in the Chrome Web Store Developer Dashboard, then run this workflow by hand again (gh workflow run cws-listing.yml), since the schedule does not submit past the rejected older version; or submit the draft there by hand once it holds $VERSION"
+                  echo "::error::$VERSION did not reach the Chrome Web Store (the lines above say why). If they say 'the upload failed', look at the Package tab of the Chrome Web Store Developer Dashboard: if it holds $VERSION as a draft (an earlier run's publish was refused), the store refuses the same version as a new upload and every later run fails the same way, so fix what the Dashboard asks for and submit that draft there with Submit for review; if it does not, nothing reached the store: run this workflow by hand again (gh workflow run cws-listing.yml), since the schedule does not submit past the rejected older version. If they say 'publish failed', the upload went in, and the store holds $VERSION as a draft that it refuses as a new upload: fix what the Chrome Web Store Developer Dashboard asks for (for example the permission justifications in its Privacy tab) and submit the draft there with Submit for review. Any other line: docs/cws/README.md, When a request failed"
                   exit 1
                 fi
                 echo "::warning::$VERSION is submitted to the Chrome Web Store ($state) in place of the older version the store rejected (the line above names it): read that review in the Chrome Web Store Developer Dashboard, and if $VERSION repeats what was rejected, release the next patch version"

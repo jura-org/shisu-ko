@@ -52,6 +52,12 @@ if ! "${VENV}/bin/python" "${HERE}/server.py" --download-model "$MODEL"; then
   echo "or start ./run.sh: the server then downloads $MODEL itself, without a progress bar."
   exit 1
 fi
+# An AMD graphics card can run the server through CTranslate2's ROCm build (experimental).
+# amd_setup.py looks for one, asks before it downloads anything and says what went wrong, if
+# anything did; the setup that has just succeeded must not end on it. Its question reads the
+# same stdin as the cookie question, so an unattended setup gets an EOF, which is a no.
+echo
+"${VENV}/bin/python" "${HERE}/amd_setup.py" || true
 echo
 echo "Setup is complete: the $MODEL model is downloaded and everything is ready."
 echo "Close this window and start ./run.sh."
