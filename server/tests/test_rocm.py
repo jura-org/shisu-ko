@@ -2242,3 +2242,31 @@ def test_the_real_folder_check_of_a_folder_that_was_not_there(tmp_path):
     (home / "rocm").rmdir()
     home.rmdir()
     assert check.home_changes(after, check.snapshot(home)) == ["the folder was removed", "removed: rocm"]
+
+
+# --- Kitsune models (PyTorch) next to the AMD engine ---------------------------------------------
+
+def test_a_probe_with_a_kitsune_model_chosen_tests_whisper_tiny_and_keeps_the_choice(monkeypatch, tmp_path, capsys):
+    # Setup runs amd_setup.py after a Kitsune download, and --probe-gpu takes config.json's model:
+    # a Kitsune model runs on PyTorch, never on this engine, so Whisper's smallest stands in.
+    made = fake_engine(monkeypatch, tmp_path)
+    write_json(tmp_path / "config.json", {"model": "kitsune-0.6b"})
+    assert probe(monkeypatch) == [0]
+    assert config(tmp_path) == {"model": "kitsune-0.6b", "engine": "rocm"}
+    assert [name for name, _kwargs in made] == [server.PROBE_WHISPER_MODEL]
+    assert "runs on PyTorch, not on this engine; testing with tiny instead" in capsys.readouterr().out
+
+
+def test_a_kitsune_start_with_the_engine_on_clears_the_crash_guard(monkeypatch, tmp_path):
+    # main() counts every GPU start with the engine on and only a load that got through takes it
+    # back; a Kitsune model (PyTorch) cannot crash the ROCm runtime, so its start clears it too.
+    monkeypatch.setattr(server, "ROCM_ACTIVE", True)
+    monkeypatch.setattr(server, "ROCM_STARTS_PATH", tmp_path / "rocm-starts")
+    (tmp_path / "rocm-starts").write_text("1\n", encoding="utf-8")
+    model = SimpleNamespace(device="cpu", compute_label="float32", transcribe=lambda *a, **k: ([], None))
+    monkeypatch.setattr(server, "kitsune_runtime_missing", lambda: None)
+    monkeypatch.setattr(server, "kitsune_engine", lambda: SimpleNamespace(load=lambda *a, **k: model, PackageError=ValueError))
+    monkeypatch.setattr(server, "gpu_memory_mb", lambda: None)
+    args = SimpleNamespace(language="ja", device="auto", compute_type="auto", cpu_threads=0)
+    assert server.load_kitsune_model(args, "kitsune-0.1b", path=str(tmp_path))[0] is model
+    assert not (tmp_path / "rocm-starts").exists()
