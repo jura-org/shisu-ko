@@ -21,9 +21,10 @@ const EXPORTS =
   "  return { state, shouldSync, coveredRange, coveredEnd, findActiveCue, jumpTarget, sentenceForCue, nextSentence, rankOfCue," +
   " premineAllowed, premineNow, captureHoverFrame, autoAnkiMining, resetPremine, getVideoIdFromUrl, mergeCues, cueById, ankiPollAllowed," +
   " currentCueForMining, liveClock, updateLiveClock, playhead, seekPlayhead, onKeyDown, onMineClick, onTranscriptClick, onSubtitleEnter," +
-  " onSubtitleLeave, onPlayerMouseMove, modelForSync, fontStack, sync, onVideoChanged, setSubtitle, updateStatus, statusText, isShortsUrl," +
+  " onSubtitleLeave, onPlayerMouseMove, onPlayerMouseLeave, modelForSync, fontStack, sync, onVideoChanged, setSubtitle, updateStatus, statusText, isShortsUrl," +
   " startTimeFromUrl, findPlayer, discover, pollForNewCard, autoMine, onTranscriptLineEnter, onTranscriptLineLeave," +
-  " renderText, refreshWordMarks, pollWordIndex, wordColoursOn, syncTick, transcriptLine, mineCue };\n";
+  " renderText, refreshWordMarks, pollWordIndex, wordColoursOn, syncTick, transcriptLine, mineCue," +
+  " knownList, rebuildWordIndex, segmentAt, entryWordFor, knownTarget, markKnown };\n";
 
 function instrument(source) {
   const open = source.indexOf(OPEN);
@@ -169,6 +170,9 @@ function loadContent(overrides = {}) {
       createElement: (tag) => stubElement(tag),
       createTextNode: (text) => textNode(text),
       createDocumentFragment: () => stubNode(11, "#document-fragment"),
+      // Nothing selected, and no caret API: a test of the known-words shortcut puts its own
+      // getSelection or caretPositionFromPoint here.
+      getSelection: () => null,
     },
     browser: {
       runtime: {

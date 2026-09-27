@@ -70,23 +70,40 @@ jobs:
               *) echo "$f is not executable in git"; exit 1 ;;
             esac
           done
+      # Firefox's folder, and Chrome's and Chromium's under XDG_CONFIG_HOME (the runner sets one;
+      # it is pointed into the scratch profile, away from ~/.config, to show that it is followed).
       - name: Register and unregister the Start button's launcher in a scratch profile
         run: |
           export HOME="$(mktemp -d)"
+          export XDG_CONFIG_HOME="$HOME/xdg-config"
           python server/native_host.py --status
           python server/native_host.py --register --verbose
-          test -f "$HOME/.mozilla/native-messaging-hosts/shisuko.json"
           python - <<'EOF'
           import json, os
-          m = json.load(open(os.path.expanduser("~/.mozilla/native-messaging-hosts/shisuko.json")))
-          assert m["name"] == "shisuko" and m["type"] == "stdio", m
-          assert m["allowed_extensions"] == ["shisu-ko@multysquid.github.io"], m
-          assert m["path"].endswith("/server/native-host.sh") and os.access(m["path"], os.X_OK), m
+          home, config = os.environ["HOME"], os.environ["XDG_CONFIG_HOME"]
+          manifests = {
+              f"{home}/.mozilla/native-messaging-hosts/shisuko.json": ("allowed_extensions", ["shisu-ko@multysquid.github.io"]),
+              f"{config}/google-chrome/NativeMessagingHosts/shisuko.json": ("allowed_origins", ["chrome-extension://ecenifonpkaiccmmknpbllbebbfigjnm/"]),
+              f"{config}/chromium/NativeMessagingHosts/shisuko.json": ("allowed_origins", ["chrome-extension://ecenifonpkaiccmmknpbllbebbfigjnm/"]),
+          }
+          for path, (key, allowed) in manifests.items():
+              m = json.load(open(path))
+              assert m["name"] == "shisuko" and m["type"] == "stdio", m
+              assert m[key] == allowed and set(m) == {"name", "description", "path", "type", key}, m
+              assert m["path"].endswith("/server/native-host.sh") and os.access(m["path"], os.X_OK), m
+          assert not os.path.exists(f"{home}/.config"), "XDG_CONFIG_HOME was not followed"
           EOF
-          python server/native_host.py --status | grep -q "registered at"
+          status="$(python server/native_host.py --status)"
+          echo "$status"
+          for browser in Firefox Chrome Chromium; do
+            echo "$status" | grep -q "$browser registered at"
+          done
           python server/native_host.py --unregister --verbose
           test ! -f "$HOME/.mozilla/native-messaging-hosts/shisuko.json"
-      - name: Drive the real run.sh through register, update, exit code 4 and restart
+          test ! -f "$XDG_CONFIG_HOME/google-chrome/NativeMessagingHosts/shisuko.json"
+          test ! -f "$XDG_CONFIG_HOME/chromium/NativeMessagingHosts/shisuko.json"
+          python server/native_host.py --status | grep -q "^Start button launcher: not registered"
+      - name: Drive the real run.sh through register, update, exit code 4 and restart, and setup.sh under yes 1
         run: bash scripts/launcher-smoke.sh
 
   addon:
@@ -110,8 +127,12 @@ jobs:
         run: npm ci
       - name: Run build tests
         run: npm run test:build
+      # Any release may be published on the listing with these texts (amo-listing.yml, from its
+      # tag); a version bump without new release notes fails here rather than at that point.
+      - name: Check the addons.mozilla.org listing texts
+        run: python3 docs/amo/make_metadata.py
       - name: Lint Firefox package
-        run: npx --yes web-ext lint --source-dir addon
+        run: npx --yes web-ext@10.7.0 lint --source-dir addon
       - name: Build browser packages
         run: npm run build
       - name: Upload browser packages

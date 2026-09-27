@@ -18,10 +18,11 @@
     <div class="statusline">
       <span id="server-status" class="badge">Checking server</span>
       <span id="server-detail" class="detail"></span>
-      <!-- Shown only while the server is offline, and in Firefox alone (the launcher is
-           registered for Firefox; see START_AVAILABLE in popup.js). It asks for the
-           nativeMessaging permission on the first click and then has the background start
-           server/run.cmd (run.sh) through the "shisuko" native host; popup.js owns the state. -->
+      <!-- Shown only while the server is offline, in Firefox and in the Chrome Web Store
+           install (the launcher is registered for those; an unpacked Chrome build's id is not
+           fixed, see START_AVAILABLE in popup.js). It asks for the nativeMessaging permission on
+           the first click and then has the background start server/run.cmd (run.sh) through
+           the "shisuko" native host; popup.js owns the state. -->
       <button id="start-server" type="button" class="linkbtn hidden">Start server</button>
     </div>
   </header>
@@ -35,8 +36,9 @@
     <!-- A newer release than the server runs (or than this extension is): the background checks
          GitHub once a day and popup.js writes the text for the case at hand (renderUpdate).
          "Update" asks the server to update itself and restart; "Not now" hides the banner for this
-         browser session; the release page link is for the extension, which addons.mozilla.org
-         updates once the listing is live. -->
+         browser session; the release page link is for the extension, whose signed .xpi every
+         release carries (the addons.mozilla.org listing gets only some releases, later), and is
+         never offered to a Chrome Web Store install, which the store updates. -->
     <div id="update-banner" class="banner notice hidden">
       <p id="update-text"></p>
       <div class="actions">
@@ -82,7 +84,7 @@
         <input type="checkbox" id="cardStatus">
         <span>Colour words by their Anki card</span>
       </label>
-      <p class="hint legend"><span class="sw learned"></span>learned <span class="sw learning"></span>learning <span class="sw suspended"></span>suspended <span class="sw new"></span>new · other words keep the text colour</p>
+      <p class="hint legend"><span class="sw learned"></span>learned <span class="sw learning"></span>learning <span class="sw suspended"></span>suspended <span class="sw new"></span>new <span class="sw proper"></span>names and Latin text, when switched on · other words keep the text colour</p>
       <label class="row field">
         <span class="lead">Deck</span>
         <select id="cardStatusDeck">
@@ -95,6 +97,34 @@
         <span>Overbar by pitch accent</span>
       </label>
       <p class="hint legend"><span class="sw heiban"></span>heiban <span class="sw atamadaka"></span>atamadaka <span class="sw nakadaka"></span>nakadaka <span class="sw odaka"></span>odaka · from the card's pitch accent field</p>
+      <!-- What colours without a card, folded away: every switch off by default, since a colour
+           says what the viewer's own deck says. -->
+      <details>
+        <summary>More word colour options</summary>
+        <div class="drawer">
+          <!-- Particles and grammar words green wherever they stand (off by default); off, a line colours its words alone. -->
+          <label class="row check">
+            <input type="checkbox" id="particlesKnown">
+            <span>Particles count as known</span>
+          </label>
+          <label class="row check">
+            <input type="checkbox" id="katakanaKnown">
+            <span>Katakana words count as known</span>
+          </label>
+          <!-- Names and Latin text blue (off by default): no card stands behind them. -->
+          <label class="row check">
+            <input type="checkbox" id="properNames">
+            <span>Names and Latin text in blue</span>
+          </label>
+          <!-- The viewer's own list, applied as learned over the deck: words known but not worth a
+               card. The shortcut adds the word under the pointer; the list is edited here. -->
+          <label class="row field">
+            <span class="lead">Known words</span>
+            <textarea id="knownWords" rows="3" spellcheck="false" placeholder="one word per line; Alt+Shift+K adds the word under the pointer"></textarea>
+          </label>
+          <p class="hint">Drawn as learned whatever their card says, or without one. <kbd>Alt+Shift+K</kbd> adds the word under the pointer, or a selected one, and takes it out again.</p>
+        </div>
+      </details>
     </section>
 
     <section>
@@ -112,6 +142,11 @@
       <label class="row check">
         <input type="checkbox" id="hideNativeCaptions">
         <span>Hide YouTube's own captions</span>
+      </label>
+      <label class="row check">
+        <input type="checkbox" id="statusBadge">
+        <span>Status badge on the video, errors too</span>
+        <kbd id="statusBadgeKey">Alt+Shift+H</kbd>
       </label>
       <label class="row check">
         <input type="checkbox" id="showStatus">
@@ -247,11 +282,11 @@
         </label>
         <div class="grid">
           <label class="row field">
-            <span class="lead">Image field</span>
+            <span class="lead">Image field <span class="soft">any case</span></span>
             <input type="text" id="ankiImageField" spellcheck="false">
           </label>
           <label class="row field">
-            <span class="lead">Audio field</span>
+            <span class="lead">Audio field <span class="soft">any case</span></span>
             <input type="text" id="ankiAudioField" spellcheck="false">
           </label>
         </div>

@@ -57,8 +57,12 @@ def parse_args(argv=None):
                         "but the audio is not silent, sung lyrics or speech over music, is transcribed without the "
                         "detector when Whisper hears the target language in it, under stricter gates; off: such "
                         "windows go through the detector as before, blank when it heard nothing")
-    p.add_argument("--initial-prompt", default="")
-    p.add_argument("--window", type=float, default=40.0)
+    p.add_argument("--sentence-ends", default="auto", choices=["auto", "off"],
+                   help="auto: write a sentence mark where Whisper left one out, when a word ending in a "
+                        "sentence-final expression is followed by a pause; off: Whisper's punctuation alone")
+    p.add_argument("--initial-prompt", default=None,
+                   help="default: the server's own prompt for --language (DEFAULT_PROMPTS); \"\" for none")
+    p.add_argument("--window", type=float, default=30.0)
     p.add_argument("--first-window", type=float, default=20.0)
     p.add_argument("--max-cue-chars", type=int, default=30)
     p.add_argument("--max-cue-seconds", type=float, default=7.0)
@@ -66,6 +70,8 @@ def parse_args(argv=None):
     p.add_argument("--limit-seconds", type=float, default=0.0, help="only transcribe the first N seconds")
     p.add_argument("--cpu-threads", type=int, default=0)
     args = p.parse_args(argv)
+    if args.initial_prompt is None:  # the tool measures what the server does, prompt included
+        args.initial_prompt = server.DEFAULT_PROMPTS.get(args.language, "")
     args.lookahead = 0.0          # no playhead here: cover the whole track
     args.language_patience = 0.0  # transcribe every window, whatever language it is in
     args.client_timeout = 0.0

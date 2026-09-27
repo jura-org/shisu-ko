@@ -1,0 +1,204 @@
+name: Publish a release on the Chrome Web Store
+
+# Every release goes to the Chrome Web Store by itself, once the release workflow has made it. A
+# Chrome Web Store install gets its updates only from the store, and the store takes a release as it
+# is (no listing texts to build, no number of its own), so unlike the addons.mozilla.org listing
+# there is nothing to decide by hand. It uploads the release's own Chrome zip, the one the release
+# workflow built, tested and attached, and never builds it again; only the release with the highest
+# version goes, since the store takes a version only above the one before. The store reviews one
+# submission at a time, so a release made while an older one still waits for its review, or is
+# approved and staged for someone to publish in the Developer Dashboard, is held back: the schedule
+# runs this workflow every three hours, and it submits the highest release once the store has
+# published the older one or its review is cancelled. When the store rejects the older one instead,
+# the schedule only warns, since the release may repeat what was rejected, and a run by hand submits
+# it once someone has read the review. A run by hand with cancel_review withdraws the older
+# submission and submits the highest release at once. That is never done by itself: the older review
+# may be nearly through, and the Developer Dashboard allows six cancellations a day. The schedule
+# lives in cws-schedule.yml, not here, because GitHub switches off a workflow with a schedule when
+# the repository has been quiet for long (cws-schedule.yml says when), and a workflow switched off
+# does not start for a release either: this one has no schedule, so a release after a long pause
+# still reaches the store, and only the catch-up of held-back releases waits for someone to turn the
+# schedule back on. Without the repository secret CWS_SERVICE_ACCOUNT_JSON and the repository
+# variable CWS_PUBLISHER_ID it does nothing (see docs/cws/README.md). By hand:
+# Actions > Publish a release on the Chrome Web Store > Run workflow, or
+# gh workflow run cws-listing.yml, with -f cancel_review=true to replace a waiting review.
+on:
+  workflow_run:
+    # release.yml's name: exactly; scripts/tests/release-workflows.test.mjs holds the two equal.
+    workflows: ["Release extensions"]
+    types: [completed]
+  # cws-schedule.yml's schedule. A called workflow runs with its caller's github context, so
+  # github.event_name reads schedule here as it did when the schedule was this file's own, and the
+  # steps below tell the schedule from a release and a run by hand as before. cancel_review is
+  # declared as for a run by hand, so that inputs.cancel_review is the same boolean whichever way
+  # the run starts; the schedule never sets it.
+  workflow_call:
+    inputs:
+      cancel_review:
+        description: Cancel a review that waits for an older release and submit the newest release instead
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      cancel_review:
+        description: Cancel a review that waits for an older release and submit the newest release instead
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    # A release workflow that failed made no release; the schedule still looks after the newest.
+    # workflow_run knows the release workflow only by its name, which a pull request from a fork
+    # can give a workflow of its own, and each of its runs would start this one with the store's
+    # key: only a run that the push of a tag in this repository started is a release.
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    # A release and the schedule can start runs at the same moment; one upload at a time, and the
+    # others wait their turn in order. A concurrency group holds across the repository's workflows,
+    # so this job waits in the same queue when cws-schedule.yml calls it, and the caller sets no
+    # group of its own. GitHub's default keeps one run waiting and cancels it for the next one,
+    # which would drop a run by hand that asked for cancel_review. The group is the job's, not the
+    # workflow's, so that a run whose job is skipped (a failed release, or a run that is no
+    # release) never takes a place in the queue, which holds 100 and cancels whatever comes after.
+    concurrency:
+      group: cws-listing
+      cancel-in-progress: false
+      queue: max
+    env:
+      CWS_KEY: ${{ secrets.CWS_SERVICE_ACCOUNT_JSON != '' && vars.CWS_PUBLISHER_ID != '' }}
+    steps:
+      # A fork, or this repository before the store is set up, has no key. The schedule then
+      # passes quietly, a release says it did not reach the store, and a run by hand fails, since
+      # someone asked for it.
+      - name: Check the key
+        if: env.CWS_KEY != 'true'
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          case "$EVENT" in
+            schedule)
+              echo "CWS_SERVICE_ACCOUNT_JSON or CWS_PUBLISHER_ID is not set: nothing goes to the Chrome Web Store (docs/cws/README.md)"
+              ;;
+            workflow_dispatch)
+              echo "::error::the repository secret CWS_SERVICE_ACCOUNT_JSON or the repository variable CWS_PUBLISHER_ID is not set: set them up as docs/cws/README.md says, then run this again"
+              exit 1
+              ;;
+            *)
+              echo "::warning::this release did not go to the Chrome Web Store: the repository secret CWS_SERVICE_ACCOUNT_JSON or the repository variable CWS_PUBLISHER_ID is not set (docs/cws/README.md)"
+              ;;
+          esac
+      # The script comes from this workflow's own commit, the package from the release.
+      - uses: actions/checkout@v4
+        if: env.CWS_KEY == 'true'
+      - uses: actions/setup-node@v4
+        if: env.CWS_KEY == 'true'
+        with:
+          node-version: "22"
+      # The release with the highest version, whatever started the run: the store takes a version
+      # only above the one it has, so a lower release has nothing to add. That is not always the
+      # release GitHub marks latest, which is the one published last: a re-run of an older tag's
+      # release workflow publishes after a newer release. Its version is the tag's, and
+      # scripts/cws.mjs refuses a zip whose manifest holds another. A gh that fails stops the step.
+      - name: Download the newest release's Chrome package
+        if: env.CWS_KEY == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tags="$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases --limit 100 --json tagName --jq '.[].tagName')"
+          tag="$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' <<<"$tags" | sort -V | tail -n 1)"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::no release has a release tag (v<major>.<minor>.<patch>): nothing to submit"
+            exit 1
+          fi
+          gh release download "$tag" -R "$GITHUB_REPOSITORY" -p "shisu-ko-${tag#v}-chrome.zip" -D dist/release
+          echo "VERSION=${tag#v}" >> "$GITHUB_ENV"
+      # The store says what it holds against the version first, and only "submit" and
+      # "rejected-older" upload. An older version still in review, or approved and staged, holds
+      # this one back until the schedule finds it published or its review cancelled, unless
+      # cancel_review asks to withdraw it now. An older version the store rejected holds nothing
+      # back, but this version may have been released while that one was in review and repeat what
+      # was rejected, so it goes up only on a person's decision: a run by hand, or the first run of
+      # this version's own release (RELEASE_TAG and RUN_ATTEMPT say which release run started this
+      # one), which then warns to read the review. A release tagged during the older review whose
+      # run ends after the rejection goes up that way too. The schedule, which no one starts, a
+      # re-run of a release workflow (for AMO's .xpi, say) and another tag's release only warn and
+      # leave it to someone who has read the review. An upload or a publish the store refuses fails
+      # the run, the schedule's too, and the error says what to do: nothing else tells anyone. This
+      # version staged waits for a person to publish it in the Developer Dashboard, so it warns. A
+      # rejection or a take-down needs a person too, and fails a release's run and a run by hand;
+      # the schedule, which meets it eight times a day until the next release or the end of the
+      # take-down, only warns, since the store emails the developer about both, and a red run every
+      # three hours would bury the failures no one has been told of. Anything else is the store busy
+      # with this version or past it, or a review of it cancelled in the Dashboard, which is left
+      # alone until the next release.
+      - name: Submit it to the Chrome Web Store
+        if: env.CWS_KEY == 'true'
+        env:
+          CWS_SERVICE_ACCOUNT_JSON: ${{ secrets.CWS_SERVICE_ACCOUNT_JSON }}
+          CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          CANCEL_REVIEW: ${{ inputs.cancel_review }}
+          EVENT: ${{ github.event_name }}
+          # The release run that started this one, empty for the schedule and a run by hand: its
+          # tag (a tag push's head_branch is the tag) and its attempt, 1 unless it was re-run.
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          state="$(node scripts/cws.mjs status "$VERSION")"
+          case "$state" in
+            submit)
+              if ! state="$(node scripts/cws.mjs submit "dist/release/shisu-ko-$VERSION-chrome.zip" "$VERSION")"; then
+                echo "::error::$VERSION did not reach the Chrome Web Store (the lines above say why): if the store refused the upload or the publish, fix what it refused in the Chrome Web Store Developer Dashboard, and the schedule uploads and submits $VERSION again within three hours; or submit the draft there by hand once it holds $VERSION"
+                exit 1
+              fi
+              echo "::notice::$VERSION is submitted to the Chrome Web Store ($state); the store publishes it once its review has passed"
+              ;;
+            waiting)
+              if [ "$CANCEL_REVIEW" = true ]; then
+                if ! state="$(node scripts/cws.mjs submit "dist/release/shisu-ko-$VERSION-chrome.zip" "$VERSION" --cancel-review)"; then
+                  echo "::error::$VERSION did not reach the Chrome Web Store (the lines above say why, and whether the waiting review was cancelled before that): once it is cancelled, the schedule uploads and submits $VERSION within three hours, so if the store refused the upload or the publish, fix what it refused in the Chrome Web Store Developer Dashboard; if it was not cancelled, run this workflow by hand with cancel_review again"
+                  exit 1
+                fi
+                echo "::notice::the waiting review is cancelled and $VERSION is submitted to the Chrome Web Store in its place ($state); the store publishes it once its review has passed"
+              else
+                echo "::notice::an older version waits for its review on the Chrome Web Store, or is approved and staged (the line above says which), and it comes first: the schedule submits $VERSION once the store has published it or its review is cancelled, which for a staged version means someone publishes it in the Chrome Web Store Developer Dashboard (or it returns to a draft after 30 days); if the store rejects it instead, the schedule only warns, and $VERSION waits for a run by hand from someone who has read the review; or run cws-listing.yml by hand with cancel_review (gh workflow run cws-listing.yml -f cancel_review=true) to withdraw it and submit $VERSION now"
+              fi
+              ;;
+            staged)
+              echo "::warning::$VERSION is approved and staged on the Chrome Web Store: publish it in the Chrome Web Store Developer Dashboard (a staged version returns to a draft after 30 days)"
+              ;;
+            rejected)
+              message="the Chrome Web Store has rejected $VERSION: read the review in the Chrome Web Store Developer Dashboard, then release the next patch version"
+              if [ "$EVENT" = schedule ]; then
+                echo "::warning::$message"
+              else
+                echo "::error::$message"
+                exit 1
+              fi
+              ;;
+            rejected-older)
+              if [ "$EVENT" = workflow_dispatch ] || { [ "$EVENT" = workflow_run ] && [ "$RELEASE_TAG" = "v$VERSION" ] && [ "$RUN_ATTEMPT" = 1 ]; }; then
+                if ! state="$(node scripts/cws.mjs submit "dist/release/shisu-ko-$VERSION-chrome.zip" "$VERSION")"; then
+                  echo "::error::$VERSION did not reach the Chrome Web Store (the lines above say why): if the store refused the upload or the publish, fix what it refused in the Chrome Web Store Developer Dashboard, then run this workflow by hand again (gh workflow run cws-listing.yml), since the schedule does not submit past the rejected older version; or submit the draft there by hand once it holds $VERSION"
+                  exit 1
+                fi
+                echo "::warning::$VERSION is submitted to the Chrome Web Store ($state) in place of the older version the store rejected (the line above names it): read that review in the Chrome Web Store Developer Dashboard, and if $VERSION repeats what was rejected, release the next patch version"
+              else
+                echo "::warning::the Chrome Web Store rejected the older version in its submission (the line above names it), and $VERSION may have been released while that one was in review and repeat what was rejected, so this run does not submit it: read the review in the Chrome Web Store Developer Dashboard, then run cws-listing.yml by hand (gh workflow run cws-listing.yml) or release the next patch version"
+              fi
+              ;;
+            taken-down)
+              message="the Chrome Web Store has taken Shisu-ko down: read why in the Chrome Web Store Developer Dashboard, then appeal there, or fix it in a release and upload and submit that release's Chrome zip (its asset shisu-ko-<version>-chrome.zip) there by hand; the store lists the item again only after an appeal or a fixed version passes, and this workflow submits nothing while it is taken down"
+              if [ "$EVENT" = schedule ]; then
+                echo "::warning::$message"
+              else
+                echo "::error::$message"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::notice::nothing to submit: the Chrome Web Store's answer for $VERSION is $state (the line above says what it holds)"
+              ;;
+          esac

@@ -280,7 +280,8 @@ test("mineCue falls back to Downloads when AnkiConnect is unreachable and mineFa
   const res = await sandbox.mineCue({ videoId: "abc123abc123", cue: { start: 0, end: 1 } });
   assert.equal(res.ok, true, JSON.stringify(res));
   assert.equal(res.warning, true);
-  assert.match(res.message, /Anki/);
+  // The outcome first: a toast is cut at 240 characters, and the Anki error after it may run long.
+  assert.match(res.message, /^Saved to Downloads instead\. Anki: /);
   assert.equal(downloaded.length, 1);
 });
 
@@ -899,6 +900,154 @@ test("addToAnki writes to the note it is given without looking up the newest one
   assert.equal(update.params.note.id, 555);
   assert.equal(update.params.note.fields.Picture, '<img src="shot.jpg">');
   assert.equal(update.params.note.fields.SentenceAudio, "[sound:clip.mp3]");
+});
+
+// Eminent's note type spells its fields picture, sentenceAudio and sentence; the settings'
+// defaults say Picture, SentenceAudio and Sentence. Every mine used to fail with "The new card has
+// none of the fields Picture, SentenceAudio".
+function eminentFields(sentence) {
+  return [{ fields: {
+    wordDictionaryForm: { value: "猫", order: 0 }, sentence: { value: sentence, order: 1 },
+    sentenceAudio: { value: "", order: 5 }, picture: { value: "", order: 6 },
+  } }];
+}
+
+test("addToAnki fills a note type that spells the fields in another case, under its own names", async () => {
+  for (const noteId of [555, null]) {
+    const anki = ankiFetch({
+      requestPermission: granted,
+      findNotes: () => [555],
+      notesInfo: () => eminentFields("これは<b>猫</b>です。"),
+      storeMediaFile: (p) => p.filename,
+      updateNoteFields: null,
+    });
+    const { sandbox } = loadBackground({ fetch: anki.fetch });
+    const settings = await sandbox.getSettings();
+    const res = await sandbox.addToAnki(settings, { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, noteId);
+    assert.equal(res.ok, true, JSON.stringify(res));
+    const update = anki.calls.find((c) => c.action === "updateNoteFields");
+    assert.deepEqual(Object.keys(update.params.note.fields).sort(), ["picture", "sentenceAudio"], "the note type's own names, nothing new");
+    assert.equal(update.params.note.fields.picture, '<img src="shot.jpg">');
+    assert.equal(update.params.note.fields.sentenceAudio, "[sound:clip.mp3]");
+  }
+  // The guard reads the sentence under the note type's name too: a card about something else is
+  // refused rather than read as a card without a sentence.
+  const other = ankiFetch({
+    requestPermission: granted,
+    notesInfo: () => eminentFields("まったく別の文です。"),
+    storeMediaFile: (p) => p.filename,
+    updateNoteFields: null,
+  });
+  const { sandbox } = loadBackground({ fetch: other.fetch });
+  const res = await sandbox.addToAnki(await sandbox.getSettings(), { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555);
+  assert.equal(res.mismatch, true);
+  assert.ok(!other.actions().includes("updateNoteFields"));
+  // And the watcher's summary of a new note finds its sentence the same way.
+  assert.deepEqual(plain(sandbox.noteSummary(eminentFields("これは猫です。")[0], {})), { sentence: "これは猫です。", word: "猫" });
+});
+
+test("a card with none of the configured fields says which it has and where the settings are", async () => {
+  const anki = ankiFetch({
+    requestPermission: granted,
+    findNotes: () => [555],
+    notesInfo: () => [{ fields: {
+      Back: { value: "", order: 1 }, Front: { value: "猫", order: 0 }, Screenshot: { value: "", order: 2 }, Clip: { value: "", order: 3 },
+    } }],
+    storeMediaFile: (p) => p.filename,
+    updateNoteFields: null,
+  });
+  const { sandbox } = loadBackground({ fetch: anki.fetch });
+  // The note Yomitan just made, found by the watcher (the automatic mine), and so without a sentence
+  // field the guard could read: the note's own fields are all there is to go by.
+  const res = await sandbox.addToAnki(await sandbox.getSettings(), { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555);
+  assert.equal(res.ok, false);
+  // Where to change the names before the card's fields, which may run long; the fields that look
+  // like a picture or an audio field first.
+  assert.equal(res.error, 'The new card has no field "Picture" or "SentenceAudio". '
+    + "Check the field names and change them in the settings if they differ: popup > Anki, clips and server. "
+    + "Its fields: Screenshot, Clip, Front, Back.");
+  assert.ok(!anki.actions().includes("updateNoteFields"));
+  assert.ok(!anki.actions().includes("storeMediaFile"), "no media is uploaded for a card that cannot take it");
+  // A long note type lists its first fields only, and a mining note type's media fields, which
+  // sit near its end (Lapis: SentenceAudio 10th, Picture 11th), are among them.
+  const lapis = ["Expression", "ExpressionFurigana", "ExpressionReading", "ExpressionAudio", "SelectionText", "MainDefinition",
+    "DefinitionPicture", "Sentence", "SentenceFurigana", "SentenceAudio", "Picture", "Glossary", "Hint", "IsWordAndSentenceCard"];
+  const lapisFields = Object.fromEntries(lapis.map((name, order) => [name, { value: "", order }]));
+  assert.match(sandbox.missingFieldsError("new", ["Screenshot"], lapisFields),
+    /Its fields: ExpressionAudio, DefinitionPicture, SentenceAudio, Picture, Expression, ExpressionFurigana, ExpressionReading, SelectionText, …\.$/);
+  assert.equal(sandbox.missingFieldsError("new", ["Picture"], {}), 'The new card has no field "Picture". Check the field names and change them in the settings if they differ: popup > Anki, clips and server.');
+  // What the viewer sees, the toast's "Mining failed: " or the fallback's "Saved to Downloads
+  // instead. Anki: " in front, keeps the settings hint inside the toast's 240 characters.
+  for (const prefix of ["Mining failed: ", "Saved to Downloads instead. Anki: "]) {
+    const shown = (prefix + sandbox.missingFieldsError("newest", ["Picture", "SentenceAudio"], lapisFields)).slice(0, 240);
+    assert.ok(shown.includes("popup > Anki, clips and server."), shown);
+  }
+});
+
+// A mine whose frame and clip have nowhere to go is refused, sentence field or not: it used to
+// answer success for an extended sentence, with the media lost and no Downloads fallback.
+test("a card that can take neither the frame nor the clip is refused even when its sentence could grow", async () => {
+  for (const [label, fields] of [
+    ["an Eminent-like note, sentence found in another case", { sentence: { value: "<b>猫</b>です", order: 0 }, Image: { value: "", order: 1 }, Audio: { value: "", order: 2 } }],
+    ["a note with the default sentence field", { Sentence: { value: "<b>猫</b>です", order: 0 }, Image: { value: "", order: 1 } }],
+  ]) {
+    const anki = ankiFetch({ requestPermission: granted, notesInfo: () => [{ fields }], storeMediaFile: (p) => p.filename, updateNoteFields: null });
+    const { sandbox } = loadBackground({ fetch: anki.fetch });
+    const res = await sandbox.addToAnki(await sandbox.getSettings(), { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555);
+    assert.equal(res.ok, false, label);
+    assert.match(res.error, /^The new card has no field "Picture" or "SentenceAudio"\./, label);
+    assert.deepEqual(anki.actions().filter((a) => a === "storeMediaFile" || a === "updateNoteFields"), [], label);
+  }
+  // One of the two missing is still a partial mine, as before.
+  const partial = ankiFetch({
+    requestPermission: granted,
+    notesInfo: () => [{ fields: { picture: { value: "", order: 0 }, Sentence: { value: "これは猫です。", order: 1 } } }],
+    storeMediaFile: (p) => p.filename,
+    updateNoteFields: null,
+  });
+  const { sandbox } = loadBackground({ fetch: partial.fetch });
+  const res = await sandbox.addToAnki(await sandbox.getSettings(), { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.match(res.message, /no field named SentenceAudio/);
+});
+
+test("a card that is no longer in Anki is said to be gone, not to lack fields", async () => {
+  const anki = ankiFetch({ requestPermission: granted, notesInfo: () => [{}], storeMediaFile: (p) => p.filename, updateNoteFields: null });
+  const { sandbox } = loadBackground({ fetch: anki.fetch });
+  const res = await sandbox.addToAnki(await sandbox.getSettings(), { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555);
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "The new card is no longer in Anki; nothing attached");
+  assert.deepEqual(anki.actions().filter((a) => a === "storeMediaFile" || a === "updateNoteFields"), []);
+});
+
+test("the sentence goes under the note type's spelling, filled or extended, and a field named __proto__ is written", async () => {
+  // Filled: the settings name "Sentence", the note spells it "sentence", and it is empty.
+  const filled = ankiFetch({ requestPermission: granted, notesInfo: () => eminentFields(""), storeMediaFile: (p) => p.filename, updateNoteFields: null });
+  const a = loadBackground({ storage: makeMemoryStorage({ settings: { ankiSentenceField: "Sentence" } }), fetch: filled.fetch });
+  assert.equal((await a.sandbox.addToAnki(await a.sandbox.getSettings(), { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555)).ok, true);
+  const f1 = filled.calls.find((c) => c.action === "updateNoteFields").params.note.fields;
+  assert.deepEqual(Object.keys(f1).sort(), ["picture", "sentence", "sentenceAudio"]);
+  assert.equal(f1.sentence, "これは猫です。");
+  // Extended: Yomitan's fragment grown to the spoken sentence, under the note's own spelling.
+  const grown = ankiFetch({ requestPermission: granted, notesInfo: () => eminentFields("<b>猫</b>です"), storeMediaFile: (p) => p.filename, updateNoteFields: null });
+  const b = loadBackground({ fetch: grown.fetch });
+  assert.equal((await b.sandbox.addToAnki(await b.sandbox.getSettings(), { text: "これは猫です。" }, MEDIA.image, MEDIA.audio, 555)).ok, true);
+  const f2 = grown.calls.find((c) => c.action === "updateNoteFields").params.note.fields;
+  assert.deepEqual(Object.keys(f2).sort(), ["picture", "sentence", "sentenceAudio"]);
+  assert.equal(f2.sentence, "これは<b>猫</b>です。");
+  // The watcher's summary finds a word field named in another case.
+  assert.equal(b.sandbox.noteSummary(eminentFields("x")[0], { ankiWordField: "WordDictionaryForm" }).word, "猫");
+  // A field literally named __proto__ is an own key of notesInfo's answer and gets its media.
+  const proto = ankiFetch({
+    requestPermission: granted,
+    notesInfo: () => JSON.parse('[{"fields":{"__proto__":{"value":"","order":0},"Sentence":{"value":"これは猫です。","order":1}}}]'),
+    storeMediaFile: (p) => p.filename,
+    updateNoteFields: null,
+  });
+  const c = loadBackground({ storage: makeMemoryStorage({ settings: { ankiImageField: "__proto__" } }), fetch: proto.fetch });
+  assert.equal((await c.sandbox.addToAnki(await c.sandbox.getSettings(), { text: "これは猫です。" }, MEDIA.image, null, 555)).ok, true);
+  const f3 = proto.calls.find((call) => call.action === "updateNoteFields").params.note.fields;
+  assert.ok(Object.prototype.hasOwnProperty.call(f3, "__proto__"), JSON.stringify(f3));
 });
 
 test("addToAnki refuses a note whose sentence is about something else", async () => {
@@ -1865,6 +2014,7 @@ test("compareVersions orders releases numerically, whatever the spelling", () =>
   assert.equal(sandbox.compareVersions("0.9.1", "0.9"), 1);
   assert.equal(sandbox.compareVersions("garbage", "0.0.1"), -1);
   assert.equal(sandbox.compareVersions("", ""), 0);
+  assert.equal(sandbox.compareVersions("0.9.0.1", "0.9.0"), 0, "a listed build is its release");
 });
 
 test("decideUpdate tells the server's case and the extension's apart", () => {
@@ -1887,6 +2037,10 @@ test("decideUpdate tells the server's case and the extension's apart", () => {
   assert.deepEqual(decide({ latest: { version: "" }, serverVersion: "0.8.0", serverLauncher: true }), { server: "unknown", extension: "current" });
   assert.deepEqual(decide(undefined), { server: "unknown", extension: "current" });
   assert.deepEqual(decide({ latest: { version: "v0.10.0" }, serverVersion: "0.9.0", serverLauncher: true, extensionVersion: "0.9.0" }), { server: "newer", extension: "newer" });
+  // The listing's build of a release is its number plus ".1" (scripts/amo-xpi.mjs listing): the
+  // same release as the GitHub one, and behind the next.
+  assert.deepEqual(decide({ latest, serverVersion: "0.9.0", serverLauncher: true, extensionVersion: "0.9.0.1" }), { server: "current", extension: "current" });
+  assert.deepEqual(decide({ latest: { version: "0.9.1" }, serverVersion: "0.9.1", serverLauncher: true, extensionVersion: "0.9.0.1" }), { server: "current", extension: "newer" });
 });
 
 test("releaseFromApi reads the version, the page and the xpi off GitHub's answer", () => {
@@ -1895,6 +2049,11 @@ test("releaseFromApi reads the version, the page and the xpi off GitHub's answer
   const noAssets = plain(sandbox.releaseFromApi({ tag_name: "0.9.1", html_url: RELEASE.html_url }));
   assert.deepEqual(noAssets, { version: "0.9.1", tag: "0.9.1", url: RELEASE.html_url, xpi: null });
   assert.equal(plain(sandbox.releaseFromApi({ tag_name: "v0.9.0", assets: [{ name: "only.zip", browser_download_url: "https://x/only.zip" }] })).xpi, null);
+  // The unsigned stand-in of a release AMO has not signed yet is not the .xpi Firefox can install.
+  const unsigned = { name: "shisu-ko-0.9.0-firefox-unsigned.xpi", browser_download_url: "https://x/shisu-ko-0.9.0-firefox-unsigned.xpi" };
+  const signed = { name: "shisu_ko-0.9.0.xpi", browser_download_url: "https://x/shisu_ko-0.9.0.xpi" };
+  assert.equal(plain(sandbox.releaseFromApi({ tag_name: "v0.9.0", assets: [unsigned] })).xpi, null);
+  assert.equal(plain(sandbox.releaseFromApi({ tag_name: "v0.9.0", assets: [unsigned, signed] })).xpi, signed.browser_download_url);
   // No tag, no release; and a page that is not https is no page to open.
   assert.equal(sandbox.releaseFromApi({ html_url: RELEASE.html_url }), null);
   assert.equal(sandbox.releaseFromApi({ tag_name: "  " }), null);
@@ -2685,6 +2844,11 @@ test("another deck, or another field to read, drops the index; other settings le
   await sandbox.saveSettings({ fontScale: 1.2 });
   assert.equal((await sandbox.cardStatus({})).at, first.at, "a setting the index does not depend on");
   assert.equal(queriesAsked(anki).length, 5);
+  // The viewer's known words and the katakana switch are the content script's: the index is the
+  // deck's alone, and every tab folds the list in on its own.
+  await sandbox.saveSettings({ knownWords: "日本語", katakanaKnown: true });
+  assert.equal((await sandbox.cardStatus({})).at, first.at);
+  assert.equal(queriesAsked(anki).length, 5);
 
   await sandbox.saveSettings({ cardStatusDeck: "Other" });
   const switched = await sandbox.cardStatus({});
@@ -3185,7 +3349,8 @@ test("the notes read outlive the event page, and a record for other fields does 
   assert.deepEqual([record.wordField, record.pitchField], ["", ""]);
   assert.equal(typeof record.checkedAt, "number");
   assert.equal(record.notes.length, 8);
-  assert.deepEqual(plain(record.notes.find((row) => row[0] === 3)), [3, "橋", "odaka", 1700000003]);
+  assert.deepEqual(plain(record.notes.find((row) => row[0] === 3)), [3, "橋", "odaka", 1700000003, ""]);
+  assert.equal(record.format, first.sandbox.DECK_NOTES_FORMAT);
   assert.equal(record.at, res.at);
   assert.deepEqual(sortedEntries(record.entries), DECK_ENTRIES);
   // The page ended; the next one searches the deck but reads no note it already knows, and
@@ -3377,8 +3542,62 @@ test("a note read again whose chunk fails keeps what it said, and a chunk failin
   assert.deepEqual(sortedEntries(res.entries), sortedEntries([["犬", "new", null], ["猫", "new", "heiban"], ["鳥", "new", null]]));
   const written = session._dump()[sandbox.DECK_NOTES_KEY];
   assert.notEqual(written, record);
-  assert.deepEqual(plain(written.notes.find((row) => row[0] === 2)), [2, "猫", "heiban", 1800000000]);
+  assert.deepEqual(plain(written.notes.find((row) => row[0] === 2)), [2, "猫", "heiban", 1800000000, ""]);
   assert.equal(written.notes.length, 3);
+});
+
+// Jitendex's glossary tag on a note of a word usually written in kana, as Yomitan writes it.
+const KANA_TAG = '<span title="word usually written using kana alone">kana</span> further; furthermore';
+const KANA_NOTES = {
+  1: note(1, "更に", { Reading: "さらに", PitchAccent: "[1]", SecondaryDef: KANA_TAG }),
+  2: note(2, "勝手", { Reading: "かって", PitchAccent: "[0]" }),
+};
+const KANA_SETS = { suspended: [], unsuspended: [1, 2], new: [2], learning: [], review: [1] };
+const KANA_ENTRIES = sortedEntries([
+  ["更に", "learned", "atamadaka"],
+  ["さらに", "learned", "atamadaka"],
+  ["勝手", "new", "heiban"],
+]);
+
+test("a word usually written in kana is indexed by its reading too, with its status and pitch", async () => {
+  const anki = ankiFetch(deckHandlers(DECK, KANA_SETS, KANA_NOTES));
+  const { sandbox, session } = loadBackground({ storage: colourSettings({ pitchAccent: true }), fetch: anki.fetch });
+  const res = await sandbox.cardStatus({});
+  assert.equal(res.ok, true, JSON.stringify(res));
+  // 勝手's reading is not indexed: かって is in every 向かって.
+  assert.deepEqual(sortedEntries(res.entries), KANA_ENTRIES);
+  const record = session._dump()[sandbox.DECK_NOTES_KEY];
+  assert.equal(record.format, sandbox.DECK_NOTES_FORMAT);
+  assert.deepEqual(plain(record.notes.find((row) => row[0] === 1)), [1, "更に", "atamadaka", 1700000001, "さらに"]);
+  assert.deepEqual(plain(record.notes.find((row) => row[0] === 2)), [2, "勝手", "heiban", 1700000002, ""]);
+  // The next page restores the reading from the record and reads no note again.
+  const second = loadBackground({ storage: colourSettings({ pitchAccent: true }), session, fetch: anki.fetch });
+  const again = await second.sandbox.cardStatus({ since: 0 });
+  assert.equal(again.ok, true, JSON.stringify(again));
+  assert.deepEqual(sortedEntries(again.entries), KANA_ENTRIES);
+  assert.equal(again.at, res.at);
+  assert.equal(notesAsked(anki).length, 1);
+});
+
+test("a notes record of an older format is ignored and every note read again", async () => {
+  const anki = ankiFetch(deckHandlers(DECK, KANA_SETS, KANA_NOTES));
+  const first = loadBackground({ storage: colourSettings({ pitchAccent: true }), fetch: anki.fetch });
+  const res = await first.sandbox.cardStatus({});
+  const record = first.session._dump()[first.sandbox.DECK_NOTES_KEY];
+  // What the page before readings wrote: no format, four columns, no reading entry.
+  const old = {
+    ...plain(record),
+    notes: plain(record.notes).map((row) => row.slice(0, 4)),
+    entries: plain(record.entries).filter((entry) => entry[0] !== "さらに"),
+  };
+  delete old.format;
+  await first.session.set({ [first.sandbox.DECK_NOTES_KEY]: old });
+  const second = loadBackground({ storage: colourSettings({ pitchAccent: true }), session: first.session, fetch: anki.fetch });
+  const again = await second.sandbox.cardStatus({ since: res.at });
+  assert.equal(again.ok, true, JSON.stringify(again));
+  assert.deepEqual(sortedEntries(again.entries), KANA_ENTRIES);
+  assert.deepEqual(notesAsked(anki), [[1, 2], [1, 2]]);
+  assert.equal(second.session._dump()[second.sandbox.DECK_NOTES_KEY].format, second.sandbox.DECK_NOTES_FORMAT);
 });
 
 test("a deck named as one of Anki's keywords is searched by id, its subdecks included", async () => {

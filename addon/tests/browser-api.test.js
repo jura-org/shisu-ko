@@ -157,6 +157,45 @@ test("a Chrome runtime without sendNativeMessage gets no wrapper for it", () => 
   assert.equal(typeof sandbox.browser.permissions.request, "function");
 });
 
+// Chrome grants a permission only during the user gesture, and the popup's Start click spends it
+// at its first await. The popup calls browser.permissions.request before that await; the bridge
+// must hand the call to chrome.permissions.request within that same call, not a tick later.
+test("Chrome permissions.request reaches chrome.permissions.request before the call returns", async () => {
+  const { browser, chrome } = loadChrome();
+  const requests = [];
+  chrome.permissions.request = (perms, callback) => { requests.push(perms); callback(true); };
+  const pending = browser.permissions.request({ permissions: ["nativeMessaging"] });
+  assert.deepEqual(requests, [{ permissions: ["nativeMessaging"] }], "requested synchronously, inside the gesture");
+  assert.equal(await pending, true);
+});
+
+// The popup grants nativeMessaging while the service worker runs; Chrome adds the method only
+// then, possibly on a chrome.runtime it rebuilds. A bridge that decided at load would answer
+// "permission missing" to the Start button until the worker restarted.
+test("sendNativeMessage granted after load reaches the bridge, on the old runtime or a rebuilt one", async () => {
+  const { chrome } = loadChrome();
+  const stub = chrome.runtime.sendNativeMessage;
+  delete chrome.runtime.sendNativeMessage;
+  const sandbox = { chrome, console, Promise, globalThis: null };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  new vm.Script(source).runInContext(sandbox);
+  const { browser } = sandbox;
+  assert.equal(typeof browser.runtime.sendNativeMessage, "undefined");
+  chrome.runtime.sendNativeMessage = stub; // granted: the method lands on the runtime there was
+  assert.deepEqual(await browser.runtime.sendNativeMessage("shisuko", { cmd: "start" }), { ok: true, started: true });
+  const calls = [];
+  chrome.runtime = { // granted: Chrome hands out a new runtime object with the method on it
+    lastError: null,
+    sendNativeMessage(application, msg, callback) { calls.push([application, msg]); callback({ ok: true, already: true }); },
+  };
+  assert.deepEqual(await browser.runtime.sendNativeMessage.call(browser.runtime, "shisuko", { cmd: "start" }), { ok: true, already: true });
+  assert.deepEqual(calls, [["shisuko", { cmd: "start" }]]);
+  delete chrome.runtime.sendNativeMessage; // revoked: missing again, which background.js reads as no permission
+  assert.equal(typeof browser.runtime.sendNativeMessage, "undefined");
+  assert.equal(browser.runtime.getURL(""), "chrome-extension://test/", "the rest of runtime still comes through");
+});
+
 // The update nudges: badge, notifications and the release page tab. Chrome's action and
 // notifications namespaces answer callbacks like the rest; the events pass through untouched.
 test("Chrome action and notifications are bridged to promises, with the events passed through", async () => {

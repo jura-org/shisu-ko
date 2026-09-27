@@ -39,11 +39,20 @@
   browser.runtime = Object.create(chromeApi.runtime);
   browser.runtime.sendMessage = promiseMethod(chromeApi.runtime, "sendMessage");
   browser.runtime.onMessage = { addListener: (fn) => chromeApi.runtime.onMessage.addListener(bridge(fn)) };
-  // Only where Chrome offers it (the background, with the nativeMessaging permission in reach);
-  // background.js treats a missing method as the permission not granted.
-  if (typeof chromeApi.runtime.sendNativeMessage === "function") {
-    browser.runtime.sendNativeMessage = promiseMethod(chromeApi.runtime, "sendNativeMessage");
-  }
+  // Only where Chrome offers it: the background, once the optional nativeMessaging permission is
+  // granted. Looked up on chrome.runtime at each use, never copied at load: the popup grants the
+  // permission while the service worker runs, and the method appears only then, possibly on a
+  // chrome.runtime rebuilt for it that neither a copy nor the prototype above would see; the
+  // Start button would read "permission missing" until the worker restarted. background.js
+  // treats a missing method as the permission not granted.
+  Object.defineProperty(browser.runtime, "sendNativeMessage", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      const runtime = chromeApi.runtime;
+      return runtime && typeof runtime.sendNativeMessage === "function" ? promiseMethod(runtime, "sendNativeMessage") : undefined;
+    },
+  });
   if (chromeApi.storage && chromeApi.storage.local) {
     browser.storage = Object.create(chromeApi.storage);
     browser.storage.local = Object.create(chromeApi.storage.local);

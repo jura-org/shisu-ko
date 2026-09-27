@@ -16,7 +16,8 @@
  *  7. Updates: ask GitHub for the newest release once a day, tell the viewer (toolbar badge, one
  *     system notification, the popup's banner) and, on request, ask the server to update itself:
  *     POST /update makes it exit so that run.cmd / run.sh run update.py and start it again. The
- *     extension never installs itself; its updates come from addons.mozilla.org.
+ *     extension never installs itself; its updates come from addons.mozilla.org (a Chrome Web
+ *     Store install, from the store; an unpacked Chrome build, only from the viewer).
  *  8. Word colours: turn one Anki deck's notes into [word, status, pitch] entries for the
  *     content script, which colours the words of every line by them.
  */
@@ -490,7 +491,12 @@ function releaseFromApi(json) {
   const tag = json.tag_name.trim();
   const https = (value) => (typeof value === "string" && /^https:\/\//i.test(value) ? value : null);
   const assets = Array.isArray(json.assets) ? json.assets : [];
-  const xpi = assets.find((asset) => asset && typeof asset.name === "string" && asset.name.toLowerCase().endsWith(".xpi"));
+  // The signed .xpi: a release AMO has not signed yet carries the unsigned build as
+  // shisu-ko-<version>-firefox-unsigned.xpi, which regular Firefox refuses to install.
+  const xpi = assets.find((asset) => {
+    const name = asset && typeof asset.name === "string" ? asset.name.toLowerCase() : "";
+    return name.endsWith(".xpi") && !name.endsWith("-unsigned.xpi");
+  });
   return { version: tag.replace(/^v/i, ""), tag, url: https(json.html_url), xpi: xpi ? https(xpi.browser_download_url) : null };
 }
 
@@ -1105,11 +1111,36 @@ function extendSentenceField(existing, full) {
   return escapeHtml(text.slice(0, at)) + "<b>" + escapeHtml(word) + "</b>" + escapeHtml(text.slice(at + word.length));
 }
 
+// What a mine that found none of the configured fields says: the names it looked for, where the
+// settings are, and the names the card has, so the viewer can type the right ones in rather than
+// guess. The card's names come last, since a toast is cut at 240 characters and they are the part
+// that may run long; the ones that look like a picture or an audio field come first among them
+// (mining note types put those near the end, past the cap), the rest in the note type's order.
+const MISSING_FIELDS_SHOWN = 8;
+const MEDIA_FIELD_NAME = /picture|image|screenshot|snapshot|photo|audio|sound|clip/i;
+function missingFieldsError(what, missing, fields) {
+  const wanted = missing.map((name) => `"${String(name || "").trim()}"`).join(" or ");
+  const names = Object.entries(fields || {})
+    .sort(([, a], [, b]) => Number((a && a.order) || 0) - Number((b && b.order) || 0))
+    .map(([name]) => name);
+  const ranked = [...names.filter((name) => MEDIA_FIELD_NAME.test(name)), ...names.filter((name) => !MEDIA_FIELD_NAME.test(name))];
+  const shown = ranked.slice(0, MISSING_FIELDS_SHOWN).join(", ") + (ranked.length > MISSING_FIELDS_SHOWN ? ", …" : "");
+  const has = ranked.length ? ` Its fields: ${shown}.` : "";
+  return `The ${what} card has no field ${wanted}. Check the field names and change them in the settings if they differ: popup > Anki, clips and server.${has}`;
+}
+
+// A field's text by a name from the settings, in whatever case the note type spells it
+// (SHISUKO_WORDS.fieldKey); "" when the note has no such field.
+function noteField(fields, name) {
+  const key = SHISUKO_WORDS.fieldKey(fields, name);
+  return key ? String((fields[key] && fields[key].value) || "").trim() : "";
+}
+
 // The two fields that say what a card is about. The word is whatever the viewer configured, else
 // the note's first field, which is where every Yomitan template puts the expression.
 function noteSummary(info, settings) {
   const fields = (info && info.fields) || {};
-  const read = (name) => String((fields[name] && fields[name].value) || "").trim();
+  const read = (name) => noteField(fields, name);
   const sentenceName = String(settings.ankiSentenceField || "").trim() || "Sentence";
   const wordName = String(settings.ankiWordField || "").trim();
   let word = "";
@@ -1299,13 +1330,18 @@ async function addToAnki(settings, cue, image, audio, explicitNoteId, fullSenten
       noteId = Math.max(...ids);
     }
     const infos = await anki(url, "notesInfo", { notes: [noteId] }, ANKI_REQUEST_TIMEOUT_MS);
-    const fields = (infos && infos[0] && infos[0].fields) || {};
+    // AnkiConnect answers {} for a note that is gone: no field of it is missing from the settings.
+    const info = infos && infos[0];
+    if (!info || !info.fields || typeof info.fields !== "object") {
+      return { ok: false, error: `The ${what} card is no longer in Anki; nothing attached` };
+    }
+    const fields = info.fields;
     const sentence = fullSentence && fullSentence.text ? fullSentence : { text: cue.text };
     if (targetId !== null) {
       // The note was picked by id, not by the viewer: make sure it really is about this subtitle
       // before writing media into it.
       const guardName = String(settings.ankiSentenceField || "").trim() || "Sentence";
-      const written = normalizeSentence((fields[guardName] && fields[guardName].value) || "");
+      const written = normalizeSentence(noteField(fields, guardName));
       const spoken = normalizeSentence(sentence.text) || normalizeSentence(cue.text);
       // The card and the subtitle rarely agree word for word: Yomitan's sentence can stop short of
       // the cue, run past it, or carry furigana. The better of the two readings of what was said
@@ -1315,30 +1351,41 @@ async function addToAnki(settings, cue, image, audio, explicitNoteId, fullSenten
         return { ok: false, mismatch: true, error: "The new card's sentence does not match the subtitle; nothing attached" };
       }
     }
-    const update = {};
+    const update = Object.create(null);
     const missing = [];
+    // Each field under the name the note type gives it, whatever case the settings wrote it in.
+    const imageKey = SHISUKO_WORDS.fieldKey(fields, settings.ankiImageField);
+    const audioKey = SHISUKO_WORDS.fieldKey(fields, settings.ankiAudioField);
+    // Media with nowhere to go: the mine is refused before anything is stored or written, even
+    // when the sentence field could be extended, so a manual mine falls back to Downloads rather
+    // than answering success with the frame and the clip lost. One of the two missing is a
+    // partial mine, as before.
+    if ((image || audio) && !(image && imageKey) && !(audio && audioKey)) {
+      const lost = [image && settings.ankiImageField, audio && settings.ankiAudioField].filter(Boolean);
+      return { ok: false, error: missingFieldsError(what, lost, fields) };
+    }
     if (image) {
-      if (settings.ankiImageField in fields) {
+      if (imageKey) {
         const stored = await storeMedia(url, image.filename, image.base64);
-        update[settings.ankiImageField] = `<img src="${stored}">`;
+        update[imageKey] = `<img src="${stored}">`;
       } else {
         missing.push(settings.ankiImageField);
       }
     }
     if (audio) {
-      if (settings.ankiAudioField in fields) {
+      if (audioKey) {
         const stored = await storeMedia(url, audio.filename, audio.base64);
-        update[settings.ankiAudioField] = `[sound:${stored}]`;
+        update[audioKey] = `[sound:${stored}]`;
       } else {
         missing.push(settings.ankiAudioField);
       }
     }
     // Same field the guard above reads: whoever holds the sentence gets the whole sentence.
     const sentenceField = String(settings.ankiSentenceField || "").trim();
-    const fieldName = sentenceField || "Sentence";
+    const fieldName = SHISUKO_WORDS.fieldKey(fields, sentenceField || "Sentence");
     let extended = false;
-    if (fieldName in fields) {
-      const existing = String((fields[fieldName] && fields[fieldName].value) || "").trim();
+    if (fieldName) {
+      const existing = noteField(fields, fieldName);
       if (!existing) {
         // Filling an unconfigured field was never this add-on's business; only extending is.
         if (sentenceField) update[fieldName] = escapeHtml(sentence.text);
@@ -1351,7 +1398,7 @@ async function addToAnki(settings, cue, image, audio, explicitNoteId, fullSenten
       }
     }
     if (!Object.keys(update).length) {
-      return { ok: false, error: `The ${what} card has none of the fields ${missing.join(", ")}. Check the field names in the popup.` };
+      return { ok: false, error: missing.length ? missingFieldsError(what, missing, fields) : `Nothing to attach to the ${what} card` };
     }
     await anki(url, "updateNoteFields", { note: { id: noteId, fields: update } }, ANKI_REQUEST_TIMEOUT_MS);
     rememberDeck(url, noteId); // not awaited: the mine is done, the deck is for the word colours
@@ -1510,7 +1557,8 @@ async function mineCueNow(msg, tabId) {
     if (!result.ok && !msg.auto && settings.mineFallbackDownload) {
       const fallback = await downloadFiles(image, audio);
       if (fallback.ok) {
-        fallback.message = `Anki: ${result.error} Saved to Downloads instead.`;
+        // The outcome first: a toast is cut at 240 characters, and the Anki error may run long.
+        fallback.message = `Saved to Downloads instead. Anki: ${result.error}`;
         fallback.warning = true;
       }
       result = fallback;
@@ -1533,7 +1581,10 @@ const CARD_STATUS_TTL_MS = 30000; // an index this fresh is answered from memory
 const CARD_STATUS_TIMEOUT_MS = 20000; // per AnkiConnect request: a large deck takes its time
 const NOTES_INFO_CHUNK = 200; // notes per notesInfo call
 const DECK_SEEN_KEY = "ankiDeckSeen"; // storage.local: {deck, at, noteId}
-const DECK_NOTES_KEY = "deckNotes"; // storage.session: {deck, wordField, pitchField, at, checkedAt, entries, notes: [[id, word, pitch, mod]]}
+const DECK_NOTES_KEY = "deckNotes"; // storage.session: {format, deck, wordField, pitchField, at, checkedAt, entries, notes: [[id, word, pitch, mod, reading]]}
+// A record of another format is dropped whole: its notes lack what this one reads (the kana
+// reading), and a restored note is never read again unless edited.
+const DECK_NOTES_FORMAT = 2;
 const DAY_MS = 86400000;
 const ANKI_OFFLINE_TEXT = "Anki is not running or AnkiConnect is not installed";
 const ANKI_DENIED_TEXT = "AnkiConnect denied access. Click Yes in Anki's permission dialog.";
@@ -1664,18 +1715,18 @@ async function resolveDeck(settings) {
 // all again.
 function notesRecord(index) {
   const notes = [];
-  for (const [id, note] of index.notes) notes.push([id, note.word, note.pitch, note.mod]);
-  return { deck: index.deck, wordField: index.wordField, pitchField: index.pitchField, at: index.at, checkedAt: index.checkedAt, entries: index.entries, notes };
+  for (const [id, note] of index.notes) notes.push([id, note.word, note.pitch, note.mod, note.reading]);
+  return { format: DECK_NOTES_FORMAT, deck: index.deck, wordField: index.wordField, pitchField: index.pitchField, at: index.at, checkedAt: index.checkedAt, entries: index.entries, notes };
 }
 
 async function restoreNotes(deck, settings) {
   const record = await sessionGet(DECK_NOTES_KEY);
-  if (!record || typeof record !== "object" || !Array.isArray(record.notes)) return null;
+  if (!record || typeof record !== "object" || record.format !== DECK_NOTES_FORMAT || !Array.isArray(record.notes)) return null;
   if (!indexFor(record, deck, settings)) return null;
   const notes = new Map();
   for (const row of record.notes) {
     const id = Array.isArray(row) ? Number(row[0]) : NaN;
-    if (Number.isFinite(id)) notes.set(id, { word: String(row[1] || ""), pitch: row[2] || null, mod: Number(row[3]) || 0 });
+    if (Number.isFinite(id)) notes.set(id, { word: String(row[1] || ""), reading: String(row[4] || ""), pitch: row[2] || null, mod: Number(row[3]) || 0 });
   }
   // A stamp of 0 is what a tab holding nothing sends: entries under it would never reach one.
   const at = typeof record.at === "number" && record.at > 0 ? record.at : 0;
@@ -1789,7 +1840,12 @@ async function fetchDeckIndex(url, deck, settings, signal) {
       // A word longer than the content script's index keeps is a sentence in the word field:
       // stored as no word, so it is neither kept nor sent to every tab only to be dropped there.
       const word = SHISUKO_WORDS.plainWord(noteSummary(info, settings).word);
-      notes.set(id, { word: word.length > SHISUKO_WORDS.MAX_WORD_LEN ? "" : word, pitch: SHISUKO_WORDS.pitchOf(info.fields, settings), mod: Number(info.mod) || 0 });
+      notes.set(id, {
+        word: word.length > SHISUKO_WORDS.MAX_WORD_LEN ? "" : word,
+        reading: SHISUKO_WORDS.kanaReadingOf(info.fields, settings),
+        pitch: SHISUKO_WORDS.pitchOf(info.fields, settings),
+        mod: Number(info.mod) || 0,
+      });
       read++;
     });
   }
@@ -1804,7 +1860,10 @@ async function fetchDeckIndex(url, deck, settings, signal) {
     const note = notes.get(id);
     if (!note || !note.word) continue;
     const status = SHISUKO_WORDS.statusOf(sets, id);
-    if (status) entries.push([note.word, status, note.pitch]);
+    if (!status) continue;
+    entries.push([note.word, status, note.pitch]);
+    // A word usually written in kana is subtitled in kana: 更に is heard as さらに.
+    if (note.reading) entries.push([note.reading, status, note.pitch]);
   }
   // The same entries keep their stamp, so a tab holding them hears "unchanged" rather than
   // getting them all again. The notes changed when one was read or dropped (a chunk that

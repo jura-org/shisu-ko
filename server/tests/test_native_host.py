@@ -402,17 +402,39 @@ def test_server_running_asks_health_and_never_raises():
 
 def test_manifest_names_the_host_the_wrapper_and_the_extension(tmp_path):
     wrapper = tmp_path / "native-host.sh"
-    assert nh.manifest(wrapper) == {
+    assert nh.manifest(wrapper) == nh.manifest(wrapper, nh.FIREFOX) == {
         "name": "shisuko",
         "description": "Starts the Shisu-ko transcription server",
         "path": str(wrapper),
         "type": "stdio",
         "allowed_extensions": ["shisu-ko@multysquid.github.io"],
     }
+    # Chrome's manifest takes origins, not ids, and no wildcards: the store install's alone.
+    for browser in (nh.CHROME, nh.CHROMIUM):
+        assert nh.manifest(wrapper, browser) == {
+            "name": "shisuko",
+            "description": "Starts the Shisu-ko transcription server",
+            "path": str(wrapper),
+            "type": "stdio",
+            "allowed_origins": ["chrome-extension://ecenifonpkaiccmmknpbllbebbfigjnm/"],
+        }
     # The only extension the host answers is the add-on itself: a gecko id changed on one side
     # gets "No such native application" from Firefox, which no re-run of setup can fix.
     addon = json.loads((ROOT / "addon" / "manifest.json").read_text(encoding="utf-8"))
     assert nh.EXTENSION_ID == addon["browser_specific_settings"]["gecko"]["id"]
+    # The same for Chrome: the popup offers the button to the store id it keeps a copy of, and
+    # Chrome refuses every origin the host manifest does not name. A Chrome id is 32 of a-p.
+    popup = (ROOT / "addon" / "popup.js").read_text(encoding="utf-8")
+    assert re.search(r'^const CHROME_STORE_ID = "([a-p]{32})";$', popup, re.MULTILINE).group(1) == nh.CHROME_EXTENSION_ID
+    assert nh.CHROME_ORIGIN == f"chrome-extension://{nh.CHROME_EXTENSION_ID}/"
+
+
+def test_the_host_is_registered_for_firefox_and_chrome_and_on_linux_chromium():
+    assert nh.browsers("win32") == nh.browsers("darwin") == ("Firefox", "Chrome")
+    assert nh.browsers("linux") == ("Firefox", "Chrome", "Chromium")
+    assert nh.REGISTRY_KEY == r"Software\Mozilla\NativeMessagingHosts\shisuko"
+    assert nh.CHROME_REGISTRY_KEY == r"Software\Google\Chrome\NativeMessagingHosts\shisuko"
+    assert nh.REGISTRY_KEYS == {"Firefox": nh.REGISTRY_KEY, "Chrome": nh.CHROME_REGISTRY_KEY}
 
 
 def test_manifest_path_per_platform(tmp_path):
@@ -426,6 +448,44 @@ def test_manifest_path_per_platform(tmp_path):
     assert nh.manifest_path(environ=dict(env, SHISUKO_HOME=str(data)), platform="win32") == data / "native-messaging" / "shisuko.json"
     assert nh.manifest_path(environ=dict(env, SHISUKO_HOME=str(data)), platform="linux") == home / ".mozilla" / "native-messaging-hosts" / "shisuko.json"
     assert nh.manifest_path(home=home, environ={}, platform="linux") == home / ".mozilla" / "native-messaging-hosts" / "shisuko.json"
+
+
+def test_manifest_path_for_chrome_and_chromium(tmp_path):
+    home = tmp_path / "home"
+    env = {"HOME": str(home), "USERPROFILE": str(home)}
+
+    def where(platform, browser, **extra):
+        return nh.manifest_path(environ=dict(env, **extra), platform=platform, browser=browser)
+
+    # Windows: next to Firefox's in the data folder, a file of its own; the registry names it.
+    assert where("win32", nh.CHROME) == home / ".shisu-ko" / "native-messaging" / "shisuko-chrome.json"
+    assert where("win32", nh.CHROME, SHISUKO_HOME=str(tmp_path / "data")) == tmp_path / "data" / "native-messaging" / "shisuko-chrome.json"
+    assert where("darwin", nh.CHROME) == (
+        home / "Library" / "Application Support" / "Google" / "Chrome" / "NativeMessagingHosts" / "shisuko.json")
+    # Linux: Chrome's profile folder, which follows XDG_CONFIG_HOME; Firefox's does not.
+    assert where("linux", nh.CHROME) == home / ".config" / "google-chrome" / "NativeMessagingHosts" / "shisuko.json"
+    assert where("linux", nh.CHROMIUM) == home / ".config" / "chromium" / "NativeMessagingHosts" / "shisuko.json"
+    xdg = tmp_path / "xdg"
+    assert where("linux", nh.CHROME, XDG_CONFIG_HOME=str(xdg)) == xdg / "google-chrome" / "NativeMessagingHosts" / "shisuko.json"
+    assert where("linux", nh.CHROMIUM, XDG_CONFIG_HOME=str(xdg)) == xdg / "chromium" / "NativeMessagingHosts" / "shisuko.json"
+    assert where("linux", nh.CHROME, XDG_CONFIG_HOME="") == home / ".config" / "google-chrome" / "NativeMessagingHosts" / "shisuko.json"
+    assert where("linux", nh.FIREFOX, XDG_CONFIG_HOME=str(xdg)) == home / ".mozilla" / "native-messaging-hosts" / "shisuko.json"
+    # CHROME_CONFIG_HOME goes before XDG_CONFIG_HOME, as in Chrome's own lookup (chrome_paths_linux.cc):
+    # a manifest under XDG_CONFIG_HOME would never be read, and --status would call it registered.
+    chrome_config = tmp_path / "chrome-config"
+    assert where("linux", nh.CHROME, CHROME_CONFIG_HOME=str(chrome_config), XDG_CONFIG_HOME=str(xdg)) == (
+        chrome_config / "google-chrome" / "NativeMessagingHosts" / "shisuko.json")
+    assert where("linux", nh.CHROMIUM, CHROME_CONFIG_HOME=str(chrome_config)) == (
+        chrome_config / "chromium" / "NativeMessagingHosts" / "shisuko.json")
+    assert where("linux", nh.CHROME, CHROME_CONFIG_HOME="", XDG_CONFIG_HOME=str(xdg)) == (
+        xdg / "google-chrome" / "NativeMessagingHosts" / "shisuko.json")
+    assert where("linux", nh.FIREFOX, CHROME_CONFIG_HOME=str(chrome_config)) == home / ".mozilla" / "native-messaging-hosts" / "shisuko.json"
+    assert where("darwin", nh.CHROME, CHROME_CONFIG_HOME=str(chrome_config)) == (
+        home / "Library" / "Application Support" / "Google" / "Chrome" / "NativeMessagingHosts" / "shisuko.json")
+    # Every one of them under the user's own profile, never a system folder.
+    for platform in ("win32", "darwin", "linux"):
+        for browser in nh.browsers(platform):
+            assert where(platform, browser).is_relative_to(home), (platform, browser)
 
 
 class FakeWinreg:
@@ -480,8 +540,9 @@ def home(tmp_path, monkeypatch):
 
     The registry branch is what registers the host on the project's main platform, and CI runs
     on Linux: nothing in register()/unregister()/registered() touches the platform beyond that
-    switch, so the branch runs everywhere. The manifest still lands where this platform's
-    Firefox looks (manifest_path() keys on sys.platform).
+    switch, so the branch runs everywhere. The manifests still land where this platform's
+    browsers look (manifest_path() and browsers() key on sys.platform), so on Linux Chromium's
+    is written too, without a registry key.
     """
     home = tmp_path / "home"
     home.mkdir()
@@ -494,75 +555,114 @@ def env_for(home: Path, **extra) -> dict:
     return {"HOME": str(home), "USERPROFILE": str(home), **extra}
 
 
-def test_register_writes_the_manifest_where_firefox_looks(home, tmp_path):
+def test_register_writes_a_manifest_where_each_browser_looks(home, tmp_path):
     root = fake_checkout(tmp_path)
     env = env_for(home)
-    assert nh.registered(environ=env) is None
-    path = nh.register(root, environ=env)
-    assert path == nh.manifest_path(environ=env)
-    assert path.is_relative_to(home)
-    data = json.loads(path.read_text(encoding="utf-8"))
-    assert data == nh.manifest(nh.wrapper_path(root))
-    assert Path(data["path"]).name == ("native-host.cmd" if WINDOWS else "native-host.sh")
-    assert nh.registered(environ=env) == path
+    for browser in nh.browsers():
+        assert nh.registered(environ=env, browser=browser) is None
+    paths = nh.register(root, environ=env)
+    assert list(paths) == list(nh.browsers())
+    for browser, path in paths.items():
+        assert path == nh.manifest_path(environ=env, browser=browser)
+        assert path.is_relative_to(home)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data == nh.manifest(nh.wrapper_path(root), browser)
+        assert Path(data["path"]).name == ("native-host.cmd" if WINDOWS else "native-host.sh")
+        assert nh.registered(environ=env, browser=browser) == path
+    assert len(set(paths.values())) == len(paths), "one manifest per browser, none shared"
+    assert "allowed_extensions" in json.loads(paths["Firefox"].read_text(encoding="utf-8"))
+    assert "allowed_origins" in json.loads(paths["Chrome"].read_text(encoding="utf-8"))
     reg = nh.winreg
-    assert reg.values[nh.REGISTRY_KEY] == (str(path), reg.REG_SZ)
-    assert reg.calls == [("create", "HKCU", nh.REGISTRY_KEY), ("set", nh.REGISTRY_KEY, "", reg.REG_SZ, str(path))]
-    assert nh.REGISTRY_KEY == r"Software\Mozilla\NativeMessagingHosts\shisuko"
+    assert reg.values[nh.REGISTRY_KEY] == (str(paths["Firefox"]), reg.REG_SZ)
+    assert reg.values[nh.CHROME_REGISTRY_KEY] == (str(paths["Chrome"]), reg.REG_SZ)
+    assert reg.calls == [
+        ("create", "HKCU", nh.REGISTRY_KEY), ("set", nh.REGISTRY_KEY, "", reg.REG_SZ, str(paths["Firefox"])),
+        ("create", "HKCU", nh.CHROME_REGISTRY_KEY), ("set", nh.CHROME_REGISTRY_KEY, "", reg.REG_SZ, str(paths["Chrome"])),
+    ]
     if not WINDOWS:
-        assert path.parent.name == ("NativeMessagingHosts" if sys.platform == "darwin" else "native-messaging-hosts")
-    assert nh.register(root, environ=env) == path, "registering twice is fine"
+        assert paths["Firefox"].parent.name == ("NativeMessagingHosts" if sys.platform == "darwin" else "native-messaging-hosts")
+        assert paths["Chrome"].parent.name == "NativeMessagingHosts"
+    assert nh.register(root, environ=env) == paths, "registering twice is fine"
 
 
 def test_register_honours_shisuko_home_on_windows_only(home, tmp_path):
     root = fake_checkout(tmp_path)
     data = tmp_path / "data"
     env = env_for(home, SHISUKO_HOME=str(data))
-    path = nh.register(root, environ=env)
+    paths = nh.register(root, environ=env)
     if WINDOWS:
-        assert path == data / "native-messaging" / "shisuko.json"
+        assert paths == {"Firefox": data / "native-messaging" / "shisuko.json",
+                         "Chrome": data / "native-messaging" / "shisuko-chrome.json"}
     else:
-        assert path.is_relative_to(home), "Firefox reads its own folders, SHISUKO_HOME cannot move them"
-    assert nh.registered(environ=env) == path
+        for path in paths.values():
+            assert path.is_relative_to(home), "the browsers read their own folders, SHISUKO_HOME cannot move them"
+    for browser, path in paths.items():
+        assert nh.registered(environ=env, browser=browser) == path
+
+
+def test_one_browser_that_cannot_be_registered_keeps_the_others(home, tmp_path):
+    """A Chrome manifest that cannot be written (here: a folder in its place) must not cost
+    Firefox its button; the failure is still raised, naming the browser, after the rest."""
+    root = fake_checkout(tmp_path)
+    env = env_for(home)
+    nh.manifest_path(environ=env, browser=nh.CHROME).mkdir(parents=True)
+    with pytest.raises(nh.RegistrationError) as caught:
+        nh.register(root, environ=env)
+    assert str(caught.value).startswith("Chrome: ")
+    assert "Firefox" in caught.value.done and "Chrome" not in caught.value.done
+    assert list(caught.value.done) == [b for b in nh.browsers() if b != "Chrome"]
+    assert nh.registered(environ=env, browser=nh.FIREFOX) == caught.value.done["Firefox"]
+    assert nh.registered(environ=env, browser=nh.CHROME) is None
+    assert nh.CHROME_REGISTRY_KEY not in nh.winreg.values, "no registry value for a manifest that was not written"
 
 
 def test_unregister_takes_everything_away_again(home, tmp_path):
     root = fake_checkout(tmp_path)
     env = env_for(home)
     assert nh.unregister(environ=env) is False
-    path = nh.register(root, environ=env)
+    paths = nh.register(root, environ=env)
     assert nh.unregister(environ=env) is True
-    assert not path.exists()
-    assert nh.registered(environ=env) is None
-    assert nh.REGISTRY_KEY not in nh.winreg.values
-    assert nh.winreg.calls[-1] == ("delete", "HKCU", nh.REGISTRY_KEY)
+    for browser, path in paths.items():
+        assert not path.exists()
+        assert nh.registered(environ=env, browser=browser) is None
+    assert nh.REGISTRY_KEY not in nh.winreg.values and nh.CHROME_REGISTRY_KEY not in nh.winreg.values
+    assert nh.winreg.calls[-2:] == [("delete", "HKCU", nh.REGISTRY_KEY), ("delete", "HKCU", nh.CHROME_REGISTRY_KEY)]
     assert nh.unregister(environ=env) is False
+    # A registration from before Chrome's: Firefox's alone is taken away just the same.
+    nh.register(root, environ=env)
+    nh.manifest_path(environ=env, browser=nh.CHROME).unlink()
+    del nh.winreg.values[nh.CHROME_REGISTRY_KEY]
+    assert nh.unregister(environ=env) is True
+    assert nh.registered(environ=env) is None
 
 
 def test_windows_registration_needs_both_the_registry_value_and_the_file(home, tmp_path):
     root = fake_checkout(tmp_path)
     env = env_for(home)
-    path = nh.register(root, environ=env)
-    path.unlink()
-    assert nh.registered(environ=env) is None, "a dangling registry value is not a registration"
-    nh.register(root, environ=env)
-    nh.winreg.values.clear()
-    assert nh.registered(environ=env) is None, "a manifest nobody points at is not one either"
+    for browser, key in nh.REGISTRY_KEYS.items():
+        path = nh.register(root, environ=env)[browser]
+        path.unlink()
+        assert nh.registered(environ=env, browser=browser) is None, f"{browser}: a dangling registry value is not a registration"
+        nh.register(root, environ=env)
+        del nh.winreg.values[key]
+        assert nh.registered(environ=env, browser=browser) is None, f"{browser}: a manifest nobody points at is not one either"
+        assert all(nh.registered(environ=env, browser=b) for b in nh.browsers() if b != browser), "the others stay registered"
 
 
 @posix_only
 def test_register_gives_the_wrapper_its_executable_bit_back(tmp_path):
-    """Firefox executes native-host.sh itself; a zip update writes it without the bit."""
+    """Firefox and Chrome execute native-host.sh themselves; a zip update writes it without the bit."""
     root = fake_checkout(tmp_path)
     wrapper = root / "server" / "native-host.sh"
     wrapper.write_bytes(b"#!/usr/bin/env bash\n")
     wrapper.chmod(0o644)
     env = env_for(tmp_path / "home")
-    path = nh.register(root, environ=env)
+    paths = nh.register(root, environ=env)
     assert wrapper.stat().st_mode & 0o111 == 0o111
-    assert json.loads(path.read_text(encoding="utf-8"))["path"] == str(wrapper)
+    for path in paths.values():
+        assert json.loads(path.read_text(encoding="utf-8"))["path"] == str(wrapper)
     (root / "server" / "native-host.sh").unlink()
-    assert nh.register(root, environ=env) == path, "a missing wrapper is --status's business, not a crash here"
+    assert nh.register(root, environ=env) == paths, "a missing wrapper is --status's business, not a crash here"
 
 
 def test_same_file_sees_through_two_spellings_of_one_path(tmp_path):
@@ -598,10 +698,15 @@ def test_status_text_accepts_the_same_checkout_reached_by_another_path(home, tmp
     wrapper = nh.wrapper_path(root)
     wrapper.write_bytes(b"#!/usr/bin/env bash\n")
     env = env_for(home)
-    path = nh.register(root, environ=env)
+    paths = nh.register(root, environ=env)
     link = tmp_path / "checkout-link"
     link.symlink_to(root)
-    assert nh.status_text(link, environ=env) == f"registered at {path}"
+    text = nh.status_text(link, environ=env)
+    for browser, path in paths.items():
+        assert f"{browser} registered at {path}" in text
+    # Neither another checkout's nor out of date: the manifest's own spelling of the path is the one
+    # thing same_file() has already judged, so the staleness check must not compare it as text again.
+    assert "points at" not in text and "out of date" not in text
     assert "points at" in nh.status_text(fake_checkout(tmp_path / "elsewhere"), environ=env)
 
 
@@ -609,12 +714,50 @@ def test_status_text_says_where_and_whether(home, tmp_path):
     root = fake_checkout(tmp_path)
     env = env_for(home)
     assert nh.status_text(root, environ=env) == "not registered (run setup or start the server once)"
-    path = nh.register(root, environ=env)
-    assert nh.status_text(root, environ=env) == f"registered at {path}"
+    paths = nh.register(root, environ=env)
+    assert nh.status_text(root, environ=env) == "; ".join(f"{b} registered at {p}" for b, p in paths.items())
     other = fake_checkout(tmp_path / "other")
     text = nh.status_text(other, environ=env)
-    assert text.startswith(f"registered at {path} (points at {nh.wrapper_path(root)}")
-    assert "--register" in text
+    for browser, path in paths.items():
+        assert f"{browser} registered at {path} (points at {nh.wrapper_path(root)}; run native_host.py --register" in text
+    # A registration from before Chrome's: Firefox's is found, Chrome's is missing and says so.
+    nh.manifest_path(environ=env, browser=nh.CHROME).unlink()
+    text = nh.status_text(root, environ=env)
+    assert text.startswith(f"Firefox registered at {paths['Firefox']}; Chrome not registered (run setup")
+    # A manifest for this checkout that no longer says what --register writes (another origin).
+    nh.register(root, environ=env)
+    stale = nh.manifest(nh.wrapper_path(root), nh.CHROME) | {"allowed_origins": ["chrome-extension://abcdefghijklmnopabcdefghijklmnop/"]}
+    paths["Chrome"].write_text(json.dumps(stale), encoding="utf-8")
+    assert f"Chrome registered at {paths['Chrome']} (out of date; run native_host.py --register)" in nh.status_text(root, environ=env)
+
+
+def test_status_text_reports_the_others_when_one_browser_folder_cannot_be_entered(home, tmp_path, monkeypatch):
+    """A profile folder left root's (a browser once started through sudo) makes is_file() raise
+    EACCES on Python 3.10-3.13, where register() goes on to the next browser; --status and
+    server.py --check must too, instead of a traceback or "could not check" for all of them."""
+    root = fake_checkout(tmp_path)
+    env = env_for(home)
+    paths = nh.register(root, environ=env)
+    locked = paths["Chrome"]
+    real_is_file = Path.is_file
+
+    def is_file(self, *args, **kwargs):
+        if self == locked:
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real_is_file(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_file", is_file)
+    text = nh.status_text(root, environ=env)
+    assert text.startswith(f"Firefox registered at {paths['Firefox']}; Chrome could not be checked ([Errno 13] Permission denied")
+    assert "not registered" not in text, "a folder that cannot be entered is not a missing registration"
+    for browser in nh.browsers():
+        if browser not in ("Firefox", "Chrome"):
+            assert f"{browser} registered at {paths[browser]}" in text
+    paths["Firefox"].unlink()
+    for browser in nh.browsers()[2:]:
+        paths[browser].unlink()
+    text = nh.status_text(root, environ=env)
+    assert text.startswith("Firefox not registered (run setup or start the server once); Chrome could not be checked (")
 
 
 # --- entry point -------------------------------------------------------------------------------
@@ -627,12 +770,15 @@ def test_main_status_prints_one_line(monkeypatch, capsys):
 
 def test_main_register_is_quiet_unless_verbose(monkeypatch, capsys):
     calls = []
-    monkeypatch.setattr(nh, "register", lambda: calls.append("register") or Path("x") / "shisuko.json")
+    done = {"Firefox": Path("x") / "shisuko.json", "Chrome": Path("y") / "shisuko.json"}
+    monkeypatch.setattr(nh, "register", lambda: calls.append("register") or done)
     monkeypatch.setattr(nh, "unregister", lambda: calls.append("unregister") or True)
     assert nh.main(["--register"]) == 0
     assert capsys.readouterr() == ("", "")
     assert nh.main(["--register", "--verbose"]) == 0
-    assert str(Path("x") / "shisuko.json") in capsys.readouterr().out
+    assert capsys.readouterr().out == (
+        f"registered the Start button launcher for Firefox at {done['Firefox']}\n"
+        f"registered the Start button launcher for Chrome at {done['Chrome']}\n")
     assert nh.main(["--verbose", "--unregister"]) == 0
     assert "removed" in capsys.readouterr().out
     assert calls == ["register", "register", "unregister"]
@@ -646,6 +792,19 @@ def test_main_reports_a_failed_registration_on_stderr(monkeypatch, capsys):
     assert nh.main(["--register"]) == 1
     out, err = capsys.readouterr()
     assert out == "" and "registry is read-only" in err
+
+
+def test_main_reports_a_partial_registration_and_what_did_register(monkeypatch, capsys):
+    def partial():
+        raise nh.RegistrationError(["Chrome: [Errno 13] Permission denied"], {"Firefox": Path("x") / "shisuko.json"})
+
+    monkeypatch.setattr(nh, "register", partial)
+    assert nh.main(["--register", "--verbose"]) == 1
+    out, err = capsys.readouterr()
+    assert out == f"registered the Start button launcher for Firefox at {Path('x') / 'shisuko.json'}\n"
+    assert "could not register the Start button launcher (Chrome: [Errno 13] Permission denied)" in err
+    assert nh.main(["--register"]) == 1
+    assert capsys.readouterr().out == "", "quiet without --verbose, failure or not"
 
 
 def test_main_refuses_two_actions_and_a_terminal_without_one(monkeypatch, capsys):

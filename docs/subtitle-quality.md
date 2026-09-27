@@ -123,6 +123,18 @@ Apply per segment, before `split_segment()`:
 3. **Port `word_anomaly_score` / `is_segment_anomaly`** with upstream's thresholds (above) and drop anomalous
    segments whose VAD overlap is < 0.8. ~15 lines, reuses numbers someone else tuned. Risk: false positives
    on very fast speech (short words score on the `d < 0.133` term); the overlap gate is the safety.
+
+   **Measured, and the risk was the whole gate.** The talk path now scores with `short_term=False`.
+   Whisper's Japanese words are sub-tokens, usually a single kana, so they are under 133 ms by
+   construction: over 15 minutes of 5csq1MlSspA dumped twice (279 segments at a 40 s window, 202 at
+   30 s with an initial prompt) the first-8-words score reaches the threshold for 37 and 34 segments
+   with the term, and for 0 and 2 without it — and those two survive on their VAD overlap and are
+   real speech. Of the segments the gate deleted, all five were real utterances and none a
+   hallucination: `1人暮らしかなって…9時半からなんですよ` (9.6 s, 31 words),
+   `それこそ言語交換しようとしてる人が多いから`, `人間と関わりたくないってなって`,
+   `あ、まじで?はいはいはいはい。`, and, on the live run, the 10 s block holding
+   `一応、担任の先生とかいるの?` … `そうなんですよね`. The `p < 0.15` and `d > 2.0` terms stay, and so
+   does the whole score on the lyrics path (P0.3), whose thresholds were measured with it.
 4. **Repetition.** Drop a cue when any substring of ≥2 chars repeats ≥3 times consecutively, or when
    `compression_ratio > 2.2` for the segment. Whisper loops look exactly like this.
 5. **Phrase blocklist**, gated, never unconditional: ご視聴ありがとうございました / ご覧いただきありがとうございます /
@@ -186,7 +198,8 @@ cover and is covered.
    refuses what the decoder is all but sure of (Whisper's own `no_speech_threshold` is 0.6 and acts only
    together with a failed log-probability). `avg_logprob` separates better: sung windows −0.14 to −0.58, made-up
    lines −0.49 to −0.91. The word probability catches garbled pieces (それられ at 0.30; genuine lines from 0.48).
-3. "anomaly": `is_segment_anomaly()` unconditionally (P0.2 applies it only under a low overlap). Cost: a very fast
+3. "anomaly": `is_segment_anomaly()` unconditionally, and with the short-word term P0.2's talk path has since
+   dropped (these thresholds were measured with it, and nothing has re-measured them). Cost: a very fast
    sung line can fall to it (ないないない 止めらんないない…, three lines of one song in the sample).
 4. "repetition" as in P0.2.
 5. "blocklist": any phrase, unconditionally. This is what actually stops the instrumental case: over background

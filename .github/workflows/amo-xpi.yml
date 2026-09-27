@@ -1,0 +1,83 @@
+name: Attach the signed Firefox package
+
+# The release workflow signs each tag through addons.mozilla.org before it makes the release, so
+# a release normally comes with its signed .xpi; a version AMO holds for a human review goes out
+# with the unsigned one. This attaches the signed .xpi to a release that has none, once AMO has
+# signed the version and the file is shown to hold the release's own Firefox build, and then
+# removes the unsigned stand-in (0.14.1's only file is its listed one, if AMO approves it). The
+# schedule asks AMO only while the newest release has no signed .xpi yet; an older one is
+# attached by a run by hand with its tag. A version AMO has no file for is a warning; one AMO has
+# rejected fails the run: answer the reviewer and release the next patch version.
+on:
+  schedule:
+    - cron: "23 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (default the newest release)
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: amo-xpi
+  cancel-in-progress: false
+
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    env:
+      AMO_KEY: ${{ secrets.WEB_EXT_API_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        if: env.AMO_KEY == 'true'
+      - uses: actions/setup-node@v4
+        if: env.AMO_KEY == 'true'
+        with:
+          node-version: "22"
+      - name: Attach the signed .xpi once AMO has signed it
+        if: env.AMO_KEY == 'true'
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
+          WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          tag="${TAG:-$(gh release view --json tagName --jq .tagName)}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::not a release tag: $tag"
+            exit 1
+          fi
+          assets="$(gh release view "$tag" --json assets --jq '.assets[].name')"
+          unsigned="shisu-ko-${tag#v}-firefox-unsigned.xpi"
+          if grep -v -x -F "$unsigned" <<<"$assets" | grep -q '\.xpi$'; then
+            echo "$tag already has its signed .xpi"
+            exit 0
+          fi
+          code=0
+          node scripts/amo-xpi.mjs fetch "${tag#v}" --out dist/signed || code=$?
+          case "$code" in
+            0)
+              gh release download "$tag" -p "shisu-ko-${tag#v}-firefox.zip" -D dist/release
+              if ! node scripts/amo-xpi.mjs same-build dist/signed/*.xpi "dist/release/shisu-ko-${tag#v}-firefox.zip"; then
+                echo "::error::AMO's signed ${tag#v} is not the Firefox build of the release $tag; it is not attached"
+                exit 1
+              fi
+              gh release upload "$tag" dist/signed/*.xpi --clobber
+              # The signed file takes the unsigned one's place.
+              if grep -q -x -F "$unsigned" <<<"$assets"; then
+                gh release delete-asset "$tag" "$unsigned" --yes
+              fi
+              ;;
+            3) echo "AMO has not signed $tag yet" ;;
+            4)
+              state="$(node scripts/amo-xpi.mjs status "${tag#v}")"
+              if [ "$state" = disabled ]; then
+                echo "::error::AMO has rejected ${tag#v}: answer the reviewer in the Developer Hub and release the next patch version"
+                exit 1
+              fi
+              echo "::warning::AMO has no file for ${tag#v}: the release job may still be uploading it, or its upload failed (re-run that job)"
+              ;;
+            *) exit "$code" ;;
+          esac

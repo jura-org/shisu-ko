@@ -3,6 +3,7 @@
 # the loop the popup's Update button relies on: register, update, start the server with
 # SHISUKO_LAUNCHER=1, and after an exit with code 4 update again (which replaces run.sh with a
 # longer file while it runs), register again and start again, until the server exits 0.
+# Then it runs the real server/setup.sh unattended against stubs, as `yes 1 | bash setup.sh`.
 # Only stdlib Python, bash and a scratch HOME are needed; nothing outside the temp directory
 # is touched. Usage: bash scripts/launcher-smoke.sh   (exit 0 = every step happened in order)
 set -euo pipefail
@@ -59,3 +60,56 @@ if [ "$code" -ne 0 ]; then echo "FAIL: run.sh should end with the server's exit 
 if [ "$(cat "$LOG")" != "$expected" ]; then echo "FAIL: the launcher did not run the steps in this order:"; echo "$expected"; exit 1; fi
 grep -q "^# updated" "$WORK/checkout/server/run.sh" || { echo "FAIL: update.py did not replace run.sh"; exit 1; }
 echo "OK: run.sh registers, updates, passes SHISUKO_LAUNCHER=1, and runs the update again after exit code 4"
+
+# setup.sh's comment offers `yes 1 | bash setup.sh` as the unattended pick of large-v3. It must
+# still reach the model download and its last line where Firefox keeps a profile: the stub
+# server.py asks the cookie question there as server.py does, again after anything but Y or N,
+# three times at most (SETUP_COOKIES_TRIES).
+SETUP="$WORK/setup/server"
+SETUP_HOME="$WORK/setup-home"
+SETUP_LOG="$WORK/setup-steps.log"
+mkdir -p "$SETUP" "$SETUP_HOME/.shisu-ko/venv/bin"
+cp "$HERE/server/setup.sh" "$SETUP/setup.sh"
+cp "$WORK/checkout/server/native_host.py" "$SETUP/native_host.py"
+# The venv's python: pip installs nothing, and the scripts it runs are the stubs.
+cat > "$SETUP_HOME/.shisu-ko/venv/bin/python" <<'EOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "-m" ] && exit 0
+exec python3 "$@"
+EOF
+chmod +x "$SETUP_HOME/.shisu-ko/venv/bin/python"
+# Like server.py, the stub takes three answers that are neither Y nor N as none, so a setup.sh
+# that passes `yes` on logs answers=3 and fails here where it should log answers=0.
+cat > "$SETUP/server.py" <<'EOF'
+import os, sys
+from pathlib import Path
+args = sys.argv[1:]
+line = f"server args={' '.join(args)}"
+if args == ["--setup-cookies"]:
+    answers = 0
+    while answers < 3:
+        try:
+            answer = input("Type Y or N: ").strip().lower()
+        except EOFError:
+            break
+        answers += 1
+        if answer in ("y", "yes", "n", "no"):
+            break
+    line += f" answers={answers}"
+Path(os.environ["SMOKE_LOG"]).open("a").write(line + "\n")
+EOF
+
+# Without pipefail the status is setup.sh's, not that of `yes` ending on the closed pipe.
+set +o pipefail
+if yes 1 | HOME="$SETUP_HOME" SMOKE_LOG="$SETUP_LOG" bash "$SETUP/setup.sh" > "$WORK/setup.out" 2>&1; then code=0; else code=$?; fi
+set -o pipefail
+echo "setup.sh exited with $code"
+cat "$SETUP_LOG"
+expected="register args=--register --verbose
+server args=--check
+server args=--setup-cookies answers=0
+server args=--download-model large-v3"
+if [ "$code" -ne 0 ]; then echo "FAIL: setup.sh should end with 0"; cat "$WORK/setup.out"; exit 1; fi
+if [ "$(cat "$SETUP_LOG")" != "$expected" ]; then echo "FAIL: setup.sh did not run these steps, the cookie question ending at an EOF:"; echo "$expected"; exit 1; fi
+grep -q "Setup is complete: the large-v3 model is downloaded" "$WORK/setup.out" || { echo "FAIL: setup.sh did not say it is complete"; exit 1; }
+echo "OK: setup.sh under \`yes 1\` picks large-v3, gives the cookie question an EOF and finishes"

@@ -1,5 +1,15 @@
 name: Release extensions
 
+# A tag makes a release and its signed .xpi, nothing more: the checks, the Firefox package signed
+# by addons.mozilla.org for self-distribution, and the GitHub release with the zips and the .xpi.
+# The public listing on addons.mozilla.org is a workflow of its own, amo-listing.yml, run by hand
+# for the releases it should get. The Chrome Web Store gets each release from cws-listing.yml,
+# which starts by itself once this workflow has made the release and uploads the release's own
+# Chrome zip; it names this workflow by its name:, so a rename goes there too. It has no schedule,
+# so it starts for every release even after a long pause. The three-hourly catch-up of releases
+# held back behind an older review is cws-schedule.yml, which GitHub switches off after 60 days
+# without activity in the repository; only held-back releases wait then, until
+# gh workflow enable cws-schedule.yml turns it back on.
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
@@ -9,6 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      AMO_KEY: ${{ secrets.WEB_EXT_API_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -22,8 +34,11 @@ jobs:
       - run: python -m pytest server/tests
       - run: node --test addon/tests/*.test.js
       - run: for f in addon/*.js; do node --check "$f"; done
-      - run: npm run test:build
-      - run: npx --yes web-ext lint --source-dir addon
+      # The build tests without the listing texts' (amo-metadata.test.mjs): a text AMO would refuse
+      # is the listing's business and must not hold up the release; the Tests workflow checks it
+      # on every push.
+      - run: node --test $(ls scripts/tests/*.test.mjs | grep -v '/amo-metadata\.test\.mjs$')
+      - run: npx --yes web-ext@10.7.0 lint --source-dir addon
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
       - run: npm run build
@@ -31,14 +46,46 @@ jobs:
         if: github.ref_type == 'tag'
         run: test "v$(node -p "require('./addon/manifest.json').version")" = "${GITHUB_REF_NAME}"
       # Regular Firefox only keeps signed add-ons. The built Firefox package is signed through
-      # addons.mozilla.org (unlisted channel) with the AMO API key kept in the repository secrets;
-      # without the secrets the release still ships the unsigned zips.
+      # addons.mozilla.org (unlisted channel: self-distribution, no listing) with the AMO API key
+      # kept in the repository secrets, before the release is made: web-ext uploads it, waits up to
+      # a quarter of an hour for AMO to sign it and downloads the signed .xpi into dist/. AMO holds
+      # some versions for a human review, which can take days; such a release goes out with the
+      # unsigned .xpi (below), and amo-xpi.yml puts the signed one in its place once AMO has signed
+      # it. AMO takes a number once, so a re-run takes the signed file of the first upload from AMO
+      # instead, and only when it holds this tag's build.
       - name: Sign the Firefox package
-        if: env.WEB_EXT_API_KEY != ''
+        if: env.AMO_KEY == 'true'
         env:
           WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
           WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
-        run: npx --yes web-ext sign --source-dir dist/firefox --artifacts-dir dist --channel unlisted --no-input
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          wait=900
+          if [ "$(node scripts/amo-xpi.mjs status "$version")" = missing ]; then
+            if npx --yes web-ext@10.7.0 sign --source-dir dist/firefox --artifacts-dir dist --channel unlisted --no-input; then
+              exit 0
+            fi
+            if [ "$(node scripts/amo-xpi.mjs status "$version")" = missing ]; then
+              echo "::error::AMO did not take the upload of $version"
+              exit 1
+            fi
+            wait=0 # the signing above has waited its quarter of an hour already
+          fi
+          code=0
+          node scripts/amo-xpi.mjs fetch "$version" --out dist --wait "$wait" || code=$?
+          case "$code" in
+            0) node scripts/amo-xpi.mjs same-build dist/*.xpi dist/firefox ;;
+            3|4) echo "::warning::AMO has not signed $version (held for a human review?): the release carries the unsigned .xpi, and amo-xpi.yml attaches the signed one once AMO has signed it" ;;
+            *) exit "$code" ;;
+          esac
+      # Every release carries an .xpi: the signed one above, or else the unsigned build under a name
+      # that says so (it installs in Firefox Developer Edition, Nightly and ESR with signatures off,
+      # or for the session from about:debugging), also without the AMO key in the secrets.
+      - name: Add the unsigned .xpi when there is no signed one
+        run: |
+          if ! compgen -G "dist/*.xpi" > /dev/null; then
+            cp "dist/shisu-ko-${GITHUB_REF_NAME#v}-firefox.zip" "dist/shisu-ko-${GITHUB_REF_NAME#v}-firefox-unsigned.xpi"
+          fi
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:

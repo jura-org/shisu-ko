@@ -1,0 +1,32 @@
+name: Ask the Chrome Web Store for held-back releases
+
+# The Chrome Web Store reviews one submission at a time, so cws-listing.yml holds a release back
+# while an older version still waits for its review, or is approved and staged. This schedule runs
+# cws-listing.yml every three hours, which submits the highest release once the store has published
+# the older version or its review is cancelled; a rarer schedule would keep that release from the
+# store for as long. Its one job is cws-listing.yml's, run inside this workflow's run (the Actions
+# tab lists it under this workflow's name, and a run by hand goes to cws-listing.yml) with this
+# schedule as its event: without the store's key it passes quietly, and it never withdraws a review
+# or submits past a rejected one, where it only warns. The schedule is a workflow of its own because
+# GitHub switches off a public repository's workflow that has a schedule after 60 days without
+# activity in the repository, and a workflow switched off starts for nothing at all. Kept apart,
+# only the catch-up of held-back releases stops then: cws-listing.yml has no schedule and still
+# starts for every release. gh workflow enable cws-schedule.yml turns the schedule back on.
+on:
+  schedule:
+    - cron: "47 */3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  catch-up:
+    # A called workflow gets no more than its caller grants, and cws-listing.yml needs no more
+    # than to read the releases. secrets: inherit hands it the store's key; the repository
+    # variable CWS_PUBLISHER_ID reaches it without that, since a called workflow reads its
+    # caller's repository variables. The called job waits its turn in cws-listing.yml's own
+    # concurrency group, so this job sets none.
+    uses: ./.github/workflows/cws-listing.yml
+    secrets: inherit
+    permissions:
+      contents: read

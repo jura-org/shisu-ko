@@ -43,6 +43,15 @@ while :; do
     2) MODEL=small; break;;
   esac
 done
+# YouTube refuses some downloads ("Sign in to confirm you're not a bot") until they carry a
+# signed-in browser's cookies. server.py asks, only where Firefox keeps a profile, and reads nothing
+# before a yes; the answer goes to config.json, the default of every start, the popup's Start
+# button included. An EOF leaves config.json as it is, and nothing here may end the setup. Only a
+# terminal answers: a piped stdin held the model's answer, and `yes 1` would spend server.py's
+# three tries on "1", so there the question gets an EOF instead.
+echo
+[ -t 0 ] || exec </dev/null
+"${VENV}/bin/python" "${HERE}/server.py" --setup-cookies || true
 echo
 # Inside the if, set -e leaves the verdict to us: a failed download ends setup with a word on it.
 if ! "${VENV}/bin/python" "${HERE}/server.py" --download-model "$MODEL"; then

@@ -9,6 +9,7 @@ const { test } = require("node:test");
 const ADDON = path.join(__dirname, "..");
 const HTML = fs.readFileSync(path.join(ADDON, "popup.html"), "utf8");
 const CSS = fs.readFileSync(path.join(ADDON, "popup.css"), "utf8").replace(/\/\*[^]*?\*\//g, "");
+const POPUP_JS = fs.readFileSync(path.join(ADDON, "popup.js"), "utf8");
 
 // The declarations of the popup.css rule with exactly this selector list, as "property: value".
 function cssDeclarations(selector) {
@@ -37,7 +38,7 @@ function fakeElement(tag = "div", attrs = {}) {
   const el = {
     tagName: tag.toUpperCase(),
     id: attrs.id || "",
-    type: tag === "select" ? "select-one" : attrs.type || (tag === "input" ? "text" : ""),
+    type: tag === "select" ? "select-one" : tag === "textarea" ? "textarea" : attrs.type || (tag === "input" ? "text" : ""),
     min: attrs.min || "",
     max: attrs.max || "",
     className: "",
@@ -88,7 +89,7 @@ function fakeElement(tag = "div", attrs = {}) {
 
 function elementsFromHtml() {
   const elements = new Map();
-  for (const [, tag, attrText] of HTML.matchAll(/<(input|select|button|output|p|span|div|datalist)\b([^>]*)>/g)) {
+  for (const [, tag, attrText] of HTML.matchAll(/<(input|select|textarea|button|output|p|span|div|datalist)\b([^>]*)>/g)) {
     const attrs = Object.fromEntries([...attrText.matchAll(/(\w+)="([^"]*)"/g)].map((m) => [m[1], m[2]]));
     if (attrs.id) elements.set(attrs.id, fakeElement(tag, attrs));
   }
@@ -96,11 +97,15 @@ function elementsFromHtml() {
 }
 
 // `answer` plays the background: it gets every runtime.sendMessage and returns the reply. The
-// popup runs as Firefox's unless `runtimeURL` says otherwise: the button is for Firefox alone.
+// popup runs as Firefox's unless `runtimeURL` says otherwise: on Chrome the button is for the
+// store install alone (CHROME_STORE_URL), and "chrome-extension://test/" plays an unpacked build.
 // `opts.installedFonts` names the families the fake canvas measures differently from a generic.
+// `permissionRequests` records each permissions.request as it is made, so a test can see whether
+// the click made it before its first await; `opts.grant: false` refuses them.
 // The clocks init() sets up never run here; `intervals` holds them ({fn, ms}) for a test to tick.
 function loadPopup(answer, runtimeURL = "moz-extension://test/", opts = {}) {
   const elements = elementsFromHtml();
+  const permissionRequests = [];
   const installed = new Set(opts.installedFonts || []);
   const canvas = { canvases: 0, contexts: 0 };
   const listened = () => {
@@ -145,8 +150,15 @@ function loadPopup(answer, runtimeURL = "moz-extension://test/", opts = {}) {
     clearTimeout,
     setInterval: (fn, ms) => intervals.push({ fn, ms }),
     browser: {
-      runtime: { sendMessage: async (msg) => answer(msg), getURL: () => runtimeURL },
-      permissions: { contains: async () => true, request: async () => true },
+      // The id is the URL's host, as Chrome's is; Firefox's is the gecko id, which never matters.
+      runtime: { sendMessage: async (msg) => answer(msg), getURL: () => runtimeURL, id: new URL(runtimeURL).host },
+      permissions: {
+        contains: async () => true,
+        request: (what) => {
+          permissionRequests.push(JSON.parse(JSON.stringify(what)));
+          return Promise.resolve(opts.grant !== false);
+        },
+      },
       tabs: { query: async () => [], create: async (opts) => opened.push(opts.url) },
       storage: { onChanged: { addListener: (fn) => storageListeners.push(fn) } },
     },
@@ -156,6 +168,7 @@ function loadPopup(answer, runtimeURL = "moz-extension://test/", opts = {}) {
   new vm.Script(fs.readFileSync(path.join(ADDON, "popup.js"), "utf8"), { filename: "popup.js" }).runInContext(sandbox);
   const api = new vm.Script(
     "({ startFlow, resumeStart, checkServer, startServerFromPopup, startNotUpHint, START_NOT_UP_HINT, START_ELSEWHERE_HINT, OFFLINE_HINT," +
+      " START_AVAILABLE, ON_FIREFOX, CHROME_STORE_ID, START_PERMISSION_HINT," +
       " updateFlow, refreshUpdate, updateServerFromPopup, snoozeUpdateFromPopup, checkForUpdatesFromPopup, openReleasePage, relativeTime, renderStatus," +
       " UPDATE_LOST_HINT, stillOldHint, init, resetStyle, onChange, renderDeckOptions, refreshDecks, DECK_NONE_HINT, HEALTH_REFRESH_MS, DECKS_RETRY_MS })"
   ).runInContext(sandbox);
@@ -163,7 +176,7 @@ function loadPopup(answer, runtimeURL = "moz-extension://test/", opts = {}) {
   const fireStorage = (settings) => {
     for (const fn of storageListeners) fn({ settings: { newValue: settings } }, "local");
   };
-  return { ...api, el: (id) => document.getElementById(id), opened, document, window, intervals, storageListeners, canvas, fireStorage };
+  return { ...api, el: (id) => document.getElementById(id), opened, document, window, intervals, storageListeners, canvas, fireStorage, permissionRequests };
 }
 
 const DEFAULTS = (() => {
@@ -173,6 +186,8 @@ const DEFAULTS = (() => {
   return JSON.parse(JSON.stringify(new vm.Script("SHISUKO_DEFAULT_SETTINGS").runInContext(sandbox)));
 })();
 
+// The Chrome Web Store install: the one Chrome id native_host.py registers the launcher for.
+const CHROME_STORE_URL = "chrome-extension://ecenifonpkaiccmmknpbllbebbfigjnm/";
 const offline = { ok: false, offline: true, error: "Server unreachable" };
 const online = { ok: true, data: { model: "large-v3", device: "cuda", compute_type: "float16" } };
 // checkServer() paints the status line at once and asks the background about updates behind it;
@@ -260,15 +275,78 @@ test("a server the launcher finds answering, and this popup does not, points at 
   assert.notEqual(popup.START_ELSEWHERE_HINT, popup.START_NOT_UP_HINT);
 });
 
-// native_host.py registers the launcher with Firefox only; on Chrome the button would answer
-// "launcher not registered" with a hint (run setup.cmd) that registers nothing Chrome reads.
-test("on Chrome the button stays hidden while the server is offline", async () => {
-  const popup = loadPopup((msg) => (msg.type === "startServerStatus" ? { starting: false } : offline), "chrome-extension://test/");
+// Chrome takes four suggested shortcuts and the build drops the fifth, Alt+Shift+H, whichever
+// way it was installed: the store install gets the Start button, not the key.
+test("the Alt+Shift+H hint shows in Firefox and not on Chrome, whose build has no key for it", async () => {
+  for (const [url, hidden] of [["moz-extension://test/", false], ["chrome-extension://test/", true], [CHROME_STORE_URL, true]]) {
+    const bg = updateBackground({});
+    const popup = loadPopup(bg.answer, url);
+    await popup.init();
+    await settle();
+    assert.equal(popup.el("statusBadgeKey").hidden, hidden, url);
+    assert.equal(popup.el("statusBadge").checked, true, "the switch itself is there in both");
+  }
+});
+
+// native_host.py registers the launcher for the Chrome Web Store install's origin alone. An
+// unpacked build (dist/chrome, the release zip) has an id derived from its folder's path, and
+// the button there would answer "launcher not registered" with a hint (run setup.cmd) that
+// registers nothing Chrome would let that id reach.
+test("on an unpacked Chrome build the button stays hidden while the server is offline", async () => {
+  for (const url of ["chrome-extension://test/", "chrome-extension://abcdefghijklmnopabcdefghijklmnop/"]) {
+    const popup = loadPopup((msg) => (msg.type === "startServerStatus" ? { starting: false } : offline), url);
+    assert.equal(popup.START_AVAILABLE, false, url);
+    await popup.resumeStart();
+    await popup.checkServer(true);
+    assert.equal(popup.el("server-status").textContent, "Server offline");
+    assert.equal(popup.el("server-detail").textContent, popup.OFFLINE_HINT);
+    assert.equal(popup.el("start-server").hidden, true, url);
+  }
+});
+
+test("the Chrome Web Store install offers the button, and the click asks for nativeMessaging first", async () => {
+  const sent = [];
+  const popup = loadPopup((msg) => {
+    sent.push(msg.type);
+    if (msg.type === "startServerStatus") return { starting: false };
+    if (msg.type === "startServer") return { ok: true, started: true, already: false, log: null, deadline: Date.now() + 90000 };
+    return offline;
+  }, CHROME_STORE_URL);
+  assert.equal(popup.START_AVAILABLE, true);
+  assert.equal(popup.ON_FIREFOX, false);
+  assert.equal(`chrome-extension://${popup.CHROME_STORE_ID}/`, CHROME_STORE_URL);
   await popup.resumeStart();
   await popup.checkServer(true);
   assert.equal(popup.el("server-status").textContent, "Server offline");
-  assert.equal(popup.el("server-detail").textContent, popup.OFFLINE_HINT);
-  assert.equal(popup.el("start-server").hidden, true);
+  assert.equal(popup.el("start-server").hidden, false);
+  assert.equal(popup.el("start-server").disabled, false);
+  const click = popup.startServerFromPopup();
+  // Asked before the click's first await, while its user gesture lasts: Chrome refuses the prompt
+  // after that, and every click would end on START_PERMISSION_HINT.
+  assert.deepEqual(popup.permissionRequests, [{ permissions: ["nativeMessaging"] }]);
+  await click;
+  assert.deepEqual(sent.filter((type) => type === "startServer"), ["startServer"]);
+  assert.equal(popup.startFlow.state, "waiting");
+  // The store id's origin exactly: an id that merely contains it is another install.
+  for (const url of ["chrome-extension://aecenifonpkaiccmmknpbllbebbfigjnm/", "chrome-extension://ecenifonpkaiccmmknpbllbebbfigjnma/"]) {
+    assert.equal(loadPopup(() => offline, url).START_AVAILABLE, false, url);
+  }
+});
+
+// Both browsers demand the user gesture for the prompt, and the answer decides: a refusal ends on
+// the hint without a word to the background, whose native host Chrome would not let it reach.
+test("the click asks for nativeMessaging before its first await, and a refusal starts nothing", async () => {
+  for (const url of ["moz-extension://test/", CHROME_STORE_URL]) {
+    const sent = [];
+    const popup = loadPopup((msg) => (sent.push(msg.type), offline), url, { grant: false });
+    const click = popup.startServerFromPopup();
+    assert.deepEqual(popup.permissionRequests, [{ permissions: ["nativeMessaging"] }], url);
+    await click;
+    assert.equal(popup.startFlow.state, "failed", url);
+    assert.equal(popup.el("server-detail").textContent, popup.START_PERMISSION_HINT, url);
+    assert.equal(popup.el("start-server").disabled, false, url);
+    assert.deepEqual(sent.filter((type) => type === "startServer"), [], url);
+  }
 });
 
 test("the server answering ends the wait and hides the button", async () => {
@@ -429,13 +507,65 @@ test("a server from before the launcher flag gets a banner that names the releas
 });
 
 test("an extension behind the release is sent to the release page", async () => {
-  const { popup } = await open({ health: healthOf("0.9.0", true), extension: "newer" });
-  assert.equal(popup.el("update-text").textContent, "A newer extension (0.9.0) is on the release page; Firefox installs it from addons.mozilla.org once the listing is live");
+  const { popup } = await open({ health: healthOf("0.9.0", true), extension: "newer", latest: { ...LATEST, xpi: "https://github.com/Multysquid/shisu-ko/releases/download/v0.9.0/shisu_ko-0.9.0.xpi" } });
+  assert.equal(popup.el("update-text").textContent, "A newer extension (0.9.0) is on the release page (the addons.mozilla.org listing may get it later)");
   assert.equal(popup.el("update-now").hidden, true);
   assert.equal(popup.el("update-release").hidden, false);
   popup.openReleasePage();
   await settle();
   assert.deepEqual(popup.opened, [LATEST.url]);
+});
+
+// The release is there before its signed .xpi: Firefox is not sent to a page it cannot install
+// from, an unpacked Chrome build (whose zip is there from the start) is, and is not told about a
+// listing on addons.mozilla.org, which never updates a Chrome install.
+test("an extension behind a release without its signed .xpi yet is told so, and not sent to the page in Firefox", async () => {
+  const { popup } = await open({ health: healthOf("0.9.0", true), extension: "newer" });
+  assert.equal(popup.el("update-text").textContent, "A newer extension (0.9.0) is out; its signed .xpi reaches the release page once addons.mozilla.org has signed it");
+  assert.equal(popup.el("update-release").hidden, true);
+  assert.equal(popup.el("update-later").hidden, false);
+  const onChrome = await open({ health: healthOf("0.9.0", true), extension: "newer" }, "chrome-extension://test/");
+  assert.equal(onChrome.popup.el("update-text").textContent, "A newer extension (0.9.0) is on the release page; an unpacked build does not update itself");
+  assert.equal(onChrome.popup.el("update-release").hidden, false);
+});
+
+// Chrome updates a store install from the Chrome Web Store, after the store's review: the popup
+// says so and offers no release page, whose unpacked build would be a second extension, under an
+// id the launcher does not answer (no Start button there).
+test("a Chrome Web Store install behind the release is told the store updates it, and not sent to the page", async () => {
+  const TEXT = "A newer extension (0.9.0) is out; the Chrome Web Store updates this one once it has reviewed that version, which can take days after the GitHub release";
+  for (const latest of [LATEST, { ...LATEST, xpi: "https://github.com/Multysquid/shisu-ko/releases/download/v0.9.0/shisu_ko-0.9.0.xpi" }]) {
+    const { popup } = await open({ health: healthOf("0.9.0", true), extension: "newer", latest }, CHROME_STORE_URL);
+    assert.equal(popup.el("update-banner").hidden, false);
+    assert.equal(popup.el("update-text").textContent, TEXT);
+    assert.equal(popup.el("update-now").hidden, true);
+    assert.equal(popup.el("update-release").hidden, true);
+    assert.equal(popup.el("update-later").hidden, false);
+  }
+  // Every server banner (newer, cannot, behind) comes first there as anywhere: the store says
+  // nothing about the server, and a server that needs a restart by hand must still say so.
+  const server = await open({ health: healthOf("0.8.0", true), extension: "newer" }, CHROME_STORE_URL);
+  assert.equal(server.popup.el("update-text").textContent, "Shisu-ko 0.9.0 is available — the server runs 0.8.0.");
+  assert.equal(server.popup.el("update-now").hidden, false);
+  const cannot = await open({ health: healthOf("0.8.0", false), extension: "newer" }, CHROME_STORE_URL);
+  assert.equal(cannot.popup.el("update-text").textContent, "Shisu-ko 0.9.0 is available — the server runs 0.8.0 and was not started by run.cmd / run.sh, so it cannot update itself; restart it by hand to update");
+  assert.equal(cannot.popup.el("update-release").hidden, true);
+  const behind = await open({ health: { ok: true, data: { version: "0.8.0", model: "large-v3", device: "cuda", compute_type: "float16" } }, extension: "newer" }, CHROME_STORE_URL);
+  assert.equal(behind.popup.el("update-text").textContent, "Shisu-ko 0.9.0 is available — the server runs 0.8.0, which cannot be updated from here; restart it by hand to update (run.cmd / run.sh update it at start)");
+  assert.equal(behind.popup.el("update-release").hidden, true);
+  // An offline server has no line of its own (its next start updates it); the store's stays,
+  // beside the Start button the store install has.
+  const serverOff = await open({ health: offline, extension: "newer" }, CHROME_STORE_URL);
+  assert.equal(serverOff.popup.el("server-status").textContent, "Server offline");
+  assert.equal(serverOff.popup.el("start-server").hidden, false);
+  assert.equal(serverOff.popup.el("update-text").textContent, TEXT);
+  assert.equal(serverOff.popup.el("update-release").hidden, true);
+  // "Not now" hides it for the session, as it does the release page's banner.
+  const snoozed = await open({ health: healthOf("0.9.0", true), extension: "newer", snoozed: "0.9.0" }, CHROME_STORE_URL);
+  assert.equal(snoozed.popup.el("update-banner").hidden, true);
+  // Nothing newer: no banner at all.
+  const current = await open({ health: healthOf("0.9.0", true) }, CHROME_STORE_URL);
+  assert.equal(current.popup.el("update-banner").hidden, true);
 });
 
 test("no banner while the server is offline, and none for a server that says no version", async () => {
@@ -891,6 +1021,138 @@ test("a text edit still on its way when the popup closes is saved from pagehide,
   assert.deepEqual(saves()[1], { serverUrl: "http://127.0.0.1:8791" });
   await wait(200);
   assert.equal(saves().length, 2);
+});
+
+// The viewer's own known words and the katakana switch: two settings like any other, the list a
+// textarea that saves once the edit is done (a save recolours every tab's lines), stored one word
+// per line with the blanks and the spaces out, the way the content script reads it.
+test("the known words and the katakana switch load into the form, and save trimmed, one word per line", async () => {
+  const state = { health: offline, settings: { knownWords: "食べる\n日本語", katakanaKnown: true } };
+  const { popup, saves, elsewhere } = await openForm(state);
+  const list = popup.el("knownWords");
+  assert.equal(list.type, "textarea");
+  assert.equal(list.value, "食べる\n日本語");
+  assert.equal(popup.el("katakanaKnown").checked, true);
+  assert.deepEqual([...list.listeners.keys()], ["change"], "the list saves once the edit is done, not per keystroke");
+  list.value = "  食べる  \n\n 東京駅\n日本語\n   \n";
+  list.dispatch("change");
+  popup.el("katakanaKnown").checked = false;
+  popup.el("katakanaKnown").dispatch("input");
+  await wait(200);
+  assert.deepEqual(saves(), [{ knownWords: "食べる\n東京駅\n日本語", katakanaKnown: false }]);
+  assert.equal(state.settings.knownWords, "食べる\n東京駅\n日本語");
+  // Alt+Shift+K on the video added a word: it lands in the list, unless the list is being typed in.
+  elsewhere({ knownWords: "食べる\n東京駅\n日本語\n来る" });
+  assert.equal(list.value, "食べる\n東京駅\n日本語\n来る");
+  popup.document.activeElement = list;
+  list.value = "食べる\n東京";
+  elsewhere({ knownWords: "食べる" });
+  assert.equal(list.value, "食べる\n東京", "a list being typed in keeps its typing");
+  popup.document.activeElement = null;
+  // The legend names the blue of a place name or Latin text beside the four card states, and says
+  // it is a switch.
+  assert.match(HTML, /<span class="sw proper"><\/span>names and Latin text, when switched on/);
+  assert.ok(cssDeclarations(".sw.proper,\n.sw.heiban").includes("background: #4da3ff"));
+});
+
+// The options page lives for hours, and the focus stays in the list it was last clicked into
+// while the viewer is on YouTube marking words with Alt+Shift+K. The focus alone is no typing:
+// those marks land in the list, and the viewer's next edit saves them with it instead of
+// putting the list from before them back.
+test("a focused known-words list nobody is typing in takes the marks made on the video, and its next edit keeps them", async () => {
+  const state = { health: offline, settings: { knownWords: "食べる" } };
+  const { popup, saves, elsewhere } = await openForm(state);
+  const list = popup.el("knownWords");
+  popup.document.activeElement = list; // clicked into, then off to the video
+  elsewhere({ knownWords: "食べる\n猫" });
+  elsewhere({ knownWords: "食べる\n猫\n犬" });
+  assert.equal(list.value, "食べる\n猫\n犬");
+  // Back in the tab, one word typed at the end, and the field left: the whole list is saved.
+  list.value = "食べる\n猫\n犬\n鳥";
+  // Typing now: a mark landing meanwhile waits, the typing stays.
+  elsewhere({ knownWords: "食べる\n猫\n犬\n馬" });
+  assert.equal(list.value, "食べる\n猫\n犬\n鳥");
+  list.dispatch("change");
+  await wait(200);
+  assert.deepEqual(saves(), [{ knownWords: "食べる\n猫\n犬\n鳥" }]);
+  assert.equal(state.settings.knownWords, "食べる\n猫\n犬\n鳥");
+  // What was sent is the list as the field holds it: still focused, the next mark lands again.
+  elsewhere({ knownWords: "食べる\n猫\n犬\n鳥\n魚" });
+  assert.equal(list.value, "食べる\n猫\n犬\n鳥\n魚");
+  // A model name the field was given is no typing either (the same rule for every text field).
+  const model = popup.el("model");
+  popup.document.activeElement = model;
+  elsewhere({ model: "small" });
+  assert.equal(model.value, "small");
+  popup.document.activeElement = null;
+});
+
+// The particle switch: off for a viewer who never touched it, a checkbox like any other, above the
+// katakana one. The legend no longer promises green particles; the switch says it.
+test("the particle switch loads unchecked by default, sits above the katakana one, and saves when ticked", async () => {
+  const state = { health: offline, settings: {} };
+  const { popup, saves, elsewhere } = await openForm(state);
+  const box = popup.el("particlesKnown");
+  assert.equal(box.type, "checkbox");
+  assert.equal(box.checked, false);
+  assert.equal(popup.el("katakanaKnown").checked, false);
+  box.checked = true;
+  box.dispatch("input");
+  await wait(200);
+  assert.deepEqual(saves(), [{ particlesKnown: true }]);
+  assert.equal(state.settings.particlesKnown, true);
+  // Unticked again in the other copy of the form: it lands here.
+  elsewhere({ particlesKnown: false });
+  assert.equal(box.checked, false);
+  assert.match(HTML, /<input type="checkbox" id="particlesKnown">\s*<span>Particles count as known<\/span>/);
+  assert.ok(HTML.indexOf('id="particlesKnown"') < HTML.indexOf('id="katakanaKnown"'));
+  assert.doesNotMatch(HTML, /particles green/);
+});
+
+// The name switch: off for a viewer who never touched it, a checkbox like any other, after the
+// katakana one.
+test("the name switch loads unchecked by default, sits after the katakana one, and saves when ticked", async () => {
+  const state = { health: offline, settings: {} };
+  const { popup, saves, elsewhere } = await openForm(state);
+  const box = popup.el("properNames");
+  assert.equal(box.type, "checkbox");
+  assert.equal(box.checked, false);
+  box.checked = true;
+  box.dispatch("input");
+  await wait(200);
+  assert.deepEqual(saves(), [{ properNames: true }]);
+  assert.equal(state.settings.properNames, true);
+  // Unticked again in the other copy of the form: it lands here.
+  elsewhere({ properNames: false });
+  assert.equal(box.checked, false);
+  assert.match(HTML, /<input type="checkbox" id="properNames">\s*<span>Names and Latin text in blue<\/span>/);
+  assert.ok(HTML.indexOf('id="katakanaKnown"') < HTML.indexOf('id="properNames"'));
+});
+
+// What colours without a card sits in a drawer of the Word colours section, closed like every
+// other drawer: the particle, katakana and name switches and the known-words list with its hint.
+// The section itself keeps the card colours, the deck and the pitch accent.
+test("the switches that colour without a card and the known words sit in a closed drawer of the Word colours section", () => {
+  const section = HTML.slice(HTML.indexOf("<h2>Word colours</h2>"), HTML.indexOf("<h2>Display</h2>"));
+  const open = section.indexOf("<details>");
+  const close = section.indexOf("</details>");
+  assert.ok(open > 0 && close > open, "the section holds a drawer");
+  assert.match(section.slice(open, close), /^<details>\s*<summary>More word colour options<\/summary>\s*<div class="drawer">/);
+  const drawer = section.slice(open, close);
+  for (const id of ["particlesKnown", "katakanaKnown", "properNames", "knownWords"]) {
+    assert.ok(drawer.includes(`id="${id}"`), `${id} is in the drawer`);
+    assert.equal(HTML.split(`id="${id}"`).length, 2, `${id} appears once`);
+  }
+  assert.match(drawer, /<p class="hint">Drawn as learned whatever their card says/);
+  for (const id of ["cardStatus", "cardStatusDeck", "deck-hint", "pitchAccent"]) {
+    const at = section.indexOf(`id="${id}"`);
+    assert.ok(at > 0 && at < open, `${id} stays in the section, above the drawer`);
+  }
+  // Closed by default, and no script opens it: the drawers keep no state.
+  assert.doesNotMatch(section.slice(open, open + 20), /open/);
+  assert.doesNotMatch(POPUP_JS, /\bdetails\b|\.open\s*=/);
+  // Nested in a section, the drawer takes the section's padding and line rather than its own.
+  assert.ok(cssDeclarations("section details").includes("border-bottom: none"));
 });
 
 // The mousedown on the button blurs the text field, whose change event starts the 150 ms save;

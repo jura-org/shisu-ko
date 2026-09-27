@@ -38,16 +38,24 @@ const START_NOT_UP_HINT = startNotUpHint(null);
 // the two are looking at different addresses.
 const START_ELSEWHERE_HINT = "The launcher finds a server on 127.0.0.1:8790, but the server URL below does not answer; check it under Anki, clips and server";
 const START_PERMISSION_HINT = "Allow Shisu-ko to talk to its launcher to start the server from here";
-// The launcher is registered for Firefox alone (native_host.py writes the Mozilla host manifest;
-// Chrome wants its own, under its own key, naming the installed extension's id), so on Chrome the
-// button could only ever answer "launcher not registered" with a hint that cannot help there.
-const START_AVAILABLE = (() => {
+const RUNTIME_URL = (() => {
   try {
-    return /^moz-extension:/.test(browser.runtime.getURL(""));
+    return String(browser.runtime.getURL(""));
   } catch (err) {
-    return false;
+    return "";
   }
 })();
+const ON_FIREFOX = /^moz-extension:/.test(RUNTIME_URL);
+// The Chrome Web Store install's id (CHROME_EXTENSION_ID in native_host.py, which names it in
+// Chrome's host manifest; server/tests/test_native_host.py keeps the two equal). Chrome lets only
+// the extensions a host manifest names reach the host, by an id that is fixed only for the store
+// install: an unpacked build's comes from its folder's path, and there the button could only ever
+// answer "launcher not registered" with a hint that cannot help. Firefox's id is the manifest's.
+// Chrome also updates a store install by itself, once the store has reviewed the version; an
+// unpacked build (dist/chrome, the release's Chrome zip) is updated by nothing but the viewer.
+const CHROME_STORE_ID = "ecenifonpkaiccmmknpbllbebbfigjnm";
+const CHROME_STORE_INSTALL = RUNTIME_URL === `chrome-extension://${CHROME_STORE_ID}/`;
+const START_AVAILABLE = ON_FIREFOX || CHROME_STORE_INSTALL;
 
 // The subtitle font, as content.js builds it (FONT_FAMILY_RE, SUB_FONTS, fontStack there): the
 // popup cannot import the content script, so the sample keeps a copy. Keep the two in step.
@@ -76,6 +84,13 @@ const dirty = new Set();
 // reports no change then). The store notifies before the background's write resolves and the
 // reply goes out, so the reply never overtakes the echo the field is waiting for.
 const inFlight = new Map();
+// What each text field held when it was last put in from the store (init, onStorageChanged) or
+// sent (flushSave), read as readField() reads it. A text field with the focus keeps a change made
+// elsewhere out only while its value differs from this, that is while the viewer is typing in it:
+// the focus alone says nothing (it stays on the known-words list of the options page while the
+// viewer is on YouTube marking words), and a list that skipped those marks would save itself
+// over them at its next edit.
+const typedBaseline = new Map();
 // The debounced save only remembers the last event, so a server-address or model edit leaves a
 // note here that the save flushes: "server" starts the status over, "model" refreshes the hint.
 let serverCheckPending = null;
@@ -147,7 +162,23 @@ function readField(el) {
   if (el.type === "range" || el.type === "number") return Number(el.value);
   // A colour well always reports a normalised "#rrggbb"; trimming it would be harmless but a lie.
   if (el.type === "color") return el.value;
+  // The known words: one per line, each trimmed, blank lines out (the content script reads the
+  // setting the same way, so what is stored is what it uses).
+  if (el.type === "textarea") return knownWordsText(el.value);
   return el.value.trim();
+}
+
+function knownWordsText(value) {
+  return String(value || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+// A field the viewer types in: its edit is done at its change event, not at every keystroke.
+function typedField(el) {
+  return el.type === "text" || el.type === "textarea";
 }
 
 // Each range shows its value and paints the travelled part of its own track (the --fill custom
@@ -461,7 +492,10 @@ function flushSave() {
   // feature, on since an earlier save, is not in it.
   const on = wordColoursOn();
   const decks = pending === "deck" || (pending === "feature" && on);
-  for (const key of Object.keys(patch)) inFlight.set(key, patch);
+  for (const key of Object.keys(patch)) {
+    inFlight.set(key, patch);
+    if (typedBaseline.has(key)) typedBaseline.set(key, patch[key]);
+  }
   const saved = browser.runtime.sendMessage({ type: "saveSettings", settings: patch }).catch(() => {});
   saved.then(() => {
     // A later flush may have sent the field again: that one is still waited for.
@@ -487,7 +521,7 @@ function onStorageChanged(changes, area) {
   const landed = new Set(); // the fields another writer changed
   for (const key of FIELDS) {
     const el = document.getElementById(key);
-    if (!el || dirty.has(key) || (el.type === "text" && el === document.activeElement) || !Object.hasOwn(next, key)) continue;
+    if (!el || dirty.has(key) || typing(el, key) || !Object.hasOwn(next, key)) continue;
     const sent = inFlight.get(key);
     if (sent) {
       if (next[key] !== sent[key]) continue;
@@ -498,6 +532,7 @@ function onStorageChanged(changes, area) {
     // select given a value it has no option for shows none: the option first, the value after.
     if (key === "cardStatusDeck") renderDeckOptions(decksListed, decksSeen, next[key]);
     else setField(el, next[key]);
+    if (typedBaseline.has(key)) typedBaseline.set(key, readField(el));
     landed.add(key);
   }
   updateOutputs();
@@ -510,6 +545,12 @@ function onStorageChanged(changes, area) {
   const turnedOn = (key) => landed.has(key) && document.getElementById(key).checked;
   if (landed.has("cardStatusDeck") || turnedOn("cardStatus") || turnedOn("pitchAccent") || (on && landed.has("ankiUrl"))) refreshDecks();
   else if (!on && (landed.has("cardStatus") || landed.has("pitchAccent"))) setHint(document.getElementById("deck-hint"), "", "");
+}
+
+// Whether the viewer is typing in `el`: a text field with the focus whose value is no longer the
+// one last put in or sent (see typedBaseline).
+function typing(el, key) {
+  return typedField(el) && el === document.activeElement && readField(el) !== typedBaseline.get(key);
 }
 
 // The status line answers the popup's first question: can it transcribe right now? The badge word
@@ -768,9 +809,10 @@ async function refreshUpdate(force) {
 }
 
 // The banner, from the background's verdict and this popup's own flow. Nothing is shown without a
-// release to name, after "Not now" for that release, or when the server can update itself at
-// its next start anyway (offline: the launcher runs update.py before every start). While an
-// update is under way the banner stays, its button muted, and goes once the new version answers.
+// release to name or after "Not now" for that release, and nothing about the server when it can
+// update itself at its next start anyway (offline: the launcher runs update.py before every
+// start); an extension behind still gets its line then. While an update is under way the banner
+// stays, its button muted, and goes once the new version answers.
 function renderUpdate() {
   const banner = document.getElementById("update-banner");
   const text = document.getElementById("update-text");
@@ -801,9 +843,24 @@ function renderUpdate() {
       // next start, and nothing here can tell whether it has one.
       message = `Shisu-ko ${latest} is available — the server runs ${server}, which cannot be updated from here; restart it by hand to update (run.cmd / run.sh update it at start)`;
       showLater = true;
+    } else if (decision.extension === "newer" && CHROME_STORE_INSTALL) {
+      // The Chrome Web Store updates this install once it has reviewed the version, which can
+      // come days after the GitHub release. The release page is not offered: an unpacked build
+      // from it would be a second extension beside this one, under its own id, and one without
+      // the Start button, which the launcher's host manifest grants the store's id alone.
+      message = `A newer extension (${latest}) is out; the Chrome Web Store updates this one once it has reviewed that version, which can take days after the GitHub release`;
+      showLater = true;
     } else if (decision.extension === "newer") {
-      message = `A newer extension (${latest}) is on the release page; Firefox installs it from addons.mozilla.org once the listing is live`;
-      showRelease = true;
+      // Firefox needs the signed .xpi, which the release gets once AMO has signed it: minutes
+      // after the tag, later for a version AMO holds back. Until the check sees it, the release
+      // page has nothing to install, so it is not offered. Chrome here is an unpacked build (a
+      // store install took the branch above): its zip is there from the start, and no listing
+      // ever updates it, so none is named.
+      const signed = !ON_FIREFOX || !!(updateInfo.latest && updateInfo.latest.xpi);
+      if (!ON_FIREFOX) message = `A newer extension (${latest}) is on the release page; an unpacked build does not update itself`;
+      else if (signed) message = `A newer extension (${latest}) is on the release page (the addons.mozilla.org listing may get it later)`;
+      else message = `A newer extension (${latest}) is out; its signed .xpi reaches the release page once addons.mozilla.org has signed it`;
+      showRelease = signed;
       showLater = true;
     }
   }
@@ -896,7 +953,9 @@ async function checkForUpdatesFromPopup() {
   renderStatus();
 }
 
-// The release page, for the extension's own package until addons.mozilla.org carries it.
+// The release page: every release's signed .xpi (and the Chrome zip, for an unpacked build; a
+// Chrome Web Store install is never sent here); the addons.mozilla.org listing gets only the
+// releases published there, later.
 function openReleasePage() {
   const latest = updateInfo && updateInfo.latest;
   const url = latest && typeof latest.url === "string" && /^https:\/\//.test(latest.url) ? latest.url : RELEASES_URL;
@@ -939,22 +998,28 @@ async function setupPermissionBanner() {
 
 async function init() {
   setupPermissionBanner();
+  // Chrome allows four suggested shortcuts and the build drops the fifth, Alt+Shift+H, so the
+  // popup does not advertise a key that is not there (chrome://extensions/shortcuts sets one).
+  document.getElementById("statusBadgeKey").classList.toggle("hidden", !ON_FIREFOX);
   const settings = await browser.runtime.sendMessage({ type: "getSettings" });
   // The deck select has no option for the stored deck until Anki lists it, and a select given a
   // value it has no option for shows none; the option comes first, the value after.
   renderDeckOptions([], undefined, settings.cardStatusDeck);
   for (const key of FIELDS) {
     const el = document.getElementById(key);
-    if (el) setField(el, settings[key]);
+    if (!el) continue;
+    setField(el, settings[key]);
+    if (typedField(el)) typedBaseline.set(key, readField(el));
   }
   updateOutputs();
   document.getElementById("reset-style").addEventListener("click", resetStyle);
   for (const key of FIELDS) {
     const el = document.getElementById(key);
     if (!el) continue;
-    // Text fields act once the edit is done (a URL, a model that would start a download); the
-    // font family is the exception, it previews and applies as it is typed, like a slider.
-    const live = el.type !== "text" || key === "subFontFamily";
+    // Text fields act once the edit is done (a URL, a model that would start a download, the
+    // known words, whose every save recolours every tab's lines); the font family is the
+    // exception, it previews and applies as it is typed, like a slider.
+    const live = !typedField(el) || key === "subFontFamily";
     const eventName = live && el.tagName !== "SELECT" ? "input" : "change";
     el.addEventListener(eventName, onChange);
   }

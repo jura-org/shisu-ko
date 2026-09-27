@@ -299,12 +299,14 @@
 /* Word colours. renderText() in content.js wraps a word that has an Anki card in an inline span
    carrying the card's state (data-status) and pitch accent pattern (data-pitch); the rules below
    colour the text by the one and draw an overbar by the other, on the subtitle and in the
-   transcript alike. The span changes nothing else about the text, so Yomitan scans across it. */
+   transcript alike. The span changes nothing else about the text, so Yomitan scans across it.
+   "proper" is no card state: a place name or Latin text the matcher names, in blue. */
 .shisuko-root {
   --shisuko-learned: #7ed957;
   --shisuko-learning: #ffd84d;
   --shisuko-suspended: #ffa432;
   --shisuko-new: #ff5c5c;
+  --shisuko-proper: #4da3ff;
   --shisuko-heiban: #4da3ff;
   --shisuko-atamadaka: #ff5c5c;
   --shisuko-nakadaka: #ffa432;
@@ -331,6 +333,10 @@
 
 .shisuko-root .shisuko-word[data-status="new"] {
   color: var(--shisuko-new);
+}
+
+.shisuko-root .shisuko-word[data-status="proper"] {
+  color: var(--shisuko-proper);
 }
 
 /* The overbar: Migaku's and Yomitan's colours for the four patterns. skip-ink off keeps the bar

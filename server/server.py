@@ -29,7 +29,9 @@ Endpoints
 
 Everything lives under ~/.shisu-ko (override with the SHISUKO_HOME environment variable):
 the Python environment, downloaded models, cached audio and cue files, and config.json with
-the model chosen at setup (server.py --download-model NAME), the default of --model.
+the model chosen at setup (server.py --download-model NAME), the default of --model, and the
+browser whose YouTube cookies every download sends (server.py --save-cookies-from-browser NAME),
+the default of --cookies-from-browser.
 """
 from __future__ import annotations
 
@@ -67,7 +69,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.11.4"
+VERSION = "0.14.6"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (sys.exit; a failed --download-model ends on it too), 3 asks for a plain restart (os._exit: a broken
 # GPU context, no model left) and
@@ -77,7 +79,7 @@ SAMPLE_RATE = 16000
 APP_DIR = Path(os.environ.get("SHISUKO_HOME") or (Path.home() / ".shisu-ko"))
 CACHE_DIR = APP_DIR / "cache"
 MODELS_DIR = APP_DIR / "models"
-CONFIG_PATH = APP_DIR / "config.json"  # {"model": ...}, written by --download-model at setup; read_config()
+CONFIG_PATH = APP_DIR / "config.json"  # {"model": ..., "cookies_from_browser": ...}, written at setup; read_config()
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,20}$")
 # A faster-whisper size or a Hugging Face repo id. WhisperModel() also opens local directories, so
 # anything else (paths, "..") is refused before it can point the server at an arbitrary folder.
@@ -92,7 +94,13 @@ DEFAULT_MODEL = "large-v3"  # --model when neither the flag nor config.json name
 # decoder layers instead of thirty-two and 1.5 GB of weights, so it fits and stays at 7.9x real
 # time with the browser running, for one misheard word in the twenty-two lines of that window.
 MLX_DEFAULT_MODEL = "large-v3-turbo"
-CACHE_FORMAT = 3  # bumped when cue fields change; older caches are ignored and transcribed again
+# The browsers yt-dlp reads cookies from (yt_dlp.cookies.SUPPORTED_BROWSERS), the names
+# --save-cookies-from-browser takes and config.json's "cookies_from_browser" may hold.
+COOKIE_BROWSERS = ("brave", "chrome", "chromium", "edge", "firefox", "opera", "safari", "vivaldi", "whale")
+# The cookies YouTube sets for a signed-in account; any of them in a browser's store means the
+# sign-in that YouTube's "confirm you're not a bot" wall asks for is there to send.
+YOUTUBE_SIGN_IN_COOKIES = frozenset({"LOGIN_INFO", "SAPISID", "__Secure-3PSID"})
+CACHE_FORMAT = 6  # bumped when cue geometry or fields change; older caches are ignored and transcribed again
 SPEECH_SYNC_BACK = 30.0   # seconds of speech intervals sent behind the playhead
 SPEECH_SYNC_AHEAD = 120.0  # ... and ahead of it
 LANGUAGE_MIN_SPEECH = 4.0        # a window with less speech than this gets no language vote:
@@ -214,6 +222,13 @@ def unheard_stretches(covered, speech, cues, min_seconds: float = 1.5, inner_sec
     return [[a, b] for a, b in subtract_intervals(covered, heard)
             if b - a >= (min_seconds if a in edges or b in edges else inner)]
 
+
+# Whisper punctuates spontaneous Japanese only when its context suggests punctuation, and it decodes
+# each window with nothing in front of it, so the cheapest way to ask is a short prompt written the
+# way the subtitles should read. Measured over 15 minutes of one talk video: marks at 88% of the
+# hand-labelled sentence ends against 53% without it, and not one line of the prompt reached the
+# transcript. A language with no entry here gets no prompt; --initial-prompt "" turns it off.
+DEFAULT_PROMPTS = {"ja": "はい、そうですね。今日はよろしくお願いします。それで、どう思いますか？"}
 
 SENTENCE_END = set("。！？!?…")
 CLAUSE_BREAK = set("、,，")
@@ -379,6 +394,146 @@ def repair_lead_words(words, speech) -> list:
     return words
 
 
+# --------------------------------------------------------------------------- sentence ends
+
+# Sentence-final particles and the polite and copula endings. Sorted longest first, so よね is
+# matched before ね, でしょう before でしょ and ました before the weak た below.
+SENTENCE_STRONG = tuple(sorted((
+    "よね", "ね", "よ", "な", "なあ", "わ", "ぞ", "ぜ", "さ", "か", "かな", "っけ",
+    "でしょ", "でしょう", "じゃん", "もん", "です", "ます", "ました", "ません", "でした",
+    "ましょう", "ください", "なさい", "んだ", "のだ", "んです", "だ",
+), key=len, reverse=True))
+# Plain forms. They end a casual sentence, but they also run on into the next clause
+# (食べた + ので), so only a longer pause makes one an end.
+SENTENCE_WEAK = tuple(sorted(("た", "ない", "る", "い"), key=len, reverse=True))
+SENTENCE_QUESTION = frozenset({"か", "かな", "っけ", "でしょ", "でしょう"})
+# A mark is never written over one of these, ...
+SENTENCE_CLOSERS = SENTENCE_END | CLAUSE_BREAK | set("」』）)]】》〉”’\"'")
+CLOSER_CHARS = "".join(sorted(SENTENCE_CLOSERS))   # the same set as a str, for rstrip()
+# ... nor before a word that is one of these, which can only continue the sentence: です in ですか
+# is left alone and the か judged instead. The test is on the whole word, not its first character:
+# はい, やっぱり, もう, ところで and でも all open a sentence and all start with a particle kana.
+# Whisper writes the sentence-initial connective with its own comma (で、 / でも、), and that comma
+# is the evidence that this で opens a sentence rather than closing a phrase.
+SENTENCE_PARTICLES = frozenset((
+    "は", "が", "を", "に", "で", "と", "も", "の", "へ", "や", "か", "ね", "よ", "な",
+    "から", "まで", "より", "とか", "など", "って", "には", "では", "とは", "のは", "のに",
+    "ので", "のか",
+))
+# The か of these is a filler, not a question: the speaker is still choosing the next word
+# (悩んで、なんか || , 行きたい人多そうなんか || さ). Three of the four false marks measured.
+FILLER_KA = ("なんか", "とか", "なんとか", "というか", "っていうか", "なんつーか")
+# こと + か is the nominaliser and a real question (老害教師少なめってことか？), and it ends in とか.
+SHAPE_EXCEPT = ("ことか",)
+# Whole words that end in a shape kana without being sentence-final: 何か is not a question, そんな
+# is not a な, また is not a た. A shape is a suffix test, so without this table 何か行きたい becomes
+# 何か？行きたい.
+SENTENCE_NOT_ENDINGS = (
+    "何か", "誰か", "いつか", "どこか", "確か", "なにか", "だれか", "どっか",
+    "そんな", "こんな", "どんな", "あんな", "また", "まだ", "ただ",
+)
+# A sentence-final particle straight after a clause connective is interjectional - the speaker is
+# holding the floor, not ending the sentence (めっちゃ偏見だけどさ || はいはい). The cost is a real
+# だからね。 now and then; the gain is every けどさ, からさ, してね that used to cut a sentence in two.
+SENTENCE_CONNECTIVES = ("けど", "から", "し", "て", "で", "のに", "ので")
+SENTENCE_INTERJECTIONAL = frozenset({"さ", "ね", "よ", "な"})
+
+
+def longest_silence(start: float, end: float, intervals) -> float:
+    """The longest stretch of [start, end) that a sorted, merged interval list leaves uncovered."""
+    if end <= start:
+        return 0.0
+    longest, cursor = 0.0, start
+    for a, b in intervals:
+        if b <= start:
+            continue
+        if a >= end:
+            break
+        longest = max(longest, min(a, end) - cursor)
+        cursor = max(cursor, min(b, end))
+    return max(longest, end - cursor)
+
+
+def sentence_shape(text: str) -> tuple:
+    """(shape, strong) for the sentence-final expression this text ends in, else (None, False)."""
+    for shape in SENTENCE_STRONG:
+        if text.endswith(shape):
+            return shape, True
+    for shape in SENTENCE_WEAK:
+        if text.endswith(shape):
+            return shape, False
+    return None, False
+
+
+def punctuate_words(words, speech, next_word, limits: CueLimits) -> list:
+    """Write the sentence mark Whisper left out, where a sentence-final shape meets a pause.
+
+    Rewrites the Word objects in place and returns the same list, as repair_lead_words does; every
+    caller hands it a fresh list from absolute_words(), and one that did not would find its words
+    rewritten.
+
+    The cue builder has no sentence signal of its own: every cut in group_words() and every seam in
+    merge_segments() defers to Whisper's punctuation, and Whisper writes it inconsistently. The same
+    audio decoded twice gave そうなんですよねおじいちゃん先生とゲームの話したりするの?, which the
+    builder made one 29-character line of, and そうなんですよね。, which it made three readable ones
+    of. Neither half of the evidence stands alone - a Japanese speaker pauses inside a word, and よね
+    runs on mid-sentence - but a sentence-final expression followed by a pause is the signal Kyoto's
+    spontaneous-Japanese work (Akita et al. 2006) reaches F 0.85 with, and that pair is the rule here.
+
+    `next_word` is the next segment's first Word, or None; inside the list the next word answers for
+    it. It is the whole Word and not just its start because every test below asks what follows as
+    well as when: a segment opening on っと or on a particle continues the one before it, and a mark
+    between them would be as wrong across a segment boundary as inside one. A word with nothing
+    after it gets no mark at all: the pause is the evidence, and without something following there
+    is none to measure.
+
+    The pause is the longer of two measures, because each hides what the other shows. The detector's
+    intervals are read from the word's own start, not its end: Whisper anchors a segment's last word
+    to the end of the audio it decoded, so the silence that follows the utterance usually lies inside
+    that word's span, where the gap to the next word is zero. And the intervals miss a short pause
+    entirely - Silero refuses a silence under 300 ms and pads what it keeps by 200 ms on each side,
+    so the measured 0.34 s after よね at 18:06 sat in the middle of one interval - where Whisper's own
+    word timings still show it, flush as they otherwise are (two gaps over 0.25 s in 50 s of talk).
+    """
+    if not limits.sentence_ends:
+        return words
+    for i, w in enumerate(words):
+        # The next two words, the second only to see a comma Whisper split off as a token of its
+        # own (で then 、). Past the end of the segment the next segment's first word stands in.
+        ahead = words[i + 1:i + 3]
+        if len(ahead) < 2 and next_word is not None:
+            ahead = ahead + [next_word]
+        if not ahead:
+            break
+        nxt, after_next = ahead[0], (ahead[1] if len(ahead) > 1 else None)
+        if not (w.word or "").strip():
+            continue
+        text = word_text(words[:i + 1])
+        if not text or text[-1] in SENTENCE_CLOSERS:
+            continue
+        following = (nxt.word or "").strip()
+        # で、 and でも、 open a sentence; the comma is sometimes its own token, so look past it.
+        opens_clause = (following[-1:] in CLAUSE_BREAK
+                        or (after_next is not None and (after_next.word or "").strip()[:1] in CLAUSE_BREAK))
+        if following[:1] in NO_LINE_START:
+            continue
+        if following.rstrip(CLOSER_CHARS) in SENTENCE_PARTICLES and not opens_clause:
+            continue
+        shape, strong = sentence_shape(text)
+        if shape is None or (text.endswith(SENTENCE_NOT_ENDINGS) and not text.endswith(SHAPE_EXCEPT)):
+            continue
+        if shape == "か" and text.endswith(FILLER_KA) and not text.endswith(SHAPE_EXCEPT):
+            continue
+        if shape in SENTENCE_INTERJECTIONAL and text[:-len(shape)].endswith(SENTENCE_CONNECTIVES):
+            continue
+        gap = nxt.start - w.end
+        pause = max(gap, longest_silence(w.start, nxt.start, speech)) if speech else gap
+        if pause < (limits.sentence_pause if strong else limits.sentence_pause_weak):
+            continue
+        w.word = (w.word or "") + ("？" if shape in SENTENCE_QUESTION else "。")
+    return words
+
+
 # --------------------------------------------------------------------------- hallucination gates
 
 @dataclass
@@ -446,25 +601,42 @@ def absolute_words(seg, offset: float) -> list:
 PUNCTUATION = set("\"'“¿([{-。！？、，,.!?:：;；)]}、…～~ー'\"")
 
 
-def word_anomaly_score(word: Word) -> float:
-    """Port of faster_whisper.transcribe.word_anomaly_score (1.2.1, MIT): long, short or improbable words."""
+def word_anomaly_score(word: Word, short_term: bool = True) -> float:
+    """Port of faster_whisper.transcribe.word_anomaly_score (1.2.1, MIT): long, short or improbable words.
+
+    `short_term` is the (0.133 - duration) * 15 penalty, and it measures the tokenizer rather than
+    the audio in Japanese: Whisper's Japanese words are sub-tokens, usually one kana, so they are
+    under 133 ms by construction and every ordinary segment scores on them. Over the two 15-minute
+    dumps of 5csq1MlSspA the whole first-8-words score reaches the threshold for 37 of 279 segments
+    and 34 of 202 with the term, and for 0 and 2 without it (both of those real speech, both saved
+    by their VAD overlap). The talk path therefore scores without it; see is_segment_anomaly().
+    """
     score = 0.0
     duration = word.end - word.start
     if word.probability < 0.15:
         score += 1.0
-    if duration < 0.133:
+    if short_term and duration < 0.133:
         score += (0.133 - duration) * 15
     if duration > 2.0:
         score += duration - 2.0
     return score
 
 
-def is_segment_anomaly(words) -> bool:
-    """Port of faster_whisper.transcribe.is_segment_anomaly (1.2.1, MIT)."""
+def is_segment_anomaly(words, short_term: bool = True) -> bool:
+    """Port of faster_whisper.transcribe.is_segment_anomaly (1.2.1, MIT).
+
+    The talk path asks with `short_term=False`, so a segment is anomalous only on improbable words
+    and stretched ones. What the term bought was false drops: in 15 minutes of one video the gate
+    deleted 一応、担任の先生とかいるの? … そうなんですよね (a 10 s block, live), a 9.6 s block of 31
+    words and three shorter lines - five drops, five real utterances, no hallucination among them -
+    while nothing at all fires without it. P0.2 of docs/subtitle-quality.md named this risk when the
+    gate went in ("false positives on very fast speech; the overlap gate is the safety"), and the
+    lead-repair measurement records the same gate eating 29 lines in 17 minutes.
+    """
     words = [w for w in words if w.word.strip() and w.word.strip() not in PUNCTUATION][:8]
     if not words:
         return False
-    score = sum(word_anomaly_score(w) for w in words)
+    score = sum(word_anomaly_score(w, short_term) for w in words)
     return score >= 3 or score + 0.01 >= len(words)
 
 
@@ -507,7 +679,7 @@ def hallucination_reason(seg, words, speech):
     mean_prob = sum(w.probability for w in words) / len(words)
     if overlap < VAD_GATE_OVERLAP and not (len(text) >= VAD_GATE_CHARS and mean_prob >= VAD_GATE_PROB):
         return "vad"
-    if overlap < ANOMALY_MAX_OVERLAP and is_segment_anomaly(words):
+    if overlap < ANOMALY_MAX_OVERLAP and is_segment_anomaly(words, short_term=False):
         return "anomaly"
     # seg.compression_ratio is faster-whisper's value for the whole 30 s decode, shared by every
     # segment it produced, so one loop would take its innocent neighbours with it. Use this text.
@@ -534,7 +706,9 @@ def lyrics_reason(seg, words):
     logprob = float(getattr(seg, "avg_logprob", 0.0) or 0.0)
     if no_speech > LYRICS_MAX_NO_SPEECH or logprob < LYRICS_MIN_LOGPROB or mean_prob < LYRICS_MIN_WORD_PROB:
         return "unsure"
-    if is_segment_anomaly(words):
+    # With the short-word term, unlike the talk path above: the lyrics thresholds were all
+    # measured with it, and there is no lyrics measurement for dropping it.
+    if is_segment_anomaly(words, short_term=True):
         return "anomaly"
     if has_repetition(text) or compression_ratio(text) > COMPRESSION_LIMIT:
         return "repetition"
@@ -571,6 +745,10 @@ class CueLimits:
     cross_chars: int = 34        # nor a wider one than this
     reach_chars: int = 8         # a cue this short is worth reaching cross_reach for a partner
     max_lines: int = 2           # the professional ceiling, and what the overlay has room for
+    # Sentence ends (punctuate_words): how long a pause has to be behind a sentence-final shape.
+    sentence_pause: float = 0.30       # behind よね, です, か: the shape carries most of the evidence
+    sentence_pause_weak: float = 0.60  # behind た, ない, る, い, which run on as often as they end
+    sentence_ends: bool = True         # --sentence-ends off
 
 
 def cue_limits(args) -> CueLimits:
@@ -578,6 +756,7 @@ def cue_limits(args) -> CueLimits:
         max_chars=int(getattr(args, "max_cue_chars", 30)),
         max_seconds=float(getattr(args, "max_cue_seconds", 7.0)),
         min_seconds=float(getattr(args, "min_cue_seconds", 0.8)),
+        sentence_ends=getattr(args, "sentence_ends", "auto") != "off",
     )
 
 
@@ -618,6 +797,10 @@ def is_hiragana(ch: str) -> bool:
     return "ぁ" <= ch <= "ゟ"
 
 
+def is_katakana(ch: str) -> bool:
+    return "ァ" <= ch <= "ヺ"
+
+
 def breaks_word(head_text: str, tail_text: str) -> bool:
     """True when a cut between these two texts lands inside a word, on evidence and not on taste.
 
@@ -629,7 +812,8 @@ def breaks_word(head_text: str, tail_text: str) -> bool:
 
     Kept apart from may_break() because only this one may overrule a length budget. Refusing a cut
     the splitter was about to make costs nothing, so may_break() can also say no on taste; a merge
-    that overrules its own limits on taste builds a 41-character line.
+    that overrules its own limits on taste builds a 41-character line. That is why a cut between two
+    kanji or two katakana is only refused by may_split(): it is likely a compound, not proof (今日|学校).
     """
     head, tail = (head_text or "").strip(), (tail_text or "").strip()
     if not head or not tail:
@@ -668,6 +852,20 @@ def may_break(head_text: str, tail_text: str) -> bool:
     return tail[0] not in PARTICLE_START
 
 
+def joins_compound(head_text: str, tail_text: str) -> bool:
+    """True when the cut falls between two kanji or two katakana: likely inside a compound (能|力)."""
+    head, tail = (head_text or "").strip(), (tail_text or "").strip()
+    if not head or not tail:
+        return False
+    return (is_kanji(head[-1]) and is_kanji(tail[0])) or (is_katakana(head[-1]) and is_katakana(tail[0]))
+
+
+def may_split(head_text: str, tail_text: str) -> bool:
+    """may_break() for a cut the length limits force. A pause the detector confirmed is evidence of
+    a boundary even between two kanji (天気 … 電車); a length limit is none, so it avoids compounds."""
+    return may_break(head_text, tail_text) and not joins_compound(head_text, tail_text)
+
+
 def split_at_clause(buf, limits: CueLimits) -> tuple:
     """Back a hard break off to the last clause boundary inside the final 40% of the buffer (P1.2)."""
     total = len(word_text(buf))
@@ -685,12 +883,12 @@ def split_for_break(buf, limits: CueLimits, next_word: str) -> tuple:
     against the word that follows it, so that seam is checked too."""
     head, tail = split_at_clause(buf, limits)
     if tail:
-        if may_break(word_text(head), word_text(tail)):
+        if may_split(word_text(head), word_text(tail)):
             return head, tail
-    elif may_break(word_text(buf), next_word):
+    elif may_split(word_text(buf), next_word):
         return buf, []
     for j in range(len(buf) - 1, 0, -1):
-        if may_break(word_text(buf[:j]), word_text(buf[j:])):
+        if may_split(word_text(buf[:j]), word_text(buf[j:])):
             return buf[:j], buf[j:]
     return buf, []
 
@@ -747,8 +945,34 @@ def group_words(words, speech, limits: CueLimits) -> list:
     return [g for g in groups if word_text(g) and not JUNK_RE.match(word_text(g))]
 
 
+def ends_sentence(text: str) -> bool:
+    """True when this text's last row ends in a sentence mark, and so closes what it says."""
+    row = text.split("\n")[-1].rstrip()
+    return bool(row) and row[-1] in SENTENCE_END
+
+
+def rows_fit(text: str, limits: CueLimits, at_mark: bool = False) -> bool:
+    """Whether a seamed text is a cue a viewer can read. Never a third row, whatever put the seam there.
+
+    The two seams differ on a short row. A seam the gap guessed is our break, so a row under
+    MIN_PIECE_CHARS is a break we chose badly and the join goes flat instead. A seam at the speaker's
+    own mark is theirs: うん。 is a whole turn, not a stub, and it reads as one on a row of its own.
+    """
+    rows = text.split("\n")
+    if len(rows) > limits.max_lines:
+        return False
+    return at_mark or min(len(row) for row in rows) >= MIN_PIECE_CHARS
+
+
 def merge_adjacent(cues, limits: CueLimits, max_gap: float, only_short: bool) -> list:
-    """Fold neighbouring cues together while they stay inside the char and duration limits."""
+    """Fold neighbouring cues together while they stay inside the char and duration limits.
+
+    A sentence mark is a hard row boundary: what the speaker finished and what comes after it never
+    share a row, and when the second row would be too short to read, the merge is refused rather
+    than flattened. Two people on one row (マジで?それいいね。) is worse than a two-character cue of
+    its own, and Yomitan and match.js both cut a sentence at the newline. Pieces without a mark
+    merge flat as they always did: that rule is the anti-flicker one, and it is not about sentences.
+    """
     out: list = []
     for cue in cues:
         if out:
@@ -756,11 +980,14 @@ def merge_adjacent(cues, limits: CueLimits, max_gap: float, only_short: bool) ->
             gap = cue["start"] - prev["end"]
             short = (prev["end"] - prev["start"] < limits.min_seconds
                      or cue["end"] - cue["start"] < limits.min_seconds)
+            seam = "\n" if ends_sentence(prev["text"]) else ""
+            text = prev["text"] + seam + cue["text"]
             if (gap <= max_gap and (short or not only_short)
-                    and len(prev["text"]) + len(cue["text"]) <= limits.max_chars
-                    and cue["end"] - prev["start"] <= limits.max_seconds):
+                    and len(text) - text.count("\n") <= limits.max_chars
+                    and cue["end"] - prev["start"] <= limits.max_seconds
+                    and (seam != "\n" or rows_fit(text, limits, at_mark=True))):
                 prev["end"] = cue["end"]
-                prev["text"] = prev["text"] + cue["text"]
+                prev["text"] = text
                 continue
         out.append(dict(cue))
     return out
@@ -774,7 +1001,7 @@ def seam_for(prev_text: str, gap: float, limits: CueLimits) -> str:
     first half; and match.js's TERMINATORS splits on it, so cutFrom() scores the mined sentence
     exactly instead of falling back to coverage.
     """
-    if prev_text and prev_text[-1] in SENTENCE_END:
+    if ends_sentence(prev_text):
         return "\n"
     return "\n" if gap >= limits.seam_gap else ""
 
@@ -795,17 +1022,30 @@ def merge_segments(cues, limits: CueLimits) -> list:
         if out:
             prev = out[-1]
             gap = cue["start"] - prev["end"]
-            forced = breaks_word(prev["text"].split("\n")[-1], cue["text"].split("\n")[0])
-            short = min(len(prev["text"]), len(cue["text"])) <= limits.reach_chars
+            prev_row = prev["text"].split("\n")[-1]
+            at_mark = ends_sentence(prev_row)
+            # Nothing is split inside a word after a sentence mark: the speaker ended there. Without
+            # this, a next cue opening on ー or a small kana made breaks_word() true and its flat
+            # join put two sentences on one row (そうですね。ーっと言います).
+            forced = not at_mark and breaks_word(prev_row, cue["text"].split("\n")[0])
+            # A finished sentence is not a stub. そうなんですよね。 is eight characters and reads on
+            # its own, so it must not buy the cross_reach budget a half-line is given.
+            finished = at_mark and len(prev_row) >= MIN_PIECE_CHARS
+            short = (len(cue["text"]) <= limits.reach_chars
+                     or (not finished and len(prev["text"]) <= limits.reach_chars))
             seam = "" if forced else seam_for(prev["text"], gap, limits)
             text = prev["text"] + seam + cue["text"]
-            # The line break is the first thing to give up. A row nobody can read, or a third row,
-            # is worse than no break at all, and refusing the merge over one leaves the stub alone
-            # on screen - which is how 言ってた ended up a four-character cue of its own.
-            if seam == "\n":
-                rows = text.split("\n")
-                if len(rows) > limits.max_lines or min(len(x) for x in rows) < MIN_PIECE_CHARS:
-                    text = prev["text"] + cue["text"]
+            if seam == "\n" and not rows_fit(text, limits, at_mark):
+                # A seam the speaker's own mark put there is not negotiable: flattening it would
+                # put two sentences, often two people, on one row. Refuse the merge instead - only
+                # a third row can fail the check at a mark, and a third row has nowhere to go.
+                if at_mark:
+                    out.append(dict(cue))
+                    continue
+                # Elsewhere the line break is the first thing to give up. A row nobody can read, or
+                # a third row, is worse than no break at all, and refusing the merge over one leaves
+                # the stub alone on screen - which is how 言ってた ended up a four-character cue.
+                text = prev["text"] + cue["text"]
             lines = text.split("\n")
             fits = (len(text) - text.count("\n") <= limits.max_chars
                     and len(lines) <= limits.max_lines
@@ -853,9 +1093,33 @@ def normalise_gaps(cues, limits: CueLimits) -> list:
     return cues
 
 
+def carry_trailing_mark(words, kept) -> list:
+    """Move a sentence mark off the words the trim dropped onto the one that now ends the cue.
+
+    The word punctuate_words() marks is a segment's last, and that is the word Whisper stretches
+    over the silence after the utterance - so its midpoint often lies outside speech and trim_words()
+    drops it. The timings have to go, which is what P1.1 exists for; the mark does not, since it
+    belongs to the sentence and not to that word. Trimming is left judging midpoints rather than
+    keeping the word by its start: the P1.1 measurements are about cue in and out times, and a
+    stretched last word kept for its mark would push every cue out by seconds.
+    """
+    if not kept or len(kept) == len(words):
+        return kept
+    end = next(i for i, w in enumerate(words) if w is kept[-1])
+    mark = ""
+    for w in words[end + 1:]:
+        text = (w.word or "").rstrip()
+        if text and text[-1] in SENTENCE_END:
+            mark = text[-1]
+    last = (kept[-1].word or "").rstrip()
+    if mark and not (last and last[-1] in SENTENCE_END):
+        kept[-1].word = (kept[-1].word or "") + mark
+    return kept
+
+
 def build_cues(words, speech, limits: CueLimits) -> list:
     """One Whisper segment's words -> display-ready cues [{start, end, text}] (P1 rules 1-7)."""
-    words = trim_words(words, speech, limits.trim_slack)
+    words = carry_trailing_mark(words, trim_words(words, speech, limits.trim_slack))
     cues = []
     for group in group_words(words, speech, limits):
         start = group[0].start
@@ -940,31 +1204,53 @@ def lyrics_spans(segs, offset: float, limits: Optional[CueLimits] = None) -> lis
     return merge_intervals(spans)
 
 
+def gate_segment(seg, offset: float, speech, lyrics: bool = False) -> tuple:
+    """(the segment's words on the video's clock, the gate that rejects it or None).
+
+    The one place a segment is judged, for build_window_cues() and for the prompt-skip check.
+    """
+    # Before the gates, not after: an unrepaired first word makes the segment's span cover a
+    # silence it never contained, and the VAD gate then deletes real speech (20 utterances in
+    # 17 minutes of the sample, キズナアイでーす and はじめまして! among them) while the anomaly
+    # gate scores its six-second "word" straight past the threshold.
+    words = repair_lead_words(absolute_words(seg, offset), speech)
+    reason = lyrics_reason(seg, words) if lyrics else hallucination_reason(seg, words, speech)
+    return words, reason
+
+
 def build_window_cues(segs, offset: float, speech, limits: CueLimits, seg_id: int, drops=None,
                       window_end: Optional[float] = None, lyrics: bool = False) -> tuple:
     """Gate hallucinated segments, build their cues and stamp each with its segment id.
 
     `seg` ties every cue back to the Whisper segment it came from, which is a run of speech and
     not a sentence: mining reads the cue alone (see sentenceForCue in content.js). Kept for the
-    cache tools, which measure a change per segment. Returns (cues, next segment id). A lyrics
+    cache tools, which measure a change per segment. Every kept segment is punctuated before any
+    cues are built (punctuate_words), since the pause behind its last word is the gap to the next
+    segment's first. Returns (cues, next segment id). A lyrics
     window was transcribed without the detector: its segments go through lyrics_reason instead,
     and `speech` is what lyrics_spans() made of them (their word runs, padded like the detector's
     intervals and starting past a stranded head, so that the lead repair below slides it onto its
     line as it does on the talk path).
     """
     out: list = []
+    kept: list = []
     for seg in segs:
-        # Before the gates, not after: an unrepaired first word makes the segment's span cover a
-        # silence it never contained, and the VAD gate then deletes real speech (20 utterances in
-        # 17 minutes of the sample, キズナアイでーす and はじめまして! among them) while the anomaly
-        # gate scores its six-second "word" straight past the threshold.
-        words = repair_lead_words(absolute_words(seg, offset), speech)
-        reason = lyrics_reason(seg, words) if lyrics else hallucination_reason(seg, words, speech)
+        words, reason = gate_segment(seg, offset, speech, lyrics)
         if reason:
             if drops is not None:
                 drops[reason] = drops.get(reason, 0) + 1
                 drops.setdefault("_text", []).append((reason, (getattr(seg, "text", "") or "").strip()))
             continue
+        kept.append((seg, words))
+    # The pause behind a segment's last word, and what follows it, are in the next kept segment, so
+    # every segment is repaired before any is punctuated. Not on a lyrics window: its speech is the
+    # padded word runs lyrics_spans() made, so every breath inside a sung line reads as a pause, and
+    # the thresholds here were measured on talk.
+    for i, (_, words) in enumerate(kept):
+        following = kept[i + 1][1] if i + 1 < len(kept) else []
+        if not lyrics:
+            punctuate_words(words, speech, following[0] if following else None, limits)
+    for seg, words in kept:
         cues = build_cues(words, speech, limits)
         if not cues:
             if drops is not None:
@@ -987,6 +1273,102 @@ def build_window_cues(segs, offset: float, speech, limits: CueLimits, seg_id: in
         cue["start"] = round(cue["start"], 2)
         cue["end"] = round(max(cue["end"], cue["start"] + 0.05), 2)
     return normalise_gaps(out, limits), seg_id
+
+
+# The prompt sometimes makes Whisper open a window with a timestamp seconds past its first speech,
+# and whatever it jumped is never decoded: 6 to 23 s lost about once per 12 minutes of speech. An
+# unprompted decode of the same audio starts on time, so a skip is filled from one.
+PROMPT_SKIP_MIN_S = 3.0      # seconds of detected speech no kept segment reaches before a retry
+PROMPT_SKIP_SLACK = 0.5      # how near a kept segment must come to count as having heard a stretch
+PROMPT_SPLICE_OVERLAP = 0.2  # an unprompted segment overlapping a kept one by more is a duplicate
+
+
+def stretched_over_speech(words, speech, min_s: float = PROMPT_SKIP_MIN_S) -> bool:
+    """True when one word spans `min_s` seconds of detected speech: no word is that long, so the
+    decoder jumped. A skip can hide inside a segment the gates keep, and this is how it shows:
+    a prompted first window decoded as one line, 言い返す!, whose 返 runs over
+    thirteen seconds of speech it never decoded. A last word stretched over the silence after an
+    utterance, which Whisper writes often, spans no speech and is not this."""
+    return any(speech_seconds(speech, w.start, w.end) >= min_s for w in words)
+
+
+def kept_spans(segs, offset: float, speech) -> list:
+    """[start, end] on the video's clock of every talk segment that hears what it spans: the gates
+    keep it, as build_window_cues() judges, and no word of it is stretched over speech."""
+    spans = []
+    for seg in segs:
+        words, reason = gate_segment(seg, offset, speech)
+        if reason is None and not stretched_over_speech(words, speech):
+            spans.append([words[0].start, words[-1].end])
+    return spans
+
+
+def skipped_speech(kept, speech, min_s: float = PROMPT_SKIP_MIN_S, slack: float = PROMPT_SKIP_SLACK) -> list:
+    """[[start, end, seconds], ...]: the stretches of `speech` no span of `kept` comes within `slack` of.
+
+    Consecutive unreached pieces with no kept span between them are one stretch, since a skip runs
+    across the pauses of what it skipped; a stretch holding under `min_s` seconds of speech is
+    left alone (a breath, a laugh, a line the gates rightly dropped).
+    """
+    reach = merge_intervals([[a - slack, b + slack] for a, b in kept])
+    groups: list = []
+    for a, b in subtract_intervals(speech, reach):
+        if groups and not any(x < a and y > groups[-1][1] for x, y in reach):
+            groups[-1][1] = b
+            groups[-1][2] += b - a
+        else:
+            groups.append([a, b, b - a])
+    return [g for g in groups if g[2] >= min_s]
+
+
+def splice_segments(segs, retry, offset: float, speech, stretches,
+                    max_overlap: float = PROMPT_SPLICE_OVERLAP) -> tuple:
+    """(`segs` with the segments of `retry` that fill a skipped stretch, in time order; how many were added).
+
+    A segment of the unprompted decode is taken when the gates keep it, no word of it is stretched
+    over speech, its midpoint lies inside one of `stretches` and it overlaps no kept segment of
+    `segs` (kept_spans()) by more than `max_overlap`. A segment of `segs` stretched over speech
+    that an added one overlaps goes: it would put its one-character cue across the real lines.
+    """
+    kept = kept_spans(segs, offset, speech)
+    added = []
+    for seg in retry:
+        words, reason = gate_segment(seg, offset, speech)
+        if reason is not None or stretched_over_speech(words, speech):
+            continue
+        a, b = words[0].start, words[-1].end
+        mid = (a + b) / 2
+        if not any(x <= mid <= y for x, y, _ in stretches):
+            continue
+        if any(min(b, y) - max(a, x) > max_overlap for x, y in kept):
+            continue
+        added.append(seg)
+    if not added:
+        return list(segs), 0
+    filled = [[offset + float(seg.start), offset + float(seg.end)] for seg in added]
+    broken = [seg for seg in segs
+              if stretched_over_speech(gate_segment(seg, offset, speech)[0], speech)
+              and any(min(b, offset + float(seg.end)) > max(a, offset + float(seg.start)) for a, b in filled)]
+    kept_segs = [seg for seg in segs if not any(seg is x for x in broken)]
+    return sorted(kept_segs + added, key=lambda seg: float(seg.start)), len(added)
+
+
+def retry_prompt_skips(model, audio, options: dict, segs, offset: float, speech) -> tuple:
+    """(segments, seconds skipped, segments added) of a talk window decoded with `options`.
+
+    When the prompted decode left PROMPT_SKIP_MIN_S or more of detected speech unreached, the
+    window is decoded once more without the prompt, everything else the same, and the segments
+    that fill the skip are spliced in. Seconds skipped is 0.0 when no retry ran. Transcriber.process()
+    and dump_words.py both call this, so the A/B rig decodes what the server does.
+    """
+    if not options.get("initial_prompt"):
+        return list(segs), 0.0, 0
+    stretches = skipped_speech(kept_spans(segs, offset, speech), speech)
+    if not stretches:
+        return list(segs), 0.0, 0
+    retry, _info = model.transcribe(audio, **dict(options, initial_prompt=None))
+    spliced, added = splice_segments(segs, list(retry), offset, speech, stretches)
+    return spliced, sum(g[2] for g in stretches), added
 
 
 # --------------------------------------------------------------------------- sessions
@@ -1211,28 +1593,76 @@ def plan_window(s: Session, args) -> Optional[tuple]:
 # --------------------------------------------------------------------------- audio fetching
 
 class YtdlpLogger:
+    def __init__(self):
+        self.warned = set()
+
     def debug(self, msg):
         log.debug("yt-dlp: %s", msg)
 
     def info(self, msg):
         log.debug("yt-dlp: %s", msg)
 
-    def warning(self, msg):
+    def warning(self, msg, only_once=False):
+        # yt-dlp's cookie readers (youtube_cookies()) call this directly, with only_once for what
+        # would repeat for every cookie they cannot decrypt; a download wraps it and passes msg alone.
+        if only_once:
+            if msg in self.warned:
+                return
+            self.warned.add(msg)
         log.warning("yt-dlp: %s", msg)
 
     def error(self, msg):
         log.error("yt-dlp: %s", msg)
 
 
-def friendly_error(exc: Exception) -> str:
+COOKIES_FILE_NOTE = "the cookies file (--cookies)"
+# The Docker image never takes a browser from config.json (resolve_default_cookies()): an exported file is its way.
+DOCKER_COOKIES_FILE = "--cookies /data/cookies.txt"
+
+
+def save_cookies_command(prefix=None, windows=None) -> str:
+    """The command that makes Firefox's YouTube cookies the default of every start on this install.
+
+    run.cmd / run.sh start setup's venv, which a Nix install has not (run.sh refuses there): its
+    Python is the Nix store's (sys.prefix; a venv's is the venv's own folder, wherever its Python
+    came from), and `nix run . --` hands the option to server.py. Each text names only its own
+    install's command, which also keeps the viewer's line within the overlay's 160 characters.
+    """
+    prefix = sys.prefix if prefix is None else prefix
+    windows = os.name == "nt" if windows is None else windows
+    if prefix.startswith("/nix/store/"):
+        launcher = "nix run . --"
+    else:
+        launcher = "run.cmd" if windows else "run.sh"
+    return f"{launcher} --save-cookies-from-browser firefox"
+
+
+def friendly_error(exc: Exception, cookies: str = "") -> str:
+    """One line for the viewer, at most 160 characters (the overlay's STATUS_ERROR_MAX_CHARS cuts the
+    rest). `cookies` names what the download sent (cookies_note()), "" for none: a sign-in wall then
+    asks for cookies the way this install takes them (save_cookies_command(), or Docker's file), and
+    for a signed-in browser (or a fresh cookies file) once they are sent."""
     msg = str(exc) or exc.__class__.__name__
     low = msg.lower()
     if "sign in to confirm" in low or "not a bot" in low:
-        return "YouTube asks for a sign-in. Restart the server with --cookies-from-browser firefox (or --cookies /data/cookies.txt in Docker)"
+        if cookies == COOKIES_FILE_NOTE:
+            # Signing in anywhere leaves an exported file as it was; every download reads it anew.
+            return (f"YouTube asks for a sign-in although the server sends {cookies}: export a fresh one "
+                    "while signed in to YouTube, then play the video again")
+        if cookies:
+            return f"YouTube asks for a sign-in although the server sends {cookies}: sign in to YouTube there, then play the video again"
+        if in_container():
+            return ("YouTube asks for a sign-in. Export a cookies.txt from a browser signed in to YouTube into the data folder "
+                    f"and add {DOCKER_COOKIES_FILE}")
+        return f"YouTube asks for a sign-in. Run {save_cookies_command()} once and start the server again"
     if "private video" in low:
         return "This video is private"
     if "members-only" in low or "join this channel" in low:
-        return "Members-only video. Restart the server with --cookies-from-browser firefox"
+        if cookies:
+            return f"Members-only video, and the account behind {cookies} is not a member"
+        if in_container():
+            return f"Members-only video. Export a cookies.txt from a member's browser into the data folder and add {DOCKER_COOKIES_FILE}"
+        return f"Members-only video. Run {save_cookies_command()} once with a member signed in there and start the server again"
     if "javascript runtime" in low:
         return "yt-dlp needs Node.js or Deno installed to download from YouTube"
     if "video unavailable" in low:
@@ -1332,6 +1762,14 @@ class Fetcher:
     def __init__(self, args):
         self.args = args
 
+    def cookies_note(self) -> str:
+        """What a download sends YouTube for a sign-in, in words for friendly_error(); "" for nothing."""
+        if self.args.cookies_from_browser:
+            return f"{self.args.cookies_from_browser}'s YouTube cookies"
+        if self.args.cookies:
+            return COOKIES_FILE_NOTE
+        return ""
+
     def js_runtimes(self) -> dict:
         spec = (self.args.js_runtime or "auto").strip()
         if spec and spec != "auto":
@@ -1424,7 +1862,7 @@ class Fetcher:
             log.error("[%s] fetching audio failed: %s", s.video_id, exc)
             with s.lock:
                 s.status = "error"
-                s.error = friendly_error(exc)
+                s.error = friendly_error(exc, self.cookies_note())
                 s.error_at = time.time()
                 s.preview = None  # a preview from a partial download must not outlive the failure
         finally:
@@ -2125,12 +2563,18 @@ class Transcriber(threading.Thread):
             hallucination_silence_threshold=2.0,
         )
         if lyrics:
-            options["vad_filter"] = False
+            # No prompt on this path. The lyrics gates were measured on unprompted decodes, and the
+            # blocklist holds no sentence of the prompt, so a noisy window the language head lets
+            # through could echo the prompt itself into the cache with nothing to catch it.
+            options.update(vad_filter=False, initial_prompt=None)
         else:
             options.update(vad_filter=True, vad_parameters=vad_parameters())
         try:
             segments, _info = self.app.model.transcribe(audio, **options)
             segs = list(segments)
+            skipped, spliced = 0.0, 0
+            if not lyrics:
+                segs, skipped, spliced = retry_prompt_skips(self.app.model, audio, options, segs, start, speech)
         except Exception as exc:  # noqa: BLE001
             log.error("[%s] transcription of %s-%s failed: %s", s.video_id, fmt_time(start), fmt_time(end), exc)
             if "cuda" in str(exc).lower() or "cudnn" in str(exc).lower() or "cublas" in str(exc).lower():
@@ -2186,11 +2630,13 @@ class Transcriber(threading.Thread):
         elapsed = time.time() - t0
         gated = ", ".join(f"{k}:{v}" for k, v in sorted(drops.items()) if not k.startswith("_"))
         log.info(
-            "[%s] %s-%s: %d cues in %.1fs (%.0fx realtime)%s%s%s",
+            "[%s] %s-%s: %d cues in %.1fs (%.0fx realtime)%s%s%s%s",
             s.video_id, fmt_time(start), fmt_time(new_end), added, elapsed,
             (new_end - start) / max(elapsed, 1e-3), " [lyrics]" if lyrics else "",
             f" [dropped {gated}]" if gated else "",
             f" [{sum(b - a for a, b in unsung):.0f} s heard nothing in, planned again]" if unsung else "",
+            f" [{skipped:.0f} s skipped with the prompt, {spliced} segments from a decode without it]"
+            if skipped else "",
         )
         self.app.save_cache(s)
 
@@ -2603,22 +3049,20 @@ class App:
             heard = watch.get("heard")
             s.heard = heard if isinstance(heard, str) and heard else None
             s.language_paused = bool(watch.get("paused"))
-        # A cache made without the lyrics rule (a 0.11.2 server, which wrote format 3 without the
-        # key, or --lyrics off; an older format never gets here, the check above drops it whole)
-        # marked a sung stretch covered without a word in it: Silero heard nothing there, so
-        # nothing reached the decoder. Offer those stretches to the planner again, cues and the
-        # rest kept, so a music video watched before the rule is not blank for ever: one at either
-        # end of a covered range from 1.5 s (an intro, an outro, the whole of a Short), one between
-        # two lines from LYRICS_MIN_STRETCH_S, as process() plans them for a fresh window, since
-        # every pause of a talk is a hole of a second or two and a window per pause would fetch,
-        # walk and rewrite the record dozens of times over; wants_lyrics() judges each window anew
-        # (a silent one costs a Silero pass), and the record is written with the key by the first
-        # window walked.
-        if data.get("lyrics") != "auto" and getattr(self.args, "lyrics", "auto") == "auto":
+        # A record written with --lyrics off marked a sung stretch covered with nothing in it:
+        # Silero heard nothing there, so nothing reached the decoder. Under --lyrics auto those
+        # stretches go back to the planner, cues and the rest kept, so a video watched with the
+        # switch off is not blank for ever once it is taken off: one at either end of a covered
+        # range from 1.5 s (an intro, an outro, the whole of a Short), one between two lines from
+        # LYRICS_MIN_STRETCH_S, as process() plans them for a fresh window, since every pause of a
+        # talk is a hole of a second or two and a window per pause would fetch, walk and rewrite
+        # the record dozens of times over; wants_lyrics() judges each window anew (a silent one
+        # costs a Silero pass), and the first window walked rewrites the record under the rule.
+        if data.get("lyrics") == "off" and getattr(self.args, "lyrics", "auto") == "auto":
             unheard = unheard_stretches(s.covered, s.speech, s.cues, inner_seconds=LYRICS_MIN_STRETCH_S)
             if unheard:
                 s.covered = subtract_intervals(s.covered, unheard)
-                log.info("[%s] %.0f s were covered before the lyrics rule with nothing heard; transcribing them again",
+                log.info("[%s] %.0f s were covered with --lyrics off and nothing heard; transcribing them again",
                          s.video_id, sum(b - a for a, b in unheard))
         if s.fully_covered():
             s.status = "ready"  # nothing left to transcribe, no need to fetch the audio again
@@ -3548,6 +3992,178 @@ def resolve_default_model(args):
     return args
 
 
+def configured_cookies_browser():
+    """The browser chosen for YouTube's sign-in (config.json's "cookies_from_browser"), or None.
+
+    Only a name from COOKIE_BROWSERS counts: anything else is ignored with a warning, since yt-dlp
+    would fail every download on it.
+    """
+    chosen = read_config().get("cookies_from_browser")
+    if chosen is None or chosen == "":
+        return None
+    if isinstance(chosen, str) and chosen.strip().lower() in COOKIE_BROWSERS:
+        return chosen.strip().lower()
+    log.warning("Ignoring cookies_from_browser %r in %s: not one of %s", chosen, CONFIG_PATH, ", ".join(COOKIE_BROWSERS))
+    return None
+
+
+def in_container(environ=os.environ) -> bool:
+    """True inside Shisu-ko's Docker image (SHISUKO_CONTAINER, set by the Dockerfile).
+
+    Not any container: /.dockerenv and /run/.containerenv are in toolbox and distrobox too, which
+    share the home folder and its Firefox profile, so a setup run there reads and saves a browser
+    that its starts must then send.
+    """
+    return bool(environ.get("SHISUKO_CONTAINER"))
+
+
+def resolve_default_cookies(args, environ=os.environ):
+    """Fill in --cookies-from-browser from config.json when neither it nor --cookies was given.
+
+    YouTube answers some addresses with "Sign in to confirm you're not a bot" until a download
+    carries a signed-in browser's cookies, and the popup's Start button starts run.cmd / run.sh
+    without options, so the browser chosen at setup (or with --save-cookies-from-browser) is the
+    default of every start. "none" turns it off for one start. The Docker image never takes it
+    from the config: it shares the data folder with the native setup (DATA_DIR in .env) but has no
+    browser profile to read, and would fail every download.
+    """
+    flag = (args.cookies_from_browser or "").strip()
+    if flag.lower() == "none":
+        args.cookies_from_browser = ""
+    elif flag:
+        args.cookies_from_browser = flag
+    elif not args.cookies and not in_container(environ):
+        args.cookies_from_browser = configured_cookies_browser() or ""
+    return args
+
+
+def youtube_cookies(browser: str) -> tuple[int, bool]:
+    """How many youtube.com cookies `browser` holds, and whether a sign-in is among them.
+
+    Reads the browser's cookie store the way a download does (yt-dlp), counts names and never
+    looks at a value; raises when the store cannot be read.
+    """
+    from yt_dlp.cookies import extract_cookies_from_browser
+
+    jar = extract_cookies_from_browser(browser, logger=YtdlpLogger())
+    names = set()
+    for cookie in jar:
+        domain = (cookie.domain or "").lstrip(".").lower()
+        if domain == "youtube.com" or domain.endswith(".youtube.com"):
+            names.add(cookie.name)
+    return len(names), bool(names & YOUTUBE_SIGN_IN_COOKIES)
+
+
+def write_cookies_config(name) -> bool:
+    """write_config() of "cookies_from_browser" for run_save_cookies(); False, with the reason
+    printed, when config.json cannot be written.
+
+    An error must not end main() on its own: exit code 1 makes run.cmd / run.sh run the command
+    again every 5 seconds, reading the browser's store each time.
+    """
+    try:
+        write_config({"cookies_from_browser": name})
+    except OSError as exc:
+        print(f"Could not write {CONFIG_PATH} ({exc}); it stays as it was.")
+        return False
+    return True
+
+
+def run_save_cookies(name: str) -> int:
+    """--save-cookies-from-browser NAME: make NAME's YouTube cookies the default of every start.
+
+    NAME's store is read first (youtube_cookies()): a browser whose cookies cannot be read, or that
+    holds no youtube.com cookie at all (never on YouTube, or a store it keeps from other programs,
+    as Chrome and Edge do on Windows), is refused and nothing is written. "none" forgets the
+    choice. Returns main()'s exit code, 0 or 2 (the code run.cmd / run.sh end on).
+    """
+    name = (name or "").strip().lower()
+    if name == "none":
+        if not write_cookies_config(None):
+            return 2
+        print("The server no longer sends a browser's YouTube cookies (applies from its next start).")
+        return 0
+    if name not in COOKIE_BROWSERS:
+        print(f"'{name}' is not a browser yt-dlp reads cookies from: use one of {', '.join(COOKIE_BROWSERS)}, or none")
+        return 2
+    try:
+        count, signed_in = youtube_cookies(name)
+    except ImportError as exc:
+        print(f"yt-dlp is missing ({exc}); run setup first. Nothing was saved.")
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        reason = " ".join(str(exc).split())[:200] or exc.__class__.__name__
+        print(f"Could not read {name}'s cookies ({reason}). Nothing was saved.")
+        return 2
+    if not count:
+        print(f"{name} holds no YouTube cookies (YouTube never opened there, or {name} keeps its cookies "
+              "from other programs, as Chrome and Edge do on Windows). Nothing was saved.")
+        return 2
+    if not write_cookies_config(name):
+        return 2
+    if signed_in:
+        print(f"From its next start the server sends {name}'s YouTube cookies (signed in) with every download.")
+    else:
+        print(f"From its next start the server sends {name}'s YouTube cookies with every download. "
+              f"{name} is not signed in to YouTube, though: sign in there for YouTube's sign-in wall.")
+    return 0
+
+
+def firefox_profile_found() -> bool:
+    """Whether yt-dlp would find a Firefox cookie store here; True when that cannot be told.
+
+    Asks yt-dlp's own search (its private helpers, the folders it really reads, snap and flatpak
+    included), so setup offers Firefox exactly where a download could use it; a yt-dlp without
+    them only costs a question that --save-cookies-from-browser then answers.
+    """
+    try:
+        from yt_dlp import cookies
+
+        return any(True for _ in cookies._firefox_cookie_dbs(cookies._firefox_browser_dirs()))
+    except Exception:  # noqa: BLE001
+        return True
+
+
+SETUP_COOKIES_TRIES = 3  # answers to setup's question before it counts as none
+
+
+def run_setup_cookies(ask=input) -> int:
+    """--setup-cookies, what setup runs: offer Firefox's YouTube sign-in for every download.
+
+    Asked only where Firefox keeps a profile (Chrome and Edge lock their cookies away on Windows).
+    Y saves Firefox (run_save_cookies(), which reads the store first), N forgets an earlier
+    Firefox choice (another browser, saved with --save-cookies-from-browser, stays), and no answer
+    at all (stdin closed, or SETUP_COOKIES_TRIES answers that are neither: an unattended setup)
+    leaves config.json as it is. Always 0: setup goes on to the model download whatever happens here.
+    """
+    if not firefox_profile_found():
+        print("Firefox was not found. If YouTube asks for a sign-in later, run.cmd / run.sh "
+              "--save-cookies-from-browser <browser> lets the server use one.")
+        return 0
+    print("YouTube sometimes refuses downloads (\"Sign in to confirm you're not a bot\") until they carry")
+    print("a signed-in browser's cookies. Should the server send Firefox's YouTube cookies with every")
+    print("download? (run.cmd / run.sh --save-cookies-from-browser none undoes it)")
+    # Never asked forever: a stdin that never closes and never says Y or N (an endless pipe into
+    # setup.cmd; setup.sh gives a piped stdin's question an EOF itself) counts as no answer.
+    for _ in range(SETUP_COOKIES_TRIES):
+        try:
+            answer = ask("Type Y or N: ").strip().lower()
+        except EOFError:
+            print()
+            return 0
+        if answer in ("y", "yes"):
+            run_save_cookies("firefox")
+            return 0
+        if answer in ("n", "no"):
+            # The question named Firefox: a no is no answer about any other browser.
+            if configured_cookies_browser() == "firefox":
+                run_save_cookies("none")
+            return 0
+    print("No Y or N: config.json stays as it is (run.cmd / run.sh --save-cookies-from-browser firefox saves it later).")
+    return 0
+
+
+
 def run_check(device: str = "auto") -> None:
     print(f"Python {sys.version.split()[0]} at {sys.executable}")
     print(f"Data directory: {APP_DIR}")
@@ -3592,6 +4208,14 @@ def run_check(device: str = "auto") -> None:
     print("Downloaded models: " + (", ".join(models) if models else "none yet (setup or the first start downloads one)"))
     chosen = configured_model()
     print(f"Default model: {chosen or default_model_for(device)} " + ("(chosen at setup)" if chosen else "(built-in default)"))
+    browser = configured_cookies_browser()
+    if browser:
+        print(f"YouTube sign-in: {browser}'s cookies go with every download (chosen at setup)"
+              + ("; not inside this container" if in_container() else ""))
+    elif in_container():
+        print(f"YouTube sign-in: none (if YouTube asks for one: a cookies.txt in the data folder and {DOCKER_COOKIES_FILE})")
+    else:
+        print(f"YouTube sign-in: none (if YouTube asks for one: {save_cookies_command()})")
     # The native-messaging host behind the popup's "Start server" button lives next to this file;
     # loaded by path so a missing or broken native_host.py only costs this one line.
     try:
@@ -3622,8 +4246,14 @@ def parse_args(argv=None):
                         "but the audio is not silent, sung lyrics or speech over music, is transcribed without the "
                         "detector when Whisper hears the target language in it, under stricter gates; off: such "
                         "windows go through the detector as before, blank when it heard nothing")
-    p.add_argument("--initial-prompt", default="", help="optional text prompt given to Whisper for every window")
-    p.add_argument("--window", type=float, default=40.0, help="seconds of audio transcribed per step (shorter reacts faster to seeking, longer is slightly more efficient)")
+    p.add_argument("--sentence-ends", default="auto", choices=["auto", "off"],
+                   help="auto: write a sentence mark where Whisper left one out, when a word ending in a "
+                        "sentence-final expression (よね, です, か, a plain form) is followed by a pause; "
+                        "off: cut and merge lines on Whisper's own punctuation alone")
+    p.add_argument("--initial-prompt", default=None,
+                   help="text prompt given to Whisper for every window (default: a short punctuated sentence "
+                        "in --language, see DEFAULT_PROMPTS; pass an empty string for none)")
+    p.add_argument("--window", type=float, default=30.0, help="seconds of audio transcribed per step (shorter reacts faster to seeking; 30 is faster-whisper's own chunk, and the initial prompt reaches only the first chunk of a window)")
     p.add_argument("--first-window", type=float, default=20.0, help="shorter first step after a seek so subtitles appear quickly")
     p.add_argument("--lookahead", type=float, default=900.0, help="stop transcribing this many seconds ahead of the playhead (0 = whole video)")
     p.add_argument("--max-cue-chars", type=int, default=30, help="26 is the Netflix Japanese limit (13 x 2 lines); 30 keeps more mined sentences whole")
@@ -3633,7 +4263,13 @@ def parse_args(argv=None):
     p.add_argument("--retry-after", type=float, default=30.0, help="seconds before a failed audio fetch is retried automatically, and the least time between two attempts to load a model that failed to download or load")
     p.add_argument("--client-timeout", type=float, default=30.0, help="stop transcribing ahead for a video whose tab has not synced for this many seconds (0 = never stop)")
     p.add_argument("--cpu-threads", type=int, default=0)
-    p.add_argument("--cookies-from-browser", default="", help="e.g. firefox, for age-restricted or members-only videos")
+    p.add_argument("--cookies-from-browser", default="",
+                   help="e.g. firefox: send that browser's YouTube cookies with every download, for YouTube's sign-in wall, "
+                        "age-restricted or members-only videos (default: the browser chosen at setup, config.json; none for no browser)")
+    p.add_argument("--save-cookies-from-browser", metavar="NAME",
+                   help="make NAME (firefox, chrome, ...) the browser whose YouTube cookies every later start sends, the popup's "
+                        "Start button included, after checking that its cookies can be read; none forgets it")
+    p.add_argument("--setup-cookies", action="store_true", help="ask whether to send Firefox's YouTube cookies; used by setup")
     p.add_argument("--cookies", default="", help="path to a Netscape-format cookies.txt for yt-dlp (use this inside Docker, e.g. /data/cookies.txt)")
     p.add_argument("--js-runtime", default="auto", help="JS runtime for yt-dlp: auto, node, deno, bun, or name:path")
     p.add_argument("--allow-remote-ejs", action="store_true", help="let yt-dlp fetch updated challenge-solver scripts from GitHub")
@@ -3643,7 +4279,10 @@ def parse_args(argv=None):
                    help="print this machine's built-in default model and exit, ignoring config.json; setup asks this rather than keeping a copy of the rule")
     p.add_argument("--download-model", metavar="NAME", help="download NAME now, showing progress, and make it the default model for later starts; used by setup")
     p.add_argument("--no-update", action="store_true", help="start without looking for a newer version first (run.cmd / run.sh skip server/update.py) and refuse the popup's Update button (POST /update answers 409), since the launcher would restart the server without updating")
-    return resolve_default_model(p.parse_args(argv))
+    args = p.parse_args(argv)
+    if args.initial_prompt is None:
+        args.initial_prompt = DEFAULT_PROMPTS.get(args.language, "")
+    return resolve_default_cookies(resolve_default_model(args))
 
 
 def main() -> None:
@@ -3673,6 +4312,12 @@ def main() -> None:
         return
     if getattr(args, "download_model", None) is not None:
         sys.exit(run_download_model(args.download_model, args.device))
+    if getattr(args, "save_cookies_from_browser", None) is not None:
+        sys.exit(run_save_cookies(args.save_cookies_from_browser))
+    if getattr(args, "setup_cookies", False):
+        sys.exit(run_setup_cookies())
+    if getattr(args, "cookies_from_browser", ""):
+        log.info("Downloads send %s's YouTube cookies", args.cookies_from_browser)
 
     if not hold_instance_lock(args.port):
         log.error("Another server is already starting or running on port %d (it holds %s). Stop it first.",

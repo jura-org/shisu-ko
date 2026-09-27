@@ -162,6 +162,9 @@ def main(argv=None) -> int:
     p.add_argument("--max-cue-chars", type=int, default=30)
     p.add_argument("--max-cue-seconds", type=float, default=7.0)
     p.add_argument("--min-cue-seconds", type=float, default=0.8)
+    p.add_argument("--sentence-ends", default="auto", choices=["auto", "off"],
+                   help="auto: punctuate_words() writes the sentence marks Whisper left out; off: "
+                        "cut and merge on Whisper's punctuation alone (the before of the A/B)")
     p.add_argument("--show", action="store_true", help="print every cue, and the defects by name")
     args = p.parse_args(argv)
     limits = server.cue_limits(args)

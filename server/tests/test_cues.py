@@ -141,6 +141,33 @@ def test_anomaly_gate_keeps_an_anomalous_segment_that_sits_on_speech():
     assert server.hallucination_reason(seg("あいうえおかきくけこさしすせそたちつてと", 0.0, 0.1), ws, [[0.0, 1.0]]) is None
 
 
+def test_the_talk_gate_keeps_a_segment_of_one_kana_words():
+    # Whisper's Japanese words are sub-tokens, usually one kana, so they are shorter than the
+    # 133 ms the short-word term penalises whatever the speaker did. Scoring on it deleted five
+    # real utterances in 15 minutes and no hallucination, so the talk path does not.
+    ws = words([(kana, 0.1 * i, 0.1 * i + 0.08) for i, kana in enumerate("いちおうたんにんの")])
+    text = "".join(w.word for w in ws)
+    assert server.is_segment_anomaly(ws) is True                      # with the term, as ported
+    assert server.is_segment_anomaly(ws, short_term=False) is False
+    # Overlap 0.6: past the VAD gate, and under the 0.8 that would excuse the segment unasked.
+    assert server.hallucination_reason(seg(text, 0.0, 1.5), ws, [[0.0, 0.53]]) is None
+
+
+def test_the_talk_gate_still_drops_improbable_words():
+    ws = words([(kana, 0.1 * i, 0.1 * i + 0.08) for i, kana in enumerate("いちおうたんにんの")], prob=0.05)
+    text = "".join(w.word for w in ws)
+    assert server.is_segment_anomaly(ws, short_term=False) is True
+    assert server.hallucination_reason(seg(text, 0.0, 1.5), ws, [[0.0, 0.53]]) == "anomaly"
+
+
+def test_the_lyrics_gate_keeps_the_short_word_term():
+    # Its thresholds were measured with it, and nothing here re-measures them.
+    ws = words([(kana, 0.1 * i, 0.1 * i + 0.08) for i, kana in enumerate("いちおうたんにんの")])
+    line = SimpleNamespace(text="".join(w.word for w in ws), start=0.0, end=1.5, words=ws,
+                           compression_ratio=1.0, avg_logprob=-0.2, no_speech_prob=0.1)
+    assert server.lyrics_reason(line, ws) == "anomaly"
+
+
 def test_is_segment_anomaly_ignores_punctuation_only_words():
     assert server.is_segment_anomaly(words([("。", 0.0, 0.01)])) is False
 
@@ -262,9 +289,35 @@ def test_build_cues_extends_a_short_cue_to_the_minimum_duration():
 
 
 def test_build_cues_merges_a_short_cue_into_its_neighbour():
+    ws = words([("えっと", 0.0, 0.3), ("、", 0.3, 0.35), ("そうですね", 0.6, 1.4), ("。", 1.4, 1.5)])
+    cues = server.build_cues(ws, [[0.0, 1.6]], limits())
+    assert [c["text"] for c in cues] == ["えっと、そうですね。"]
+
+
+def test_build_cues_never_glues_two_sentences_onto_one_row():
+    # A sentence mark is a hard row boundary: the two get a row each however short they are. Two
+    # speakers on one row is what a mined card would otherwise quote.
     ws = words([("はい", 0.0, 0.3), ("。", 0.3, 0.35), ("そうですね", 0.6, 1.4), ("。", 1.4, 1.5)])
     cues = server.build_cues(ws, [[0.0, 1.6]], limits())
-    assert [c["text"] for c in cues] == ["はい。そうですね。"]
+    assert [c["text"] for c in cues] == ["はい。\nそうですね。"]
+
+
+def test_build_cues_puts_two_readable_sentences_on_two_rows():
+    ws = words([("今日はいい天気", 0.0, 1.0), ("。", 1.0, 1.05),
+                ("電車で行きます", 1.2, 2.0), ("。", 2.0, 2.05)])
+    cues = server.build_cues(ws, [[0.0, 2.1]], limits())
+    assert [c["text"] for c in cues] == ["今日はいい天気。\n電車で行きます。"]
+
+
+def test_merge_adjacent_counts_the_rows_and_not_the_newline_between_them():
+    # merge_segments() measures len(text) - newlines; merge_adjacent() counted the newline as a
+    # character, so a cue that already had a row lost one from its budget at every later merge.
+    prev = {"start": 0.0, "end": 1.0, "text": "今日はいい天気。\n電車で行き", "seg": 0}
+    cue_ = {"start": 1.1, "end": 2.0, "text": "ます", "seg": 0}
+    out = server.merge_adjacent([dict(prev), dict(cue_)], limits(max_chars=15), 0.35, only_short=False)
+    assert [c["text"] for c in out] == ["今日はいい天気。\n電車で行きます"]  # 15 characters on two rows
+    out = server.merge_adjacent([dict(prev), dict(cue_)], limits(max_chars=14), 0.35, only_short=False)
+    assert len(out) == 2
 
 
 def test_build_cues_does_not_merge_past_the_character_limit():
@@ -338,7 +391,8 @@ def test_build_window_cues_preserves_the_first_segment_id_after_a_later_merge():
             seg("電車で行きます明日は晴れます散歩します", 1.2, 8.0, ws_b)]
     cues, _ = server.build_window_cues(segs, 0.0, [[0.0, 2.0], [4.0, 5.0], [7.0, 8.0]],
                                        limits(max_chars=18), 0)
-    assert [cue["text"] for cue in cues] == ["こんにちは電車で行きます", "明日は晴れます\n散歩します"]
+    # ます before a two-second pause: punctuate_words() writes the mark Whisper left out.
+    assert [cue["text"] for cue in cues] == ["こんにちは電車で行きます。", "明日は晴れます。\n散歩します"]
     assert [cue["seg"] for cue in cues] == [0, 0]
 
 
@@ -551,9 +605,48 @@ def test_split_for_break_emits_the_whole_buffer_on_a_legal_seam():
 
 
 def test_split_for_break_backs_off_an_illegal_seam_against_the_next_word():
-    buf = words([("なんか靴", 0.0, 1.0), ("舐めますって言", 1.0, 2.0)])
+    buf = words([("なんかくつ", 0.0, 1.0), ("舐めますって言", 1.0, 2.0)])
     head, tail = server.split_for_break(buf, limits(), "ってた")
-    assert (server.word_text(head), server.word_text(tail)) == ("なんか靴", "舐めますって言")
+    assert (server.word_text(head), server.word_text(tail)) == ("なんかくつ", "舐めますって言")
+
+
+def test_joins_compound_between_two_kanji_or_two_katakana():
+    assert server.joins_compound("できる能", "力って") is True
+    assert server.joins_compound("自撮りカメ", "ラこうやって") is True
+    assert server.joins_compound("できる", "能力って") is False
+    assert server.joins_compound("カメラ", "能力") is False
+    assert server.joins_compound("", "力って") is False
+
+
+def test_may_split_refuses_a_compound_that_may_break_allows():
+    assert server.may_break("言われたとおりできる能", "力って必要になる") is True
+    assert server.may_split("言われたとおりできる能", "力って必要になる") is False
+    assert server.may_split("私がこう自撮りカメ", "ラこうやって配信します") is False
+
+
+def test_may_split_allows_a_clause_mark_and_a_kanji_after_hiragana():
+    assert server.may_split("それは学校、", "行ったほうがいい") is True
+    assert server.may_split("言われたとおりできる", "能力って必要になる") is True
+
+
+def test_split_for_break_backs_off_a_seam_inside_a_kanji_compound():
+    # may_break() would emit the buffer against 性がある; 要|性 is a compound, so it backs off.
+    buf = words([("言われたとおりできる", 0.0, 1.0), ("能力って必要", 1.0, 2.0)])
+    head, tail = server.split_for_break(buf, limits(), "性がある")
+    assert (server.word_text(head), server.word_text(tail)) == ("言われたとおりできる", "能力って必要")
+
+
+def test_split_for_break_backs_off_a_seam_inside_a_katakana_word():
+    buf = words([("私がこう自撮り", 0.0, 1.0), ("カメラとマイク", 1.0, 2.0)])
+    head, tail = server.split_for_break(buf, limits(), "スタンドです")
+    assert (server.word_text(head), server.word_text(tail)) == ("私がこう自撮り", "カメラとマイク")
+
+
+def test_split_for_break_emits_the_buffer_at_a_clause_mark_or_before_a_kanji_word():
+    head, tail = server.split_for_break(words([("それはやっぱり学校、", 0.0, 1.0)]), limits(), "行ったほうがいい")
+    assert (server.word_text(head), tail) == ("それはやっぱり学校、", [])
+    head, tail = server.split_for_break(words([("言われたとおりできる", 0.0, 1.0)]), limits(), "能力って必要")
+    assert (server.word_text(head), tail) == ("言われたとおりできる", [])
 
 
 def test_split_for_break_gives_up_when_no_position_is_legal():
@@ -596,16 +689,43 @@ def test_merge_segments_breaks_the_line_at_a_sentence_boundary():
     assert [c["text"] for c in out] == ["これはテストです。\n電車で行きます"]
 
 
+def test_merge_segments_never_lets_a_broken_word_override_a_mark():
+    # breaks_word() is true whenever the next cue opens on ー or a small kana, and its flat join
+    # put two sentences on one row. Nothing is split inside a word after a sentence mark.
+    cues = [cue("そうですね。", 0.0, 1.0), cue("ーっと言います", 1.2, 3.0, 1)]
+    assert [c["text"] for c in server.merge_segments(cues, limits())] == ["そうですね。\nーっと言います"]
+    # Without the mark the seam is still dropped for the broken word, as it always was.
+    cues = [cue("そうですね", 0.0, 1.0), cue("ーっと言います", 1.2, 3.0, 1)]
+    assert [c["text"] for c in server.merge_segments(cues, limits())] == ["そうですねーっと言います"]
+
+
 def test_merge_segments_drops_the_seam_rather_than_leave_a_stub():
-    # "はい。" alone is three characters; a second line that short is worse than no line break, and
-    # refusing the merge would leave the stub flashing on its own.
-    cues = [cue("はい。", 0.0, 1.0), cue("電車で行きます", 1.2, 3.0, 1)]
+    # Without a mark the seam is a guess, and a guess that leaves a row nobody can read gives way
+    # to a plain join: refusing would leave the stub flashing on its own.
+    cues = [cue("はい", 0.0, 1.0), cue("電車で行きます", 1.2, 3.0, 1)]
     out = server.merge_segments(cues, limits())
-    assert [c["text"] for c in out] == ["はい。電車で行きます"]
+    assert [c["text"] for c in out] == ["はい電車で行きます"]
+
+
+def test_merge_segments_gives_a_sentence_its_own_row_however_short_it_is():
+    # With the mark there the seam is the speaker's own, so it is never dropped for a short row:
+    # うん。 is a whole turn, not a stub we left behind by breaking badly.
+    cues = [cue("はい。", 0.0, 1.0), cue("電車で行きます", 1.2, 3.0, 1)]
+    assert [c["text"] for c in server.merge_segments(cues, limits())] == ["はい。\n電車で行きます"]
+    cues = [cue("今日はいい天気ですね。", 0.0, 2.0), cue("うん。", 2.2, 3.0, 1)]
+    assert [c["text"] for c in server.merge_segments(cues, limits())] == ["今日はいい天気ですね。\nうん。"]
+
+
+def test_merge_segments_refuses_a_third_row_rather_than_glue_two_sentences():
+    # The one thing a mark seam cannot do is give way: with two rows already up, flattening would
+    # put two sentences on one row, so the merge goes instead.
+    cues = [cue("今日はいい天気。\n電車で行きます。", 0.0, 2.0), cue("うん。", 2.2, 3.0, 1)]
+    out = server.merge_segments(cues, limits())
+    assert [c["text"] for c in out] == ["今日はいい天気。\n電車で行きます。", "うん。"]
 
 
 def test_merge_segments_lets_a_short_cue_reach_further():
-    cues = [cue("はい。", 0.0, 1.0), cue("電車で行きます", 2.0, 4.0, 1)]
+    cues = [cue("はいはい", 0.0, 1.0), cue("電車で行きます", 2.0, 4.0, 1)]
     assert len(server.merge_segments(cues, limits())) == 1  # 1.0 s gap, inside cross_reach
     # Both sides longer than reach_chars, so the same gap is judged by merge_gap instead.
     long = [cue("これはテストの文章です", 0.0, 2.0), cue("明日は電車で行きますね", 3.0, 4.5, 1)]
@@ -736,6 +856,13 @@ def test_group_words_does_not_split_a_pause_inside_a_word():
     assert [server.word_text(g) for g in groups] == ["なんか靴舐めますって言ってた"]
 
 
+def test_group_words_splits_a_confirmed_pause_between_two_kanji():
+    # A detected silence is evidence of a boundary; the compound rule is only for blind cuts.
+    ws = words([("今日はいい天気", 0.0, 1.0), ("電車で行きます", 4.0, 5.0)])
+    groups = server.group_words(ws, [[0.0, 1.1], [3.95, 5.1]], limits())
+    assert [server.word_text(g) for g in groups] == ["今日はいい天気", "電車で行きます"]
+
+
 def test_group_words_still_splits_a_pause_at_a_legal_boundary():
     ws = words([("こんにちは", 0.0, 1.0), ("電車で行きます", 2.0, 3.0)])
     groups = server.group_words(ws, [[0.0, 1.1], [1.95, 3.1]], limits())
@@ -757,3 +884,22 @@ def test_build_window_cues_repairs_the_lead_word_before_the_vad_gate():
     assert [c["text"] for c in cues] == ["はじめまして"]
     assert "vad" not in drops
     assert next_id == 1
+
+
+def test_build_cues_never_cuts_inside_a_kanji_or_katakana_compound():
+    # 22:13 of 5csq1MlSspA: one 13 s segment with no pause, split only by the hard limits. The cut
+    # used to land inside 能|力 and 学|校 (and, on this synthetic timing, 絶|対 and 必|要).
+    text = ("結局、社会に出たときに、たぶん、人と関わることって絶対必要になるし、言われたことを言われたとおり"
+            "できる能力って必要になるから、それを養うのって学校じゃないかなって思うんで、行ったほうがいいとは思う。")
+    start, end = 1325.14, 1338.18
+    step = (end - start) / len(text)
+    ws = [W(ch, start + i * step, start + (i + 1) * step, 0.9) for i, ch in enumerate(text)]
+    lim = limits()
+    cues = server.build_cues(ws, [[1320.07, 1339.48]], lim)
+    texts = [c["text"] for c in cues]
+    assert "".join(texts) == text
+    for head, tail in zip(texts, texts[1:]):
+        a, b = head[-1], tail[0]
+        assert not (server.is_kanji(a) and server.is_kanji(b)), (head, tail)
+        assert not (server.is_katakana(a) and server.is_katakana(b)), (head, tail)
+    assert all(len(t) <= lim.max_chars for t in texts)

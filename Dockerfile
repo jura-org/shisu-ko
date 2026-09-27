@@ -12,6 +12,9 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     SHISUKO_HOME=/data \
+    # server.py never takes a browser for YouTube's cookies from config.json in here: a DATA_DIR
+    # shared with the native setup may name one, and the container has no browser to read.
+    SHISUKO_CONTAINER=1 \
     HF_HUB_DISABLE_XET=1 \
     # CUDA runtime libraries come from the nvidia-* pip wheels; the GPU driver comes from the host.
     LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib

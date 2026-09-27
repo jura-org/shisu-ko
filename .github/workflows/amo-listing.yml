@@ -1,0 +1,98 @@
+name: Publish a release on addons.mozilla.org
+
+# A workflow of its own, never part of a release: release.yml makes every release and its signed
+# .xpi, and the public listing on addons.mozilla.org gets a release only when this is run by hand
+# for its tag (Actions > Publish a release on addons.mozilla.org > Run workflow, or
+# gh workflow run amo-listing.yml -f tag=v<version>). A listed version waits for AMO's review,
+# which can take days, and not every release needs to be in that queue. The release's own number
+# belongs to its self-distributed build, and AMO takes a number once in either channel, so the
+# listed build is the same code under <version>.1 (scripts/amo-xpi.mjs listing), which Firefox
+# offers to the GitHub installs of <version> too once AMO has approved it.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, the newest release, e.g. v0.15.0
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: amo-listing
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      # Only the newest release goes to the listing. AMO disables every listed version still waiting
+      # for its review when another is submitted, whatever the numbers, and takes a listed version
+      # only above the last approved one: an older tag would be refused, or would throw a newer
+      # submission away and put the older listing texts back. The newest release is also one whose
+      # release workflow got through its checks.
+      - name: Check the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::not a release tag: $TAG"
+            exit 1
+          fi
+          # The listed builds carry <version>.1 from 0.14.2 on; 0.14.1 is a listed version of its
+          # own, and 0.14.1.1 would disable it while it waits for its review.
+          if [ "$(printf '%s\n' v0.14.2 "$TAG" | sort -V | head -n 1)" != v0.14.2 ]; then
+            echo "::error::$TAG is older than v0.14.2, the first release with a listed build of its own: publish v0.14.2 or newer"
+            exit 1
+          fi
+          newest="$(gh release view -R "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          if [ "$newest" != "$TAG" ]; then
+            echo "::error::$TAG is not the newest release (that is $newest): publish the newest, once its release workflow has made its GitHub release"
+            exit 1
+          fi
+      # The scripts come from this workflow's own commit, the add-on and its texts from the tag.
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          path: release
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Check the tag's version
+        run: test "v$(node -p "require('./release/addon/manifest.json').version")" = "$TAG"
+      - name: Build the listing texts
+        run: python3 release/docs/amo/make_metadata.py
+      - name: Build the listed package
+        run: |
+          node release/scripts/build.mjs --browser firefox
+          version="$(node scripts/amo-xpi.mjs listing release/dist/firefox)"
+          echo "LISTING_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Lint the listed package
+        run: npx --yes web-ext@10.7.0 lint --source-dir release/dist/firefox
+      - name: Submit it to the listing
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
+          WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
+        run: |
+          if [ -z "$WEB_EXT_API_KEY" ] || [ -z "$WEB_EXT_API_SECRET" ]; then
+            echo "::error::WEB_EXT_API_KEY and WEB_EXT_API_SECRET are not in the repository secrets"
+            exit 1
+          fi
+          state="$(node scripts/amo-xpi.mjs status "$LISTING_VERSION")"
+          case "$state" in
+            missing)
+              npx --yes web-ext@10.7.0 sign --source-dir release/dist/firefox --artifacts-dir release/dist \
+                --channel listed --amo-metadata release/docs/amo/amo-metadata.json --approval-timeout 0 --no-input
+              echo "::notice::$LISTING_VERSION (the release $TAG) is submitted to the listing; it is public once AMO has reviewed it"
+              ;;
+            disabled)
+              echo "::error::AMO has disabled $LISTING_VERSION (rejected, or superseded by a newer listed submission) and never takes that number again: release the next patch version and publish that"
+              exit 1
+              ;;
+            *)
+              echo "::notice::AMO already has $LISTING_VERSION ($state); it is not uploaded again"
+              ;;
+          esac

@@ -80,12 +80,15 @@ is touched. It then asks which Whisper model the server should use: `1` is what 
 best, large-v3 on Windows and Linux (best quality, about 3 GB, wants a GPU with 4 GB or more free)
 and large-v3-turbo on an Apple Silicon Mac (about 1.6 GB, the one that keeps up beside a browser),
 `2` is small (about 500 MB, fine on a CPU, less accurate); it downloads the choice into
-`~/.shisu-ko/models` with a progress bar and remembers
-the choice in `~/.shisu-ko/config.json`. When it says that everything is ready, close its window
-and start `run.cmd` / `run.sh`. The choice is kept even when the download fails or is stopped with
-Ctrl+C: the first start then downloads the chosen model itself, without the progress bar. The
-server is ready when it prints `Listening on http://127.0.0.1:8790`. Keep the window open while
-you watch; it restarts itself if it ever crashes.
+`~/.shisu-ko/models` with a progress bar and remembers the choice in `~/.shisu-ko/config.json`. Where Firefox is installed it also asks whether the server should send
+Firefox's YouTube cookies with every download: YouTube refuses some downloads ("Sign in to confirm
+you're not a bot") until they carry a signed-in browser's cookies. Say yes if you are signed in to
+YouTube in Firefox; the answer goes to the same file (see [YouTube sign-in](#youtube-sign-in)).
+When it says that everything is ready, close its window and start
+`run.cmd` / `run.sh`. The choice is kept even when the download fails or is stopped with Ctrl+C:
+the first start then downloads the chosen model itself, without the progress bar. The server is
+ready when it prints `Listening on http://127.0.0.1:8790`. Keep the window open while you watch; it
+restarts itself if it ever crashes.
 
 **On Apple Silicon** the transcription runs on the Mac's own GPU, with no option to set:
 CTranslate2 has no Metal backend, so the server decodes through MLX instead and `--device auto`
@@ -110,36 +113,52 @@ conversation, where one window holds three times as many sentences to decode. `-
 takes that back and mishears a homophone rather more often.
 
 From then on the toolbar popup can start it for you: while the server is offline, the status
-line in the popup's header shows a **Start server** button. The first click asks Firefox for
-permission to "exchange messages with programs other than Firefox"; allow it, and the button
-launches `server\run.cmd` in a window of its own (Windows) or `server/run.sh` in the background
-with its output in `~/.shisu-ko/server.log` (Linux/macOS), then waits for the server to answer.
-The button passes no options: the server starts with its defaults (the model chosen at setup, else
-large-v3, or large-v3-turbo on an Apple GPU; the GPU when there is one; no cookies), exactly as a bare `run.cmd` / `run.sh`
-start would. The popup's model field switches the model once that default one is up; anything
-else you usually append to `run.cmd` / `run.sh` (`--device cpu`, `--cookies-from-browser`,
-`--js-runtime`, ...) needs a start by hand, see [Server options](#server-options). Firefox only
-for now: Chrome wants the installed extension's id in the launcher's manifest. Docker and Nix
-users start the server as before.
+line in the popup's header shows a **Start server** button. The first click asks the browser for
+permission, Firefox to "exchange messages with programs other than Firefox", Chrome to
+"communicate with cooperating native applications"; allow it, and the button launches
+`server\run.cmd` in a window of its own (Windows) or `server/run.sh` in the background with its
+output in `~/.shisu-ko/server.log` (Linux/macOS), then waits for the server to answer.
+The button passes no options: the server starts with its defaults (the model chosen at setup,
+else large-v3, or large-v3-turbo on an
+Apple GPU; the GPU when there is one; the YouTube cookies of the browser chosen at setup, if
+any, see [YouTube sign-in](#youtube-sign-in)), exactly as a bare `run.cmd` / `run.sh` start
+would. The popup's model field switches the model once that default one is up; anything else you
+usually append to `run.cmd` / `run.sh` (`--device cpu`, `--js-runtime`, ...) needs a start by
+hand, see [Server options](#server-options). In Chrome the
+button is there for the [Chrome Web Store](https://chromewebstore.google.com/detail/shisu-ko/ecenifonpkaiccmmknpbllbebbfigjnm)
+install only (see [Install the extension](#2-install-the-extension)): the launcher's manifest
+has to name the extension's id, and an unpacked build (`dist/chrome`, the release zip) gets an
+id of its own from the folder it was loaded from, so there the server is started by hand.
+Docker and Nix users start the server as before.
 
-Setup registers that launcher with Firefox, and so does every `run.cmd` / `run.sh` start. An
-existing install therefore gets the button after one or two starts by hand: the start that
-updates Shisu-ko to a version with the button still runs the old launcher, so it is the start
-after the update that registers; running `setup.cmd` / `setup.sh` once is the sure way, and
-`run.cmd --check` says whether the launcher is registered. To take the registration away again,
-for example before deleting the checkout or if Firefox should not be able to start anything, run
+Setup registers that launcher with Firefox and Chrome (on Linux with Chromium too), and so does
+every `run.cmd` / `run.sh` start. An existing install therefore gets the button after one or two
+starts by hand: the start that updates Shisu-ko to a version with the button still runs the old
+launcher, so it is the start after the update that registers. An install that already has the
+button gets Chrome's registration with the update itself on Linux and macOS, where `run.sh`
+registers after updating (the popup's **Update** included), and with the next `run.cmd` start on
+Windows, where `run.cmd` registers before it updates. Running `setup.cmd` / `setup.sh` once is
+the sure way, and `run.cmd --check` says for which browsers the launcher is registered. To take
+the registration away again, for example before deleting the checkout or if no browser should
+be able to start anything, run
 `~/.shisu-ko/venv/Scripts/python server/native_host.py --unregister` (`venv/bin/python` on
-Linux/macOS; any Python 3 works, the host is standard library only). It removes
-`~/.shisu-ko/native-messaging/shisuko.json` and the `HKCU\Software\Mozilla\NativeMessagingHosts\shisuko`
-registry key on Windows, `~/.mozilla/native-messaging-hosts/shisuko.json` on Linux and
-`~/Library/Application Support/Mozilla/NativeMessagingHosts/shisuko.json` on macOS; delete
-those by hand if the checkout is already gone. `--status` shows the current state.
+Linux/macOS; any Python 3 works, the host is standard library only). On Windows it removes
+`shisuko.json` and `shisuko-chrome.json` from `~/.shisu-ko/native-messaging` and the registry
+keys `HKCU\Software\Mozilla\NativeMessagingHosts\shisuko` and
+`HKCU\Software\Google\Chrome\NativeMessagingHosts\shisuko`; on Linux `shisuko.json` from
+`~/.mozilla/native-messaging-hosts`, `~/.config/google-chrome/NativeMessagingHosts` and
+`~/.config/chromium/NativeMessagingHosts` (`$CHROME_CONFIG_HOME`, else `$XDG_CONFIG_HOME`, in
+place of `~/.config` when it is set, as Chrome itself looks); on macOS `shisuko.json` from
+`~/Library/Application Support/Mozilla/NativeMessagingHosts` and
+`~/Library/Application Support/Google/Chrome/NativeMessagingHosts`. Delete those by hand if the
+checkout is already gone. `--status` shows the current state.
 
 Every start first looks for a newer Shisu-ko: a git clone is fast-forwarded to the branch it
 tracks, a folder downloaded as a zip is replaced with the newest release, changed Python
 requirements are installed, and a changed extension is pointed out (reload it in Firefox or
-install the new `.xpi`). Local changes are never overwritten, and being offline just starts
-the current version. `run.cmd --no-update` (or `SHISUKO_NO_UPDATE=1`) skips the check.
+install the new `.xpi`; a Chrome Web Store install is updated by the store). Local changes are
+never overwritten, and being offline just starts the current version. `run.cmd --no-update` (or
+`SHISUKO_NO_UPDATE=1`) skips the check.
 
 **Updates.** A server that keeps running would never see a new release, so the add-on looks for
 one itself: it asks GitHub for the newest release once a day, when Firefox starts or the popup
@@ -160,16 +179,23 @@ before 0.9.0 that has not been restarted since it updated itself; `run.cmd` pick
 up by itself) or that was started with `--no-update` cannot update itself; the banner then says
 the server was not started by `run.cmd` / `run.sh`, whichever of those the cause is (the server
 only reports that it cannot), and asks for a restart by hand, which
-updates as before. The extension itself is never installed by the add-on: once the listing on
-addons.mozilla.org is live Firefox updates it from there, and until then the release page has
-the signed `.xpi`, which the banner links to when only the extension is behind. Being offline
-costs one failed check, shown under **Check for updates**; a failed check never notifies.
+updates as before. The extension itself is never installed by the add-on: Firefox updates it from
+the listing on addons.mozilla.org, and the banner links to the release page when only the
+extension is behind, once the release carries the signed `.xpi` (until then it says the signed
+`.xpi` is on its way). Chrome updates an install from the Chrome Web Store by itself: every
+release goes to the store by itself, and Chrome gets it once it has passed the store's review,
+which can be days after the GitHub release; until then the banner says so and offers no release
+page, since an unpacked build from there would be a second copy of the extension beside the
+store's (an unpacked build of your own keeps the link). Being offline costs one failed check,
+shown under **Check for updates**; a failed check never notifies.
 
 **Nix / NixOS:** `nix run github:Multysquid/shisu-ko` (or `nix run .` in a checkout) starts the
 server with CUDA support; `nix run .#check` prints diagnostics; `nix develop` opens a shell with
 Python, web-ext, Node and Deno for development. The flake takes CTranslate2 with CUDA from the
 `cache.nixos-cuda.org` binary cache, so add it to your substituters or expect a long build. To
 keep the server running in the background: `systemd-run --user --unit=shisu-ko nix run /path/to/shisu-ko`.
+Options go after `--` (`nix run . -- --device cpu`). There is no setup to ask about YouTube's
+sign-in, so if YouTube asks for one, see [YouTube sign-in](#youtube-sign-in).
 
 **Docker:** copy `.env.example` to `.env`, set `DATA_DIR` to where models and caches should
 live, then run `docker\up.cmd` (Windows) or `docker compose up -d`. See [Docker](#docker) below.
@@ -183,30 +209,41 @@ Temporary install (until Firefox restarts):
 3. Firefox asks for access to youtube.com the first time you open the popup; click **Allow on
    YouTube** (or right-click the toolbar icon > Always Allow on www.youtube.com).
 
-Permanent install: download the signed `shisu_ko-<version>.xpi` from the
-[latest release](https://github.com/Multysquid/shisu-ko/releases/latest) and open it in Firefox.
-Regular Firefox only keeps signed add-ons; the release workflow signs each tagged version
-through addons.mozilla.org (unlisted channel, nobody else sees it), and `sign-addon.cmd` does
-the same for a local build with a free
-[addons.mozilla.org API key](https://addons.mozilla.org/developers/addon/api/key/). Firefox
-Developer Edition, Nightly and ESR can instead load the unsigned zip with
+Permanent install: every [GitHub release](https://github.com/Multysquid/shisu-ko/releases/latest)
+carries `shisu_ko-<version>.xpi`, signed by addons.mozilla.org for self-distribution, usually
+within minutes of the release; open it in Firefox to install. When addons.mozilla.org holds a
+version for a human review, the release carries `shisu-ko-<version>-firefox-unsigned.xpi` until
+the signed file replaces it: regular Firefox refuses an unsigned add-on, Developer Edition,
+Nightly and ESR take it with `xpinstall.signatures.required` set to `false`. Or install
+[Shisu-ko on addons.mozilla.org](https://addons.mozilla.org/firefox/addon/shisu-ko/), which gets
+selected releases after AMO's review (that can take days), so it may be a release or two behind
+GitHub. Both are the same add-on, and Firefox updates either from the listing: a GitHub install
+moves on to the first listed version newer than its own (a release published there is listed as
+its number plus `.1`, the same code). Regular Firefox only keeps signed
+add-ons; Firefox Developer Edition, Nightly and ESR can instead load the unsigned zip with
 `xpinstall.signatures.required` set to `false` in `about:config`. The popup says when a newer
-release is out (see [Updates](#1-start-the-server)); the `.xpi` is installed by hand until the
-listing on addons.mozilla.org is live. Since 0.9.0 the extension needs one more permission,
+release is out (see [Updates](#1-start-the-server)). Since 0.9.0 the extension needs one more permission,
 "Display notifications to you": opening the new `.xpi` over an older version lists it in the
-install prompt, and an automatic update (from the listing, once it is live) is held back by
+install prompt, and an automatic update (from the listing, for a release published there) is held back by
 Firefox until you approve it, from the notice on the application menu (≡) or under Add-ons
 and themes.
+
+On Chrome, install [Shisu-ko from the Chrome Web Store](https://chromewebstore.google.com/detail/shisu-ko/ecenifonpkaiccmmknpbllbebbfigjnm).
+Every release goes to the store by itself, and Chrome updates the install by itself once the store
+has reviewed it, so it can trail the GitHub release by days; the popup then says the store will
+update it instead of pointing you at the release page.
 
 Chrome development uses the same source. Run `npm ci` and `npm run build:chrome`, then open
 `chrome://extensions`, enable Developer mode, and choose **Load unpacked** on `dist/chrome`.
 After edits, run `npm run watch`; reload the extension on that page and reload the YouTube tab.
 The Firefox source remains directly loadable from `addon/manifest.json`. `npm run build` writes
-both unpacked trees and `dist/shisu-ko-<version>-{firefox,chrome}.zip`. For a Chrome release,
-download `shisu-ko-<version>-chrome.zip` from the [Chrome release](https://github.com/Multysquid/shisu-ko/releases/latest),
+both unpacked trees and `dist/shisu-ko-<version>-{firefox,chrome}.zip`. Instead of the store
+install, you can also download `shisu-ko-<version>-chrome.zip` from the [Chrome release](https://github.com/Multysquid/shisu-ko/releases/latest),
 unzip it, and choose **Load unpacked** on the extracted folder. This ZIP is unsigned and is not a
-Chrome Web Store install; it has no automatic updates. Keep the extracted folder and reload the
-extension from `chrome://extensions` after updates. Chrome shortcuts are under
+Chrome Web Store install; it has no automatic updates, and it gets an id of its own, so beside a
+store install it is a second copy of the extension (keep one of the two). Its popup keeps the
+release page link for a newer version. Keep the extracted folder and reload the extension from
+`chrome://extensions` after updates. Chrome shortcuts are under
 `chrome://extensions/shortcuts`.
 
 ### 3. Watch
@@ -228,10 +265,13 @@ again by itself when the subtitle language comes back.
 | Alt+Shift+S | Turn Shisu-ko on or off (the switch in the popup header) |
 | Alt+Shift+L | Toggle the transcript panel |
 | Alt+Shift+M | Mine the current sentence (screenshot + audio) |
+| Alt+Shift+K | Mark the word under the pointer (or the word selected in a line) as known, or take it off the list again; see [Word colours](#word-colours) |
+| Alt+Shift+H | Hide the status badge in the player's top left, the red "server offline" included, or show it again (the popup's **Status badge on the video, errors too** switch) |
 | ← / → | Jump to the start of the previous / next subtitle. In a gap between lines, Left goes back to the line that just ended. Where nothing is transcribed yet, and before the first subtitle arrives, the keys keep YouTube's five second seek. Can be turned off in the popup |
 
 Shortcuts can be changed in Firefox under Add-ons and themes > Manage Extension Shortcuts, or in
-Chrome at `chrome://extensions/shortcuts`.
+Chrome at `chrome://extensions/shortcuts`. Chrome gives an extension four default shortcuts, so
+Alt+Shift+H has none there until you set one on that page.
 
 ## Reading with Yomitan
 
@@ -284,8 +324,9 @@ To mine by hand instead:
   grab the matching frame, then jumps back).
 
 The first time, Anki shows a dialog asking whether to allow the extension; click **Yes**. Field
-names default to `Picture` and `SentenceAudio`, as used by common Japanese mining note types;
-change them in the popup to match yours. An optional sentence field is filled with the subtitle
+names default to `Picture` and `SentenceAudio`, as used by common Japanese mining note types, and
+match whatever case your note type writes them in (`picture` and `sentenceAudio` in Eminent);
+change them in the popup when yours are named differently. An optional sentence field is filled with the subtitle
 text only when it is empty, so it never overwrites what Yomitan wrote. An optional word field
 names the field holding the expression, used to tell two similar lines apart and, by the
 [word colours](#word-colours), to read each card's word; left empty, the note's first field is
@@ -307,43 +348,109 @@ need Anki running with AnkiConnect, the same as mining, and share its permission
 **Colour words by their Anki card** colours each word of a subtitle line, and of the transcript
 panel, by the state of its card: green for a card you have learned (in review), yellow for one you
 are still learning, orange for a suspended card, red for a new one. A word with no card keeps the
-text colour. The cards come from one deck. Left on *Automatic*, that is the deck your last mined
-card went to: nothing is looked up until you have mined a card, and the first mine then names the
-deck (the hint under the **Deck** select says which, or "no card mined yet"). Choose a deck in
-the select to look at that one instead; its subdecks count. Words are taken from the note's word
-field (the popup's **Word field**, else the note's first field), and a verb or adjective is found
-in its usual conjugations and in its noun form: a card for 食べる colours 食べました,
+text colour, unless it is a word on your list of known words, or a particle, katakana word or name
+you chose to colour (below). The cards come from one deck. Left on *Automatic*, that is the deck your
+last mined card went to: nothing is looked up until you have mined a card, and the first mine then
+names the deck (the hint under the **Deck** select says which, or "no card mined yet"). Choose a
+deck in the select to look at that one instead; its subdecks count. Words are taken from the note's
+word field (the popup's **Word field**, else the note's first field), and a verb or adjective is
+found in its usual conjugations and in its noun form: a card for 食べる colours 食べました,
 食べたことがある and 食べ in 食べに行く, 書く colours 書かない and 書いて, 美しい colours
 美しかった, 勉強する colours 勉強している and the bare 勉強, 終わる colours 終わり, and a word
-written in kana is found in its forms too (かける colours かけて, しまう colours しまった,
-おいしい colours おいしかった). The particles after a coloured word and the honorific お or ご
-before it take its colour (お風呂の, 中で, 学生です), and so does the quotative って or と between
-a coloured word and one found after it (話しかけていただくっていう with いう in the deck), so a
-line reads in whole pieces. A word is not coloured inside a compound (食べ物 for 食べる, 日本語
-for 日本, 走者 for 走る), and a card for a particle, the copula or an auxiliary (は, のは, から,
-でも, だ, です, ます, ない, たい, ん …) never colours anything by itself, since it would paint every
-line the same way. Two cards for one word show the one with the least progress; a suspended card
-only counts when there is no other.
+written in kana is found in its forms too (かける colours かけて, しまう colours しまった, おいしい
+colours おいしかった). A card for a noun written with kanji or katakana also colours the する forms
+after it (お願い colours お願いします, スタート colours スタートしました); one written in kana, such
+as びっくり, does not, nor does a time word, an adverb, a counter or a single kanji (今日します,
+全然しない, 何かしたい, 一回した, 顔する keep the する apart), and a card for the verb itself keeps
+its own forms (with 話 and 話す in the deck, 話して is 話す's). A card whose dictionary entry marks
+the word as usually written in kana (Jitendex's "kana" tag, JMdict's `uk`) colours its reading as
+well: a card for 更に colours さらに.
+A particle does not take the colour of the word before it (領域まで is 領域 in the card's colour and
+まで apart: まで has no card), save one: with particles not counted as known (below), the quotative
+って or と between a word coloured by its card and いう found after it (話しかけていただくっていう),
+which ICU holds in one piece, takes the colour of the word before it. The honorific お or ご before
+a word takes its colour, being part of the word (お風呂). A word is not coloured inside a compound
+(食べ物 for 食べる, 日本語 for 日本, 走者 for 走る), and a card for a particle, the copula or an
+auxiliary (は, のは, から, でも, だ, です, ます, ない, たい, ん …) never colours anything by itself,
+since it would paint every line by that card's state. Two cards for one word show the one with the
+least progress; a suspended card only counts when there is no other.
+
+The colours below need no card, so they sit apart, under **More word colour options** at the end of
+the Word colours section (closed until you open it), and the three switches there are off by
+default: a colour should say what your own deck says. They come with the card colours: they show
+only while **Colour words by their Anki card** is on, and **Overbar by pitch accent** on its own
+colours none of them. They need no deck either: with no card mined and no deck chosen, or with Anki
+closed, your known words and the particles, katakana words and names you switched on are coloured
+all the same, and the card colours join them once a deck has been read.
+
+**Particles count as known** (off by default) colours green every particle the browser's word
+splitter sets apart as a word of its own, whatever stands before it, and the combinations of
+particles, the copula and the auxiliaries along with them (は, には, から, まで, です, ですね, という
+…; と alone when いう has a card of its own), as grammar you know rather than words with a card,
+and with them the words a learner knows as grammar: the verbs that carry it (ある, いる, おる, みる,
+する, くる, なる, いく, しまう, もらう … in their common forms), そう, よう, みたい, らしい, この, それ,
+ここ, どう and the other こそあど words, こと, もの, わけ, はず, and まだ, もう, また, よく, ちょっと and
+the like; a card for one of them still decides its colour. Turned off, they keep the text colour. A particle the splitter joins to a verb's ending keeps
+the text colour too (the よ of できますよ). Most verbs the deck lacks are not taken apart for it:
+the splitter cuts a kana one it does not know into pieces that look like particles (やって, なった,
+よかった, してます, もらって), and the kana ending of a kanji one into more of them (飲んだ,
+書かない, 呼ばれた), while the endings after its stem are its own (ございます,
+見えてきました), so those keep the text colour whole. Measured on real subtitles, about one green
+particle in thirty is still such a piece, among them a negative cut into particle shapes of two
+kana (わからない and 分からない show わ, から and ない green); the other way round, the Kansai
+copula や before った or って (日本初やった) looks like やる and stays uncoloured.
+
+**Names and Latin text in blue** (off by default) colours blue, no card needed: Latin letters (jr, YouTube, iPhone, Ｗｉ－Ｆｉ, and
+Tシャツ as one word; www laughter is no name), place names (the prefectures, their capitals and
+big cities, Tokyo's wards, the districts and sights a travel video names, the countries and cities
+abroad: 東京, 丸の内, 北海道, アメリカ), and a place, or any word of two kanji or katakana or more
+that has no card, with a suffix such as 駅, 区, 寺 or 通り after it (東京駅, 渋谷区, 品川駅,
+金閣寺), which turns an ordinary word without a card before such a suffix blue as well (予定通り,
+時間通り); a word with a card keeps its colour and the suffix its own (地元駅 with cards for 地元
+and 駅). A card for the same word wins (東京 alone, with 東京 in the deck, is the card's colour),
+a longer name wins over a shorter card (東京駅 over 東京, 丸の内 over 丸). Switched off, a name
+keeps the text colour and is still read whole, so no card is found inside it (a card for 駅 does not
+colour the 駅 of 東京駅); a katakana name such as アメリカ is still green with **Katakana words count
+as known** on.
+
+A word on your list of known words is green whatever its card says (its pitch overbar stays), and a
+known word with no card is found in its conjugations like a deck word. The list is the **Known
+words** field under More word colour options, one word per line. **Alt+Shift+K** adds the word under
+the pointer in a subtitle or the transcript, or the word you selected there (a word Yomitan has
+selected counts too, so the shortcut works with its popup open), and takes it off the list again
+when it is on it already. The word is the one under the pointer's tip, down to the character: a
+coloured word whole, else the word the browser's word splitter makes of the text there, a single
+kanji with the kana that follow it up to the next particle (食べて, but 私 in 私はこれが), お or ご
+with the word it fronts (風呂 for お風呂), and a verb or adjective in the form your deck holds it in
+(食べる for 食べた) when the deck has it. A particle is not added, since the **Particles count as
+known** switch decides its colour, but one you typed into the list comes off it. With the pointer
+moved off the player the shortcut marks nothing and says "No word under the pointer", unless the
+video is paused by a hover and waiting for you. With **Katakana words count as known**, every
+katakana word of two characters or more that no card, known word or name covers is green too.
 
 **Overbar by pitch accent** draws a bar over each word that has a card, in the colour of its pitch
 accent pattern: blue heiban, red atamadaka, orange nakadaka, green odaka (the colours Migaku and
-Yomitan use). The pattern is read from the card's pitch accent field in whichever form Yomitan
-wrote it: a category name (`{pitch-accent-categories}`), a position such as `[2]`
-(`{pitch-accent-positions}`) or the drawn graph (`{pitch-accents}`). A position needs the word's
-mora count to tell odaka from nakadaka; it comes from the graph, else from the card's reading
-field (a field named reading or furigana, not the sentence's), else from the word itself when it
-is kana, and without any of them the word counts as nakadaka. The field is found by itself: the
-first one whose name contains "pitch" or "accent" and holds a readable value, unless you name one
-under **Pitch accent field** in the *Anki, clips and server* drawer. Verbs and adjectives, which
-Yomitan files under kifuku, get no bar rather than a wrong one. Both colourings can be on at once:
-the text colour is the card's state, the bar its pitch.
+Yomitan use). The pattern is read from the card's pitch accent field in whichever form Yomitan wrote
+it: a category name (`{pitch-accent-categories}`), a position such as `[2]`
+(`{pitch-accent-positions}`), the drawn marks (`{pitch-accents}`) or the drawn graph
+(`{pitch-accent-graphs}`). A position needs the word's mora count to tell odaka from nakadaka; it
+comes from the drawing, else from the card's reading field (a field named reading or furigana, not
+the sentence's), else from the word itself when it is kana, and without any of them the word counts
+as nakadaka. A field holding the bare reading and nothing else says nothing about the pitch (old
+templates wrote it there whatever the pattern). The field is found by itself: the first one whose
+name contains "pitch" or "accent" and holds a readable value, unless you name one under **Pitch
+accent field** in the *Anki, clips and server* drawer; when none reads, a reading field Yomitan drew
+the pitch into is read instead. Verbs and adjectives, which Yomitan files under kifuku, get no bar
+rather than a wrong one. Both colourings can be on at once: the text colour is the card's state, the
+bar its pitch.
 
 The deck is looked at again every 30 seconds while a video is open, and only the lines whose
 colours changed are redrawn, so a card you review in Anki changes colour within a minute and a
 card you have just mined shows red within seconds. The words stay ordinary page text, so Yomitan
 scans across the colours as before. When Anki is closed the colours stay as they were last read,
-or off when nothing was read yet; a deck that no longer exists colours nothing; either way the
-hint under the deck select says what stands in the way, and nothing is ever toasted on the video.
+or, when nothing was read yet, only the colours that need no card show; a deck that no longer
+exists colours no card; either way the hint under the deck select says what stands in the way,
+and nothing is ever toasted on the video.
 
 ## Live streams
 
@@ -370,9 +477,9 @@ The switch in the header is the master switch. Off means nothing happens on YouT
 overlay, no requests to the server, no Anki watching, no word colours and no key handling, until
 it is switched on again (Alt+Shift+S flips it too). The status line beside the switch says whether the server
 answers, and with which model and device; while it does not answer, a **Start server** button
-on that line launches it with the server's default options (Firefox, see
-[Start the server](#1-start-the-server)); the model field below takes effect once it is up. The
-same page opens as the add-on's preferences under Add-ons and themes > Shisu-ko.
+on that line launches it with the server's default options (Firefox and the Chrome Web Store
+install, see [Start the server](#1-start-the-server)); the model field below takes effect once
+it is up. The same page opens as the add-on's preferences under Add-ons and themes > Shisu-ko.
 
 A banner under the header appears when a newer release than the running server (or than this
 extension) is out: "Shisu-ko 0.9.0 is available — the server runs 0.8.0." with **Update**, which
@@ -382,8 +489,11 @@ that cannot update itself (Docker, Nix, a start by hand, `--no-update`) gets a n
 the button: the banner says the server was not started by `run.cmd` / `run.sh` in every one of
 those cases, since the server only reports whether it can update, not why not (a `--no-update`
 server's own reason sits in its 409 answer, which the popup never asks for without the
-button). While the server is offline there is no banner at all, since its next start
-updates it anyway. When only the extension is behind, the banner links to the release page. The
+button). While the server is offline the banner says nothing about the server, since its next
+start updates it anyway. When the extension is behind and the server is current or offline, the
+banner links to the release page (in Firefox once the release carries the signed `.xpi`, until
+then it says the signed `.xpi` is on its way; for an unpacked Chrome build at once), or, for a
+Chrome Web Store install, says that the store updates it once it has reviewed that version. The
 **Check for updates** link in the *Anki, clips and server* drawer asks GitHub now, whatever the
 age of the daily check, and the line under it keeps the result ("Newest release: 0.9.0, checked
 3 min ago", or why the check failed).
@@ -394,12 +504,18 @@ age of the daily check, and the line under it keeps the result ("Newest release:
 | Left/Right jump between subtitles | Arrow keys move between cues instead of seeking five seconds |
 | Transcript panel | List of all cues so far, with jump and mine buttons |
 | Auto-attach to new Yomitan cards | Watches AnkiConnect and fills the new card by itself; off means Alt+Shift+M or the pickaxe |
-| Colour words by their Anki card | Colours each word of a line by the state of its card in the deck below: green learned, yellow learning, orange suspended, red new; other words keep the text colour. Needs Anki with AnkiConnect, see [Word colours](#word-colours) |
+| Colour words by their Anki card | Colours each word of a line by the state of its card in the deck below: green learned, yellow learning, orange suspended, red new; green for your known words and, as the three switches under More word colour options say, green for particles and katakana words and blue for names and Latin text; other words keep the text colour. Needs Anki with AnkiConnect, see [Word colours](#word-colours) |
 | Deck | The deck whose cards are looked at. Automatic means the deck your last mined card went to; nothing is looked up before a card was mined or a deck chosen. The hint under it names the deck, or says what stands in the way |
+| Particles, katakana, names, known words | Under More word colour options, closed by default |
+| Particles count as known | Off by default. On: particles and their combinations with the copula and the auxiliaries (は, には, です, という …) and the grammar words (ある, いる, する, この, こと, まだ …) are green, as grammar you know; off, they keep the text colour |
+| Katakana words count as known | Off by default. Katakana words of two characters or more that no card, known word or name covers are green |
+| Names and Latin text in blue | Off by default. Place names, a word with a place suffix (駅, 区 …) and Latin text (OK, iPhone) are blue; off, they keep the text colour |
+| Known words | Your own list, one word per line: green whatever the card says, and found in their conjugations without a card. Alt+Shift+K adds the word under the pointer, or takes it off again |
 | Overbar by pitch accent | Draws a bar over each word that has a card, in the colour of its pitch accent pattern: blue heiban, red atamadaka, orange nakadaka, green odaka, read from the card's pitch accent field |
 | Font size, keep line after speech | Presentation; the linger time keeps short lines readable |
 | Hide YouTube's own captions | Avoids two subtitle layers |
-| Show progress messages on the video | The status badge; errors are always shown |
+| Status badge on the video | The badge in the player's top left, errors included; off (or Alt+Shift+H) it shows nothing at all |
+| Show progress messages on the video | With the badge on: the progress messages; errors are always shown |
 
 Subtitle style lives in its own drawer. The screenshot shows mincho, a raised position, a lighter
 box, an outline, and the transcript docked left:
@@ -469,7 +585,7 @@ would leave Whisper on the CPU.
 **Scheduling.** When you open a video the server fetches the audio track with
 [yt-dlp](https://github.com/yt-dlp/yt-dlp), decodes a minute around the playhead while the
 download is still running, and transcribes a short 20-second window there so the first subtitles
-appear quickly. It then continues in 40-second windows up to 15 minutes ahead of you. A sentence
+appear quickly. It then continues in 30-second windows up to 15 minutes ahead of you. A sentence
 cut at a window edge is dropped and re-transcribed at the start of the next window, so lines are
 never chopped. Seeking to an untranscribed part starts a new short window there. Only the tab you
 are looking at is served: the extension elects one, and the others are answered without the server
@@ -514,8 +630,8 @@ current model's cues are `<video_id>.cues.json`, and when you switch models anot
 cues are kept beside it and come back the moment you switch back.
 
 **Updates.** The one request the extension makes beyond your own machine is
-`GET https://api.github.com/repos/Multysquid/shisu-ko/releases/latest`: when Firefox starts (or
-the extension is installed or updated) or the popup opens and the last check is over a day old
+`GET https://api.github.com/repos/Multysquid/shisu-ko/releases/latest`: when the browser starts
+(or the extension is installed or updated) or the popup opens and the last check is over a day old
 or failed, so at most once a day by itself while the checks succeed (a failure is tried again
 at the next of those occasions), and on every click of **Check for updates**. It carries no account, token,
 cookie or identifier, only what any visit to GitHub carries (your IP address and the browser's
@@ -523,15 +639,20 @@ user agent); GitHub's answer (the release's version, page and `.xpi` address, an
 checked) is kept in the extension's storage. The **Update** button then sends `POST /update` to
 the local server, which exits with code 4 so that `run.cmd` / `run.sh` run `update.py` and start
 it again; the server never downloads anything itself, and the extension never installs itself.
+The browser updates it with requests of its own: Firefox from addons.mozilla.org, and Chrome, for
+a Chrome Web Store install, from the store.
 
 ## Server options
 
-Append options to `run.cmd` / `run.sh`, or put them in the `command:` line of `compose.yaml`.
-The popup's **Start server** button runs `run.cmd` / `run.sh` without any of them, so it always
-starts the defaults below (the model can still be switched from the popup afterwards); a server
-that needs `--device cpu`, cookies or another option is started by hand. Without `--model` the
-server runs the model chosen at setup (`~/.shisu-ko/config.json`), else large-v3, or large-v3-turbo
-on an Apple GPU; `run.sh --default-model` prints which of the two this machine is.
+Append options to `run.cmd` / `run.sh` (with Nix, after `--`: `nix run . -- --device cpu`), or
+put them in the `command:` line of `compose.yaml`. The popup's **Start server** button runs
+`run.cmd` / `run.sh` without any of them, so it always starts the defaults below (the model can
+still be switched from the popup afterwards); a server that needs `--device cpu` or another
+option is started by hand. Without `--model` the server runs the model chosen at setup
+(`~/.shisu-ko/config.json`), else large-v3, or large-v3-turbo on an Apple GPU;
+`run.sh --default-model` prints which of the two this machine is. Without
+`--cookies-from-browser` or `--cookies` it
+sends the YouTube cookies of the browser chosen there (see [YouTube sign-in](#youtube-sign-in)).
 
 | Option | Effect |
 |---|---|
@@ -543,15 +664,17 @@ on an Apple GPU; `run.sh --default-model` prints which of the two this machine i
 | `--beam-size 1` | Decode greedily instead of searching five beams. About 15% faster on read news speech and about 90% on dense conversation, and wrong on a homophone rather more often |
 | `--compute-type int8_float16` | Halves GPU memory use; chosen by itself when less than 4.5 GB is free. MLX knows `float16` (the default there) and `float32` only, so on an Apple GPU the smaller default model is what keeps memory down |
 | `--default-model` | Print the model a bare start would load on this machine, ignoring `~/.shisu-ko/config.json`, and exit. What `setup.sh` asks to name its first choice |
-| `--cookies-from-browser firefox` | Age-restricted or members-only videos, or when YouTube asks for a sign-in |
-| `--cookies /path/cookies.txt` | Same, with an exported cookies file (use this inside Docker) |
+| `--cookies-from-browser firefox` | Send that browser's YouTube cookies for this start: when YouTube asks for a sign-in, and for age-restricted or members-only videos. `none` sends no browser's, whatever setup chose |
+| `--save-cookies-from-browser firefox` | Make that browser's YouTube cookies the default of every later start, the popup's **Start server** button included, after checking that they can be read; `none` forgets it. Exits instead of starting the server (see [YouTube sign-in](#youtube-sign-in)) |
+| `--cookies /path/cookies.txt` | Same as `--cookies-from-browser`, with an exported cookies file (use this inside Docker) |
 | `--lookahead 0` | Transcribe to the end of the video instead of stopping 15 minutes ahead |
-| `--window 60` | Longer windows are slightly more efficient, shorter ones react faster to seeking (default 40) |
+| `--window 60` | Longer windows are slightly more efficient, shorter ones react faster to seeking (default 30, faster-whisper's own chunk: a longer window decodes its tail without the initial prompt) |
 | `--max-cue-chars 26` | Characters per cue before it is split (default 30; 26 is the Netflix Japanese limit) |
 | `--max-cue-seconds 7` / `--min-cue-seconds 0.8` | Longest and shortest cue (defaults 7, Netflix's own maximum, and 0.8); shorter ones are extended or merged |
-| `--initial-prompt "こんにちは。今日は、いい天気ですね。"` | Nudges Whisper towards punctuated output |
+| `--initial-prompt ""` | Turn off the prompt that asks Whisper for punctuation. Japanese gets one by default (`はい、そうですね。今日はよろしくお願いします。それで、どう思いますか？`), because a window is decoded with nothing in front of it and an unprompted decode writes a sentence mark at about half of the sentence ends; any other text replaces it, and a language other than Japanese has none. The prompt now and then makes Whisper skip the first seconds of speech in a window; such a window is decoded once more without it and the skipped lines filled in |
 | `--language-patience 60` | Seconds of speech in another language before a video's subtitles stop. It governs YouTube's declaration as well: 0 means neither the declaration nor the speech is checked and everything is transcribed |
 | `--lyrics off` | Transcribe a window in which the speech detector hears under a second of speech with the detector as before (blank when it heard nothing). The default `auto` transcribes such a window without the detector when its audio is not silent (sung lyrics, speech over music) and Whisper hears the target language in it, under stricter gates |
+| `--sentence-ends off` | Cut and merge lines on Whisper's own punctuation alone. The default `auto` writes the sentence mark Whisper left out where a word ending in a sentence-final expression (よね, です, ます, か, or a plain form) is followed by a pause, so a run-on line breaks where the speaker ended the sentence and a mined card gets that sentence and no more |
 | `--idle-minutes 30` | Release the decoded audio of a video nobody has synced for this long |
 | `--retry-after 30` | Seconds before a failed audio fetch is retried, and the wait before a model name that failed to download or load is tried again |
 | `--js-runtime deno` | JavaScript runtime for yt-dlp: auto, node, deno, bun, or name:path |
@@ -586,6 +709,35 @@ requests from the extension alone, never from a page, so nothing served on this 
 restart the server. A model name is validated (a size alias or
 `owner/name`, never a path) and resolved through faster-whisper's own download before anything
 is loaded, so a request can never point the server at a local folder.
+
+### YouTube sign-in
+
+YouTube answers some addresses with "Sign in to confirm you're not a bot" and refuses to let
+yt-dlp download anything until the request carries a signed-in browser's cookies. The server can
+send them: setup asks once, where Firefox is installed, and
+`server\run.cmd --save-cookies-from-browser firefox` (`server/run.sh ...` on Linux/macOS;
+`nix run . -- --save-cookies-from-browser firefox` with Nix, which has no setup) sets it at any
+time. That reads Firefox's cookie store once to check that it holds YouTube cookies (only their
+names are looked at), writes `"cookies_from_browser": "firefox"` to `~/.shisu-ko/config.json` and
+exits; from the next start on, every download sends Firefox's YouTube cookies, whether the server
+was started by hand or with the popup's **Start server** button. `--save-cookies-from-browser
+none` forgets it, and `--cookies-from-browser none` leaves it out for one start.
+`run.cmd --check` (`nix run .#check`) says which browser is used.
+
+Firefox is the browser to use on Windows: Chrome and Edge keep their cookies from other programs
+there, so yt-dlp finds none and the command refuses them. The cookies are those of whatever
+account is signed in to YouTube in that browser. yt-dlp does not keep Firefox's contexts apart,
+though: the YouTube cookies of every Multi-Account Container, and those that YouTube players
+embedded in other sites keep, go into one set, so an account signed in in a container can take
+the place of the default one or mix with it. yt-dlp reads the browser's whole cookie store, every
+site's cookies, for each download, through a copy of the store's file that it writes into the
+system's temp folder and deletes after reading, and sends a site only its own: YouTube's to
+YouTube, and GitHub's to GitHub when `--allow-remote-ejs` fetches the solver script there.
+yt-dlp's authors warn that an account used this way may be rate-limited or flagged, so a
+secondary account is the careful choice. The Docker image never takes the browser from
+`config.json` (it has none to read): Docker users export a `cookies.txt` into the data folder and
+add `--cookies /data/cookies.txt` to the `command:` line. Toolbox and distrobox share your home
+folder and its Firefox, so there the saved browser is used as on the host.
 
 ## Docker
 
@@ -623,13 +775,15 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | `setup.cmd` says "Python was not found; run without arguments to install from the Microsoft Store" | Windows answers `python` with a shortcut to the Store when no Python is on the PATH, and the setup used to trust it. Since 0.10.2 the setup runs the candidates instead (`py -3`, `python`, `python3`) and takes the first Python 3.10+ that works; with an older `setup.cmd`, install Python from python.org with "Add python.exe to PATH" ticked, or turn `python.exe` off under Settings > Apps > Advanced app settings > App execution aliases. |
 | No subtitles until the toolbar icon is clicked | Firefox has not granted access to youtube.com yet. Open the popup and click **Allow on YouTube**. |
 | Nothing happens on YouTube at all | Check the switch in the popup header; Alt+Shift+S may have turned Shisu-ko off. |
+| No subtitles and no badge in the player's top left, not even "server offline" | Alt+Shift+H (or the popup's **Status badge on the video, errors too** switch) has hidden the badge; press it again. The popup's header still says whether the server is online. |
 | Badge says "subtitles are running in another tab" | One video is transcribed at a time. Click into this tab, or close the other one. |
 | Badge says "the speech is not in the subtitle language" | Either YouTube declares this video's audio to be another language, in which case it was refused before it was downloaded, or the server heard a minute of another language and stopped, in which case it starts again when the subtitle language returns. For a video that really does mix languages, or one YouTube has mislabelled, start the server with `--language-patience 0`. |
 | Badge says "No speech found in this video" | The whole video, from its start, was transcribed and nothing was heard: a silent clip, an instrumental, a song Whisper does not hear as Japanese, or, with `--lyrics off`, any song. |
-| A music video shows no subtitles | Since 0.11.3 a window the speech detector hears next to nothing in (under a second of speech) is transcribed without it when its audio is not silent and Whisper hears Japanese in it, so sung lyrics appear. A video watched before that gets its lines on the next visit: the server transcribes it again where nothing was heard (a result saved by 0.11.2) or from the start (older results); nothing needs deleting from `~/.shisu-ko/cache`. A song Whisper does not hear as Japanese stays blank, as does loud non-speech (rain, a crowd, an engine). A server started with `--lyrics off` transcribes such windows with the detector as before, so a sung one stays blank. |
+| A music video shows no subtitles | Since 0.11.3 a window the speech detector hears next to nothing in (under a second of speech) is transcribed without it when its audio is not silent and Whisper hears Japanese in it, so sung lyrics appear. A video watched before 0.12.0 gets its lines on the next visit: that release changed the shape of the cue cache, so every older result is ignored and the video is transcribed again from the start; nothing needs deleting from `~/.shisu-ko/cache`. A song Whisper does not hear as Japanese stays blank, as does loud non-speech (rain, a crowd, an engine). A server started with `--lyrics off` transcribes such windows with the detector as before, so a sung one stays blank. |
 | Badge says "Shisu-ko server offline" | Start `server\run.cmd` or `docker\up.cmd`, or click **Start server** in the popup. Check the server URL in the popup. |
-| **Start server** says "launcher not registered" | Run `server\setup.cmd` (Windows) or `bash server/setup.sh` once, or start the server by hand once: `run.cmd` / `run.sh` register the launcher with Firefox on every start. `run.cmd --check` prints "Start button launcher: registered at …" once it is. |
-| **Start server** says "Allow Shisu-ko to talk to its launcher …" | Firefox's permission prompt was declined. Click the button again and allow "Exchange messages with programs other than Firefox"; the permission is also under Add-ons and themes > Shisu-ko > Permissions and data. |
+| **Start server** says "launcher not registered" | Run `server\setup.cmd` (Windows) or `bash server/setup.sh` once, or start the server by hand once: `run.cmd` / `run.sh` register the launcher with Firefox and Chrome on every start. `run.cmd --check` prints "Start button launcher: Firefox registered at …; Chrome registered at …" once it is. The launcher is registered only for Firefox, Chrome (on Linux and macOS its stable channel; Beta, Dev and Canary keep folders of their own) and, on Linux, Chromium: in another browser with the store install (Brave, Edge, Chromium outside Linux) start the server by hand. |
+| **Start server** says "Allow Shisu-ko to talk to its launcher …" | The browser's permission prompt was declined. Click the button again and allow "Exchange messages with programs other than Firefox" (Firefox; the permission is also under Add-ons and themes > Shisu-ko > Permissions and data) or "Communicate with cooperating native applications" (Chrome). |
+| No **Start server** button in Chrome | The button is there for the [Chrome Web Store](https://chromewebstore.google.com/detail/shisu-ko/ecenifonpkaiccmmknpbllbebbfigjnm) install only: an unpacked build (`dist/chrome`, the release zip) has an id of its own, which the launcher is not registered for. Start `server\run.cmd` / `server/run.sh` by hand, or install from the store. |
 | **Start server** says "No answer from the server after 90 s" | The launch did not lead to a listening server, or the server is still downloading or loading its model: the button starts the defaults, so a first start downloads the default model unless setup already did (large-v3 is 3 GB, large-v3-turbo on a Mac about 1.6 GB), and a CPU load takes minutes. Look at the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS) before clicking again; clicking again while it loads is harmless, the launcher reports it as already starting. If the server is up but the popup still says offline, the server URL under Anki, clips and server points elsewhere. |
 | The banner or **Update** says the server cannot update itself | The server was not started by `run.cmd` / `run.sh` (Docker, Nix, `python server.py` by hand: it has no launcher to run `update.py` after the exit), was started with `--no-update` or `SHISUKO_NO_UPDATE`, or is a 0.8.0 server, which predates the button. The banner names the first of those causes whatever the actual one, because the server only reports that it cannot. Update it the way it was started: `docker compose build`, `nix run` with the new revision, or a plain restart of `run.cmd` / `run.sh`, which updates before every start. A `run.sh` that updated itself from before 0.9.0 keeps running its old loop, so its first server is refused too; restart `run.sh` once by hand (`run.cmd` reads its new loop as soon as it has updated and needs no restart). |
 | "The server restarted but still runs X; look at its window: update.py said why" | The launcher ran `update.py` but it could not update: local changes git would overwrite, a diverged branch, a detached HEAD, no network, or a release zip that could not be downloaded. Its message is in the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS); fix that and click **Update** again, or update by hand (`git pull`, or unpack the release). |
@@ -644,7 +798,8 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | Server log says it has no model left and exits with code 3 | A switch failed and the previous model could not be reloaded either (usually GPU memory). The launcher restarts the server on its `--model`; fix or clear the name in the popup. |
 | Popup says "X was not found on this computer; the preset is used" or that a font name is letters, digits, spaces, dots, hyphens and underscores | Install the font, or type its family name exactly as the operating system lists it. Quotes, commas and other punctuation are refused; in both cases the preset font applies until the name resolves. |
 | "yt-dlp needs Node.js or Deno" | Install [Node.js](https://nodejs.org/) 20+ or [Deno](https://deno.com/), then restart the server. |
-| "YouTube asks for a sign-in" | Restart with `--cookies-from-browser firefox` (native) or `--cookies /data/cookies.txt` (Docker). |
+| "YouTube asks for a sign-in" | Run `server\run.cmd --save-cookies-from-browser firefox` once (`server/run.sh` on Linux/macOS, `nix run . -- --save-cookies-from-browser firefox` with Nix), then start the server again, by hand or with **Start server** (see [YouTube sign-in](#youtube-sign-in)). In Docker, export a `cookies.txt` into the data folder and add `--cookies /data/cookies.txt`. |
+| "YouTube asks for a sign-in although the server sends firefox's YouTube cookies" | Firefox is not signed in to YouTube (or the sign-in has expired): sign in to YouTube in Firefox and play the video again. |
 | Downloads fail after a YouTube update | Update yt-dlp: `~/.shisu-ko/venv/Scripts/python -m pip install -U yt-dlp` (Windows) or the `bin/python` equivalent; or start with `--allow-remote-ejs`. |
 | "This live stream offers no audio segments (DVR may be disabled)" | The streamer turned DVR off. Nothing can be done until the stream is published as a video. |
 | "The live stream has ended" | Reload the page once YouTube shows the recording; the server starts over on the video's clock. |
@@ -653,7 +808,7 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | Subtitles fall further and further behind on a Mac, although the GPU is being used | The model is too large for the memory left over by the browser. large-v3 on an M1 Pro runs at half playback speed with one YouTube video playing, because the GPU's memory is the browser's memory. Type `large-v3-turbo` into the popup's model field; it is the default for new installs and runs at eight times playback speed with the browser open. |
 | A word is wrong that the same model got right on another machine | On a Mac, check the model first: the default there is large-v3-turbo, whose decoder is a quarter of large-v3's and which mishears about one word in twenty lines; type `large-v3` into the popup's model field if the machine can afford it. Beyond that the two backends do not always pick the same homophone (線状降水帯 came out 線上降水帯 on the GPU). Both search five beams, so there is nothing to turn on; check that the server was not started with `--beam-size 1`, and `--device cpu` gives the CPU's answer at about half the speed. |
 | Mining says "AnkiConnect denied access" | Click **Yes** in the dialog Anki shows, then mine again. |
-| Mining says the card has none of the fields | Set the image/audio field names in the popup to the fields of your note type. |
+| Mining says the card has no field "Picture" or "SentenceAudio" | Your note type names them differently; the message lists the card's own fields. Enter the right names under Anki, clips and server > Image field / Audio field in the popup (upper and lower case do not matter). |
 | No screenshot, only audio | The video is DRM-protected; the browser refuses to read its frames. |
 
 `run.cmd --check` prints diagnostics, including whether the Start button's launcher is registered;
@@ -695,13 +850,20 @@ server/
   update.py           self-update run by run.cmd/.sh, first and after the server exits with code 4
                       (POST /update): git fast-forward or newest release
   native_host.py      native-messaging host behind the popup's Start server button (stdlib only);
-                      native-host.cmd/.sh wrap it for Firefox; --register writes the host manifest
+                      native-host.cmd/.sh wrap it for Firefox and Chrome; --register writes a
+                      host manifest for each browser
   tests/              pytest suite                   tools/        cue statistics, re-transcription
 docker/               Windows wrappers for docker compose and the WSL engine installer
-docs/                 subtitle-quality.md, screenshots, the demo recording, amo/ (store listing)
+docs/                 subtitle-quality.md, screenshots, the demo recording, amo/ (the listing on
+                      addons.mozilla.org), cws/ (the Chrome Web Store: how releases get there,
+                      the key's one-time setup), dev/ (developer docs: the design of each subsystem)
+scripts/cws.mjs       asks the Chrome Web Store what it holds, uploads a release's Chrome zip and
+                      submits it for review
+.github/workflows/    cws-listing.yml takes every release to the Chrome Web Store; cws-schedule.yml
+                      runs it every three hours for a release held back behind an older review
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example, flake.nix
-sign-addon.cmd        signs the extension through addons.mozilla.org for self-distribution
-publish-addon.cmd     submits a version to the public listing on addons.mozilla.org
+sign-addon.cmd        signs a local build through addons.mozilla.org (unlisted; manual fallback)
+publish-addon.cmd     submits a release to the public listing by hand (fallback for amo-listing.yml)
 AGENTS.md             architecture notes, invariants and gotchas for contributors and coding agents
 ```
 
@@ -720,9 +882,11 @@ Checks:
 - Nix: `nix develop` gives the Python environment, `web-ext`, Node and Deno; `nix run .#tests`
   runs both test suites; `nix build .#addon` produces the extension zip.
 - Data lives in `~/.shisu-ko` (override with `SHISUKO_HOME`): `venv/`, `models/`, `cache/`,
-  `config.json` (the model chosen at setup), the instance lock `server-8790.lock` (one per port,
+  `config.json` (the model and the browser for YouTube's sign-in chosen at setup), the instance
+  lock `server-8790.lock` (one per port,
   held while a server runs), `server.log` (the output of a server the popup started,
-  Linux/macOS) and, on Windows, the launcher's host manifest `native-messaging/shisuko.json`.
+  Linux/macOS) and, on Windows, the launcher's host manifests `native-messaging/shisuko.json`
+  (Firefox) and `native-messaging/shisuko-chrome.json` (Chrome).
 
 Tests cover the pure logic on both sides, need no GPU, network or Firefox, and run in CI on
 every push and pull request via [`.github/workflows/tests.yml`](.github/workflows/tests.yml):
@@ -754,8 +918,8 @@ cache reordering that skips the cross-attention half, and the fall back to greed
 patch cannot be applied.
 `test_native_host.py` drives the native host behind the Start button: the message framing, the
 two commands and every malformed request, the launch on each platform with a recorded `Popen`,
-the instance lock shared with `server.py`, registration into a temporary home with a fake
-registry, the host over a real pipe, and the wrapper and launcher scripts.
+the instance lock shared with `server.py`, registration for every browser into a temporary home
+with a fake registry, the host over a real pipe, and the wrapper and launcher scripts.
 `test_update_endpoint.py` drives `POST /update` over a real socket: the launcher variable and
 the two no-update switches, the 409s, the answer followed by the exit with code 4 through
 `main()`, the origin rule that admits the extension and no page, and the launchers' `:update`

@@ -7,6 +7,7 @@ const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const sourceDir = join(root, "addon");
 const distDir = join(root, "dist");
 const ignored = new Set(["tests", ".DS_Store"]);
+const CHROME_MAX_SUGGESTED_KEYS = 4;
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -77,6 +78,14 @@ function chromeManifest(source) {
     for (const size of Object.keys(icons)) icons[size] = `icons/icon-${size}.png`;
   }
   manifest.icons["128"] = "icons/icon-128.png";
+  // Chrome refuses an extension whose commands suggest more than four shortcuts ("Too many
+  // shortcuts specified for 'commands'"); Firefox has no such limit. The first four in the
+  // manifest keep theirs, the rest are left for the viewer to bind at chrome://extensions/shortcuts.
+  let suggested = 0;
+  for (const command of Object.values(manifest.commands || {})) {
+    if (!command.suggested_key) continue;
+    if (++suggested > CHROME_MAX_SUGGESTED_KEYS) delete command.suggested_key;
+  }
   return manifest;
 }
 

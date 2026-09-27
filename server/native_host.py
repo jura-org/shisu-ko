@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Native-messaging host behind the popup's "Start server" button.
 
-A WebExtension cannot start a program. Firefox can hand a message to a native-messaging host
-registered on the machine, so the extension sends {"cmd": "start"} to the host named "shisuko"
-and this file starts the launcher next to it, server/run.cmd or server/run.sh. The message
-never carries a path, a program or arguments: the only thing the host can run is that
-launcher, and the only other thing it answers is whether the server is up.
+A WebExtension cannot start a program. Firefox and Chrome can hand a message to a
+native-messaging host registered on the machine, so the extension sends {"cmd": "start"} to the
+host named "shisuko" and this file starts the launcher next to it, server/run.cmd or
+server/run.sh. The message never carries a path, a program or arguments: the only thing the host
+can run is that launcher, and the only other thing it answers is whether the server is up.
 
-Protocol (Firefox's: 4-byte little-endian length, then UTF-8 JSON, one request per message,
-answered in order until stdin closes):
+Protocol (the browsers' own: 4-byte little-endian length, then UTF-8 JSON, one request per
+message, answered in order until stdin closes):
   {"cmd": "status"} -> {"ok": true, "running": bool, "version": "...", "root": "..."}
   {"cmd": "start"}  -> {"ok": true, "already": true}
                     |  {"ok": true, "already": true, "starting": true}   (launched, still loading)
@@ -21,11 +21,14 @@ server.py holds a lock file in the data directory from before the load until it 
 second "start" in that time is told "already" instead of launching a second server.
 
 The browser passes arguments of its own when it starts the host (Firefox: the manifest path
-and the extension id); they are ignored. Registration (`native_host.py --register`) writes the
-host manifest Firefox looks for, and on Windows the registry value pointing at it. setup.cmd /
-setup.sh and run.cmd / run.sh run it, so the button works once the server was set up or
-started by hand. `--unregister` takes both away again, `--status` says which it is; all quiet
-unless `--verbose`.
+and the extension id; Chrome: the extension's origin); they are ignored. Registration
+(`native_host.py --register`) writes one host manifest per browser where that browser looks for
+it, under the user's own profile (Firefox; Chrome; Chromium on Linux), and on Windows the
+registry values pointing at them. Firefox's names the add-on's id; Chrome's names the origin of
+the Chrome Web Store install, the only one whose id is fixed (an unpacked build's id comes from
+its folder's path). setup.cmd / setup.sh and run.cmd / run.sh run it, so the button works once
+the server was set up or started by hand. `--unregister` takes all of it away again, `--status`
+says which it is; all quiet unless `--verbose`.
 
 Stdlib only, on purpose: the wrapper falls back to the system Python when the venv is missing.
 """
@@ -43,7 +46,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 try:
-    import winreg  # Windows only; the registry is where Firefox looks for hosts there
+    import winreg  # Windows only; the registry is where the browsers look for hosts there
 except ImportError:  # pragma: no cover - not Windows
     winreg = None  # type: ignore[assignment]
 try:
@@ -57,6 +60,11 @@ except ImportError:  # pragma: no cover - Windows
 
 HOST_NAME = "shisuko"
 EXTENSION_ID = "shisu-ko@multysquid.github.io"
+# The Chrome Web Store install's id (popup.js has a copy, CHROME_STORE_ID). Chrome lets only the
+# origins a host manifest names reach the host, and ids differ per install everywhere else.
+CHROME_EXTENSION_ID = "ecenifonpkaiccmmknpbllbebbfigjnm"
+CHROME_ORIGIN = f"chrome-extension://{CHROME_EXTENSION_ID}/"
+FIREFOX, CHROME, CHROMIUM = "Firefox", "Chrome", "Chromium"
 DESCRIPTION = "Starts the Shisu-ko transcription server"
 ROOT = Path(__file__).resolve().parent.parent  # the checkout: server/, addon/, ...
 PORT = 8790
@@ -65,6 +73,8 @@ HEALTH_TIMEOUT = 1.5  # seconds; a server that is up answers at once
 LOCK_NAME = f"server-{PORT}.lock"  # held by server.py from before its model load until it exits
 MAX_MESSAGE_BYTES = 1024 * 1024  # a request is a few bytes; anything bigger is not ours
 REGISTRY_KEY = rf"Software\Mozilla\NativeMessagingHosts\{HOST_NAME}"
+CHROME_REGISTRY_KEY = rf"Software\Google\Chrome\NativeMessagingHosts\{HOST_NAME}"
+REGISTRY_KEYS = {FIREFOX: REGISTRY_KEY, CHROME: CHROME_REGISTRY_KEY}  # under HKEY_CURRENT_USER
 WINDOWS = sys.platform == "win32"
 
 
@@ -277,76 +287,137 @@ def wrapper_path(root: Path = ROOT, platform: str = sys.platform) -> Path:
     return root / "server" / ("native-host.cmd" if platform == "win32" else "native-host.sh")
 
 
-def manifest(wrapper: Path) -> dict:
+class RegistrationError(OSError):
+    """Some browsers could not be registered; `done` maps the ones that were to their manifests."""
+
+    def __init__(self, failures: list[str], done: dict[str, Path]):
+        super().__init__("; ".join(failures))
+        self.done = done
+
+
+def browsers(platform: str = sys.platform) -> tuple[str, ...]:
+    """The browsers the host is registered for: Chromium only on Linux, where it has a folder of
+    its own and is common; on Windows and macOS Firefox and Google Chrome."""
+    return (FIREFOX, CHROME) if platform in ("win32", "darwin") else (FIREFOX, CHROME, CHROMIUM)
+
+
+def manifest(wrapper: Path, browser: str = FIREFOX) -> dict:
+    """The host manifest for `browser`. Firefox's names the add-on's id; Chrome's (Chromium's too)
+    takes origins instead, without wildcards: the store install's, the one id that is fixed."""
+    allowed = {"allowed_extensions": [EXTENSION_ID]} if browser == FIREFOX else {"allowed_origins": [CHROME_ORIGIN]}
     return {
         "name": HOST_NAME,
         "description": DESCRIPTION,
         "path": str(wrapper),
         "type": "stdio",
-        "allowed_extensions": [EXTENSION_ID],
+        **allowed,
     }
 
 
-def manifest_path(home: Optional[Path] = None, environ=os.environ, platform: str = sys.platform) -> Path:
-    """Where Firefox looks for the host manifest on this platform (Windows: where the registry points)."""
+def config_home(home: Path, environ=os.environ) -> Path:
+    """The folder Chrome and Chromium keep their profiles in on Linux, host manifests included,
+    found as Chrome finds it (chrome_paths_linux.cc): $CHROME_CONFIG_HOME, else $XDG_CONFIG_HOME,
+    else ~/.config. A variable set but empty counts as unset."""
+    value = environ.get("CHROME_CONFIG_HOME") or environ.get("XDG_CONFIG_HOME")
+    return Path(value) if value else home / ".config"
+
+
+def manifest_path(home: Optional[Path] = None, environ=os.environ, platform: str = sys.platform,
+                  browser: str = FIREFOX) -> Path:
+    """Where `browser` looks for the host manifest on this platform (Windows: where the registry points)."""
+    name = f"{HOST_NAME}.json"
     if platform == "win32":
-        return data_dir(home, environ) / "native-messaging" / f"{HOST_NAME}.json"
+        folder = data_dir(home, environ) / "native-messaging"
+        return folder / (name if browser == FIREFOX else f"{HOST_NAME}-{browser.lower()}.json")
     home = home or user_home(environ)
     if platform == "darwin":
-        return home / "Library" / "Application Support" / "Mozilla" / "NativeMessagingHosts" / f"{HOST_NAME}.json"
-    return home / ".mozilla" / "native-messaging-hosts" / f"{HOST_NAME}.json"
+        vendor = {FIREFOX: ("Mozilla",), CHROME: ("Google", "Chrome"), CHROMIUM: ("Chromium",)}[browser]
+        return home.joinpath("Library", "Application Support", *vendor, "NativeMessagingHosts", name)
+    if browser == FIREFOX:
+        return home / ".mozilla" / "native-messaging-hosts" / name
+    profile = "google-chrome" if browser == CHROME else "chromium"
+    return config_home(home, environ) / profile / "NativeMessagingHosts" / name
 
 
-def registry_value() -> Optional[str]:
-    """The manifest path the registry names, or None when the host is not registered there."""
+def registry_key(browser: str) -> Optional[str]:
+    """The HKCU key whose default value names `browser`'s manifest, or None off Windows."""
+    return REGISTRY_KEYS.get(browser) if WINDOWS else None
+
+
+def registry_value(key: str = REGISTRY_KEY) -> Optional[str]:
+    """The manifest path the registry names under `key`, or None when the host is not registered there."""
     if winreg is None:
         return None
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REGISTRY_KEY) as key:
-            value, kind = winreg.QueryValueEx(key, "")
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as handle:
+            value, kind = winreg.QueryValueEx(handle, "")
     except OSError:
         return None
     return value if kind == winreg.REG_SZ and isinstance(value, str) else None
 
 
-def register(root: Path = ROOT, home: Optional[Path] = None, environ=os.environ) -> Path:
-    """Write the host manifest (and the registry value on Windows). Returns the manifest path."""
+def register(root: Path = ROOT, home: Optional[Path] = None, environ=os.environ) -> dict[str, Path]:
+    """Write every browser's host manifest (and its registry value on Windows).
+
+    Returns browser -> manifest path. A browser whose folder cannot be written does not keep the
+    others from the button: each is tried, then the failures raise RegistrationError together.
+    """
     wrapper = wrapper_path(root)
     if not WINDOWS and wrapper.is_file():
-        # Firefox executes the wrapper itself, so it needs its mode bit, which a zip install
+        # The browser executes the wrapper itself, so it needs its mode bit, which a zip install
         # (update.py writes every file without one) or a copy through a mode-blind tool drops.
         wrapper.chmod(wrapper.stat().st_mode | 0o111)
-    path = manifest_path(home, environ)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(manifest(wrapper), indent=2) + "\n", encoding="utf-8")
-    if WINDOWS:
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, REGISTRY_KEY) as key:
-            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, str(path))
-    return path
+    done: dict[str, Path] = {}
+    failures: list[str] = []
+    for browser in browsers():
+        path = manifest_path(home, environ, browser=browser)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(manifest(wrapper, browser), indent=2) + "\n", encoding="utf-8")
+            key = registry_key(browser)
+            if key:
+                with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as handle:
+                    winreg.SetValueEx(handle, "", 0, winreg.REG_SZ, str(path))
+        except OSError as exc:
+            failures.append(f"{browser}: {one_line(exc)}")
+            continue
+        done[browser] = path
+    if failures:
+        raise RegistrationError(failures, done)
+    return done
 
 
 def unregister(home: Optional[Path] = None, environ=os.environ) -> bool:
-    """Remove the manifest and the registry value. True when there was something to remove."""
-    path = manifest_path(home, environ)
+    """Remove every browser's manifest and registry value. True when there was something to remove."""
     removed = False
-    if path.is_file():
-        path.unlink()
-        removed = True
-    if WINDOWS:
+    failures: list[str] = []
+    for browser in browsers():
+        path = manifest_path(home, environ, browser=browser)
         try:
-            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, REGISTRY_KEY)
-            removed = True
-        except OSError:
-            pass
+            if path.is_file():
+                path.unlink()
+                removed = True
+        except OSError as exc:
+            failures.append(f"{browser}: {one_line(exc)}")
+        key = registry_key(browser)
+        if key:
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
+                removed = True
+            except OSError:
+                pass
+    if failures:
+        raise OSError("; ".join(failures))
     return removed
 
 
-def registered(home: Optional[Path] = None, environ=os.environ) -> Optional[Path]:
-    """The manifest path when Firefox would find the host from here, else None."""
-    path = manifest_path(home, environ)
-    if WINDOWS:
-        value = registry_value()
-        if not value or not Path(value).is_file():
+def registered(home: Optional[Path] = None, environ=os.environ, browser: str = FIREFOX) -> Optional[Path]:
+    """The manifest path when `browser` would find the host from here, else None."""
+    path = manifest_path(home, environ, browser=browser)
+    key = registry_key(browser)
+    if key:
+        value = registry_value(key)
+        if not value:
             return None
         path = Path(value)
     return path if path.is_file() else None
@@ -369,17 +440,43 @@ def same_file(a, b) -> bool:
 
 
 def status_text(root: Path = ROOT, home: Optional[Path] = None, environ=os.environ) -> str:
-    path = registered(home, environ)
-    if path is None:
+    """One line, per browser: where the host is registered and whether for this checkout."""
+    found: dict[str, Optional[Path]] = {}
+    unchecked: dict[str, str] = {}
+    for browser in browsers():
+        try:
+            found[browser] = registered(home, environ, browser)
+        except OSError as exc:
+            # A folder this user cannot enter (a profile left root's by a browser once started
+            # through sudo): is_file() raises EACCES there, and the others must still be reported.
+            found[browser], unchecked[browser] = None, one_line(exc)
+    if not any(found.values()) and not unchecked:
         return "not registered (run setup or start the server once)"
-    text = f"registered at {path}"
-    try:
-        target = json.loads(path.read_text(encoding="utf-8")).get("path")
-    except (OSError, ValueError, AttributeError):
-        target = None
-    if not same_file(target, str(wrapper_path(root))):
-        text += f" (points at {target}; run native_host.py --register for this checkout)"
-    return text
+    wrapper = wrapper_path(root)
+    parts = []
+    for browser, path in found.items():
+        if browser in unchecked:
+            parts.append(f"{browser} could not be checked ({unchecked[browser]})")
+            continue
+        if path is None:
+            parts.append(f"{browser} not registered (run setup or start the server once)")
+            continue
+        text = f"{browser} registered at {path}"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            target = data.get("path")
+        except (OSError, ValueError, AttributeError):
+            data = target = None
+        # same_file(), not a string compare: macOS and Windows look a path up without its case, so
+        # the very same wrapper can be registered under a spelling this checkout does not spell back.
+        if not same_file(target, str(wrapper)):
+            text += f" (points at {target}; run native_host.py --register for this checkout)"
+        elif data != {**manifest(wrapper, browser), "path": target}:
+            # Every key but the path, which same_file() has already judged: comparing that as text
+            # a second time would call this very wrapper out of date under its other spelling.
+            text += " (out of date; run native_host.py --register)"
+        parts.append(text)
+    return "; ".join(parts)
 
 
 # --- entry point -------------------------------------------------------------------------------
@@ -420,14 +517,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"Start button launcher: {status_text()}")
         return 0
     if action == "--register":
+        failed = False
         try:
-            path = register()
+            done = register()
         except Exception as exc:  # noqa: BLE001
+            # A RegistrationError still names the browsers that were registered.
+            done, failed = getattr(exc, "done", {}), True
             say(f"could not register the Start button launcher ({one_line(exc)})")
-            return 1
         if verbose:
-            print(f"registered the Start button launcher at {path}")
-        return 0
+            for browser, path in done.items():
+                print(f"registered the Start button launcher for {browser} at {path}")
+        return 1 if failed else 0
     try:
         removed = unregister()
     except Exception as exc:  # noqa: BLE001

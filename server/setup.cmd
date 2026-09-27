@@ -74,6 +74,12 @@ echo   1  large-v3  best quality, about 3 GB, wants a GPU with 4 GB or more free
 echo   2  small     about 500 MB, fine on a CPU, less accurate
 choice /c 12 /n /m "Type 1 or 2: "
 if errorlevel 3 (set "MODEL=large-v3") else if errorlevel 2 (set "MODEL=small") else (set "MODEL=large-v3")
+REM YouTube refuses some downloads ("Sign in to confirm you're not a bot") until they carry a
+REM signed-in browser's cookies. server.py asks, only where Firefox keeps a profile, and reads
+REM nothing before a yes; the answer goes to config.json, the default of every start, the
+REM popup's Start button included. No key at all (stdin closed) leaves config.json as it is.
+echo.
+"%VENV%\Scripts\python.exe" "%~dp0server.py" --setup-cookies
 echo.
 "%VENV%\Scripts\python.exe" "%~dp0server.py" --download-model %MODEL%
 if errorlevel 1 (

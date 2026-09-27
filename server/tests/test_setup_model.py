@@ -195,6 +195,22 @@ def test_a_config_model_that_is_not_a_name_is_ignored(tmp_path, value):
     assert server.parse_args([]).model == "large-v3"
 
 
+def test_the_initial_prompt_defaults_to_the_language_one(tmp_path):
+    # Whisper decodes each window with nothing in front of it, so the prompt is what asks it to
+    # punctuate. Only Japanese has one today; another language gets none, and so does "".
+    assert server.parse_args([]).initial_prompt == server.DEFAULT_PROMPTS["ja"]
+    assert server.parse_args(["--language", "en"]).initial_prompt == ""
+    assert server.parse_args(["--initial-prompt", ""]).initial_prompt == ""
+    assert server.parse_args(["--initial-prompt", "あ。"]).initial_prompt == "あ。"
+
+
+def test_the_window_default_is_one_whisper_chunk(tmp_path):
+    # faster-whisper drops the initial prompt after the first 30 s chunk of a call, so a longer
+    # window would decode its tail unprompted.
+    assert server.parse_args([]).window == 30.0
+    assert server.parse_args([]).first_window == 20.0
+
+
 def test_the_download_flag_takes_a_name_and_defaults_to_none():
     assert server.parse_args(["--download-model", "small"]).download_model == "small"
     assert server.parse_args([]).download_model is None
@@ -709,7 +725,8 @@ def stand_in_libraries(monkeypatch, tmp_path):
 
     It imports ctranslate2 (which would initialise the CUDA driver where the library is installed:
     the venv, nix run .#tests), faster_whisper and yt_dlp, and loads native_host.py to look the
-    launcher up in the registry and under ~/.shisu-ko.
+    launcher up in the registry and in the browsers' folders (under the home, and on Linux under
+    CHROME_CONFIG_HOME or XDG_CONFIG_HOME).
     """
     fake_hub(monkeypatch, tmp_path)
     monkeypatch.setitem(sys.modules, "ctranslate2", SimpleNamespace(__version__="0", get_cuda_device_count=lambda: 0))
@@ -717,8 +734,9 @@ def stand_in_libraries(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(version=version))
     monkeypatch.setitem(sys.modules, "yt_dlp.version", version)
     monkeypatch.setitem(sys.modules, "winreg", SimpleNamespace(HKEY_CURRENT_USER=0, REG_SZ=1, OpenKey=no_registry))
-    for name in ("SHISUKO_HOME", "USERPROFILE", "HOME"):
+    for name in ("SHISUKO_HOME", "USERPROFILE", "HOME", "CHROME_CONFIG_HOME", "XDG_CONFIG_HOME"):
         monkeypatch.setenv(name, str(tmp_path))
+    monkeypatch.delenv("SHISUKO_CONTAINER", raising=False)
 
 
 def test_run_check_names_the_default_model(monkeypatch, tmp_path, capsys):
@@ -729,9 +747,22 @@ def test_run_check_names_the_default_model(monkeypatch, tmp_path, capsys):
     assert "CTranslate2 0: 0 CUDA device(s)" in out and "faster-whisper 0" in out and "yt-dlp 0" in out
     assert "Start button launcher: not registered" in out
     assert "Default model: large-v3 (built-in default)" in out
-    server.write_config({"model": "small"})
+    launcher = "run.cmd" if os.name == "nt" else "run.sh"
+    if not sys.prefix.startswith("/nix/store/"):  # nix run .#tests names its own command, below
+        assert f"YouTube sign-in: none (if YouTube asks for one: {launcher} --save-cookies-from-browser firefox)" in out
+    # `nix run .#check` is this check with the Nix store's Python, which has no venv for run.sh to start.
+    monkeypatch.setattr(sys, "prefix", "/nix/store/0000-python3-3.12-env")
     server.run_check()
-    assert "Default model: small (chosen at setup)" in capsys.readouterr().out
+    assert "YouTube sign-in: none (if YouTube asks for one: nix run . -- --save-cookies-from-browser firefox)" in capsys.readouterr().out
+    monkeypatch.setenv("SHISUKO_CONTAINER", "1")
+    server.run_check()
+    assert "YouTube sign-in: none (if YouTube asks for one: a cookies.txt in the data folder and --cookies /data/cookies.txt)" in capsys.readouterr().out
+    monkeypatch.delenv("SHISUKO_CONTAINER")
+    server.write_config({"model": "small", "cookies_from_browser": "firefox"})
+    server.run_check()
+    out = capsys.readouterr().out
+    assert "Default model: small (chosen at setup)" in out
+    assert "YouTube sign-in: firefox's cookies go with every download (chosen at setup)" in out
 
 
 def test_run_check_names_the_backends_default_model(monkeypatch, tmp_path, capsys):
@@ -777,7 +808,8 @@ def test_setup_cmd_asks_then_downloads_then_says_it_is_done():
     pick = index_of(lines, lambda l: l == 'if errorlevel 3 (set "MODEL=large-v3") else if errorlevel 2 (set "MODEL=small") else (set "MODEL=large-v3")', "the pick")
     download = index_of(lines, lambda l: l == '"%VENV%\\Scripts\\python.exe" "%~dp0server.py" --download-model %MODEL%', "download")
     done = index_of(lines, lambda l: l == "echo Close this window and start run.cmd.", "the last line")
-    assert check < choice < pick < download < done
+    cookies = index_of(lines, lambda l: l == '"%VENV%\\Scripts\\python.exe" "%~dp0server.py" --setup-cookies', "--setup-cookies")
+    assert check < choice < pick < cookies < download < done
     # choice's errorlevel is the key's number, or 255 when it cannot read one (stdin closed or
     # empty), and "if errorlevel N" means N or more: 3 is tested first, so that 255 takes large-v3
     # like setup.sh's EOF fallback, then 2; the pick is the first thing after choice that looks at
@@ -808,13 +840,15 @@ def test_setup_sh_asks_then_downloads_then_says_it_is_done():
     large = text.index('1) MODEL="$BEST"; break;;')
     small = text.index("2) MODEL=small; break;;")
     done_loop = text.index("done", small)
+    # Its own line, and never the end of setup under set -e: the model download still follows.
+    cookies = text.index('\n"${VENV}/bin/python" "${HERE}/server.py" --setup-cookies || true\n')
     download = text.index('if ! "${VENV}/bin/python" "${HERE}/server.py" --download-model "$MODEL"; then')
     failed = text.index('echo "The model could not be downloaded. Check the connection and run setup.sh again,"\n'
                         '  echo "or start ./run.sh: the server then downloads $MODEL itself, without a progress bar."')
     exit_line = text.index("exit 1", failed)
     complete = text.index('echo "Setup is complete: the $MODEL model is downloaded and everything is ready."')
     last = text.index('echo "Close this window and start ./run.sh."')
-    assert check < best < loop < read < large < small < done_loop < download < failed < exit_line < complete < last
+    assert check < best < loop < read < large < small < done_loop < cookies < download < failed < exit_line < complete < last
     assert text.rstrip("\n").endswith('echo "Close this window and start ./run.sh."')
     assert "downloaded on the first start" not in text
     assert 'echo "  1  ${BEST_LINE}"' in text and "2  small" in text

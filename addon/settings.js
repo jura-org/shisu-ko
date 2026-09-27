@@ -16,6 +16,9 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   showTranscript: false,
   hideNativeCaptions: false,
   showStatus: true,
+  // The status badge in the player's top left, errors included; off (Alt+Shift+H) shows nothing.
+  // showStatus above only drops the progress messages.
+  statusBadge: true,
   // Left/Right jump to the previous/next subtitle instead of YouTube's 5 s seek.
   arrowKeysJumpCues: true,
   // subtitle style and position. The defaults reproduce the look before these settings existed.
@@ -61,4 +64,20 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   // An overbar in the colour of the word's pitch accent pattern (blue heiban, red atamadaka,
   // orange nakadaka, green odaka), read from the card's pitch accent field of the same deck.
   pitchAccent: false,
+  // The viewer's own known words, one per line: drawn as learned whatever their card says, and
+  // words that are in no deck. Alt+Shift+K adds the word under the pointer, or takes it out again.
+  knownWords: "",
+  // Particles count as known: a particle (は, に, から, です …) or a grammar word (ある, いる, する,
+  // まだ, この, こと … : GRAMMAR_WORDS in words.js) that no card, known word or name rule takes is
+  // drawn as learned, green wherever it stands. Off, a line colours its words alone,
+  // as 0.12.0 did. Off by default: a colour says what the viewer's own deck says, and no card
+  // stands behind a particle.
+  particlesKnown: false,
+  // Katakana words count as known: a katakana run that no card, known word or name rule takes is
+  // drawn as learned.
+  katakanaKnown: false,
+  // Names and Latin text in blue: a place name, a name with its suffix, or a Latin run (OK, YouTube)
+  // drawn "proper". Off by default: a colour says what the viewer's own deck says, and no card
+  // stands behind a name. Off, a name is still read whole, so no deck word is found inside it.
+  properNames: false,
 });

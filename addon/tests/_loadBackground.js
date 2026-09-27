@@ -161,7 +161,7 @@ function loadBackground(overrides = {}) {
       " globalThis.ANKI_PERMISSION_TIMEOUT_MS = ANKI_PERMISSION_TIMEOUT_MS; globalThis.ANKI_PERMISSION_RETRY_MS = ANKI_PERMISSION_RETRY_MS;" +
       " globalThis.ANKI_REPORT_MIN_CHARS = ANKI_REPORT_MIN_CHARS;" +
       " globalThis.CARD_STATUS_TTL_MS = CARD_STATUS_TTL_MS; globalThis.DECK_SEEN_KEY = DECK_SEEN_KEY;" +
-      " globalThis.DECK_NOTES_KEY = DECK_NOTES_KEY;" +
+      " globalThis.DECK_NOTES_KEY = DECK_NOTES_KEY; globalThis.DECK_NOTES_FORMAT = DECK_NOTES_FORMAT;" +
       " globalThis.ankiWatch = ankiWatch; globalThis.premined = premined;" +
       " globalThis.HOLD_TIMEOUT_MS = HOLD_TIMEOUT_MS; globalThis.FOCUS_STALE_MS = FOCUS_STALE_MS;" +
       " globalThis.syncers = syncers; globalThis.activeTabs = activeTabs;",
