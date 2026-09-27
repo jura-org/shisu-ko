@@ -161,7 +161,9 @@ for it; `amo-xpi.yml` asks `status` which: `missing` is a warning, `disabled` fa
 `server/tests/conftest.py` ends the pytest process with the session's own exit status once the
 report is written, on CI only (`CI=true`): the native libraries faster-whisper brings can abort
 the interpreter's shutdown with "terminate called without an active exception" (exit 134) after
-every test has passed, as CI's Python 3.10 did once.
+every test has passed, as CI's Python 3.10 did once. It removes the tests' temporary data
+folders first (`remove_temporary_homes()`, `build-and-test.md`), since `os._exit()` skips the
+`atexit` hook that does it otherwise.
 
 So every release has an `.xpi` on GitHub without waiting for a listing review, and its signed
 one as soon as AMO has signed it. The public
@@ -216,18 +218,30 @@ The store is then asked what it holds against that version (`node scripts/cws.mj
 - `submit`: nothing is in the way, and `cws.mjs submit` uploads the zip and submits it for review
   (`DEFAULT_PUBLISH`: the store publishes it once the review passes); a notice. A refused upload
   or publish fails the run, the schedule's too, since nothing else tells anyone, and the error
-  says to fix what the store refused in the Developer Dashboard, after which the schedule uploads
-  and submits the version again within three hours, or to submit the draft there by hand once it
-  holds the version.
+  tells the two apart by the words `scripts/cws.mjs` starts their lines with. After
+  `the upload failed` it sends the reader to the Developer Dashboard's Package tab first: if that
+  holds the version as a draft (an earlier run's publish was refused), the store refuses the same
+  version as a new upload and every later run fails the same way, so fix what the Dashboard asks
+  for and submit that draft there with Submit for review; if it does not, nothing reached the
+  store, and the schedule tries again within three hours, or a run by hand does. After
+  `publish failed` the upload went in and the store holds the version as a draft that it refuses
+  as a new upload: fix what the Dashboard asks for (the permission justifications on its Privacy
+  tab, say) and submit the draft there with Submit for review; no run of the workflow helps then.
 - `waiting`: an older version waits for its review, or is approved and staged, and the store
   reviews one submission at a time. A notice: the schedule submits this version once the store
   has published the older one or its review is cancelled; a staged one waits for someone to
-  publish it in the Dashboard (or returns to a draft after 30 days). A run by hand with
-  `cancel_review` (`gh workflow run cws-listing.yml -f cancel_review=true`) runs `submit
-  --cancel-review`, which withdraws the older submission and submits this version in its place.
-  No run cancels by itself: the older review may be nearly through, and the Dashboard allows six
-  cancellations a day. When such a run fails, the log says whether the review was cancelled
-  first: if it was, the schedule takes over; if not, run it by hand with `cancel_review` again.
+  publish it in the Dashboard (or returns to a draft after 30 days); and if the store rejects the
+  older one instead, the schedule only warns (`rejected-older`), and the version waits for a run
+  by hand from someone who has read the review, which the notice says rather than promising the
+  schedule. A run by hand with `cancel_review`
+  (`gh workflow run cws-listing.yml -f cancel_review=true`) runs `submit --cancel-review`, which
+  withdraws the older submission and submits this version in its place. No run cancels by
+  itself: the older review may be nearly through, and the Dashboard allows six cancellations a
+  day. When such a run fails, the log says whether the review was cancelled first. If it was
+  not, run it by hand with `cancel_review` again. If it was, the error reads as
+  `submit`'s: after a failed upload with no draft of the version in the Package tab the schedule
+  uploads and submits it within three hours, and after a failed publish, or with such a draft,
+  the draft is fixed and submitted in the Dashboard.
 - `staged`: this version is approved and staged, which only a Dashboard submission does; a warning
   to publish it there.
 - `rejected`: the store rejected this version; read the review in the Dashboard and release the
@@ -237,9 +251,12 @@ The store is then asked what it holds against that version (`node scripts/cws.mj
   goes up only on a person's decision: a run by hand, or the first run of this version's own
   release (`RELEASE_TAG` is `v<version>` and `RUN_ATTEMPT` is 1, both from the `workflow_run`
   event), which covers a release tagged during the older review whose run ends after the
-  rejection. That arm uploads as for `submit` and then warns to read the review; its error sends
-  the reader to a run by hand, never to the schedule. The schedule, a re-run of a release workflow
-  (for AMO's `.xpi`, say) and another tag's release only warn.
+  rejection. That arm uploads as for `submit` and then warns to read the review. Its error tells
+  a failed upload from a failed publish as `submit`'s does, with one difference: a failed upload
+  with no draft of the version in the Package tab sends the reader to a run by hand, never to the
+  schedule, which does not submit past the rejected older version; a failed publish, as
+  everywhere, to the draft in the Dashboard. The schedule, a re-run of a release workflow (for
+  AMO's `.xpi`, say) and another tag's release only warn.
 - `taken-down`: the store has taken the item down; appeal in the Dashboard, or upload and submit a
   fixed release's Chrome zip there by hand, since the workflow submits nothing while it is down.
 - anything else (`in-review`, `published`, `newer`, `cancelled`): a notice and nothing to do; a
@@ -333,7 +350,12 @@ the status and one `case` on it, whose branches are `submit`, `waiting`, `staged
 gives for its state, and each branch's shape (what it runs, and where it fails, warns or tells)
 held with the message texts left out; that `--cancel-review` appears once, inside the branch that
 asks `CANCEL_REVIEW`; that the `rejected-older` warning arm neither uploads nor exits, and that
-branch's error sends the reader to a run by hand, not to the schedule; what the messages must name
+branch's error sends the reader to a run by hand, not to the schedule; that the errors of
+`submit`, `waiting` and `rejected-older` each name `'the upload failed'` before
+`'publish failed'`, send a failed publish to the draft in the Developer Dashboard (its Privacy
+tab, Submit for review) and never to the schedule or a run by hand, send a failed upload to the
+Package tab and its draft first, and that only the `submit` and `waiting` errors promise the
+schedule within three hours for a failed upload; what the messages must name
 (the Developer Dashboard in the errors of a refused upload or publish and in the staged warning;
 in the waiting notice a staged version, the schedule's mere warning on a rejection and
 `gh workflow run cws-listing.yml -f cancel_review=true`; the appeal for a take-down); that nothing

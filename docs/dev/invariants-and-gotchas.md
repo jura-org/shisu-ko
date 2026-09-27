@@ -103,7 +103,56 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   (read through `wrappedJSObject`, Firefox only), never on `video.currentTime`, which restarts at
   an arbitrary point on every page load. Every place the content script reads or seeks the
   playhead goes through `playhead()` / `seekPlayhead()`.
-- Runtime data: see `cue-building.md`, "Runtime data and the cue cache".
+- Runtime data: see `cue-building.md`, "Runtime data and the cue cache". The experimental AMD
+  engine adds to it (`server-runtime.md`, "Where it lives"): `rocm/`, its side folder, with the
+  marker `shisuko-rocm.json` that names the CTranslate2 and ROCm versions, the Python tag and the
+  platform it was installed for; `rocm-starts`, the crash guard's count; `next-model`, the model
+  a switch with the engine on Windows restarts the server into; while `amd_setup.py` installs,
+  `rocm.new`, `rocm.old` and `cache/rocm-download`; and `config.json`'s `"engine"`, whose value
+  `"rocm"` turns the engine on and which only a `server.py --probe-gpu` that passed writes (a
+  probe drops it before it loads anything, and `amd_setup.py` drops it whenever it switches the
+  engine off). `SHISUKO_ENGINE=rocm|default` in the environment decides over `config.json`. The
+  venv's own CTranslate2 is never replaced, and the Docker image (`in_container()`) and a Python
+  from the Nix store never take the engine, even from a shared data folder.
+- The AMD engine on Windows (`rocm_on_windows()`) ends every process through `hard_exit()` or
+  `finish()`, and never frees a model. CTranslate2's ROCm build hangs there when a model is freed
+  (#2038), when the interpreter exits (#2085) and in destructors or `os._exit()` inside its DLL
+  detach (#2101); the maintainer's PC reproduced the hang with the real build on the CPU, and a
+  launcher waiting on such a process never restarts it. Both helpers flush the log handlers and
+  stdio and call `TerminateProcess`; everywhere else they are `os._exit()` and `sys.exit()` as
+  before, so the NVIDIA and CPU paths do not change. So there is no `os._exit()`, `sys.exit()`,
+  `raise SystemExit` or interpreter exit anywhere else in `server.py` (`test_rocm.py` holds by the
+  syntax tree that the two helpers hold the only exit calls, and that the script runs
+  `entry_point()`, which ends whatever still leaves `main()` through them); `load_model()` keeps
+  every model it builds there in `KEPT_MODELS`; a Ctrl+C or Ctrl+Break while a model loads ends
+  the process from a signal handler (`end_on_ctrl_c()`) instead of unwinding the frame that holds
+  it; and a model switch is a restart (`restart_for_model()`: `next-model`, exit 3, `run.cmd`
+  starts the server again), refused before its download without `run.cmd` (`restart_blocker()`).
+  Programs that only import `server.py` keep the default engine on Windows for the same reason.
+- `rocm_engine()` sets `CT2_CUDA_ALLOCATOR=cub_caching` (`setdefault`) at import time, before
+  anything imports ctranslate2, and only when the AMD engine is on: CTranslate2's default
+  allocator on Linux loses text silently or aborts on AMD cards (CTranslate2 #2090, #2021), and
+  the setting counts only before the first allocation. The NVIDIA build keeps its own allocator.
+- The AMD engine's pins (versions, URLs, sizes and SHA-256 digests of every file it installs from)
+  live only in `PINS` at the top of `server/amd_setup.py`; a digest that is not 64 hex characters
+  is refused before anything is downloaded, and every download is checked against its size and
+  digest. `amd_setup.py` is stdlib only and never imports `server.py`, so what both must agree on
+  is written in both (`ROCM_GUARD_LIMIT` / `GUARD_LIMIT`, `ROCM_LINUX_LIBRARIES` /
+  `LINUX_LIBRARIES`, `ROCM_PLATFORMS` / `platform_key()`, `python_tag()`, `gfx_target()` /
+  `gfx_name()`, the marker check of `rocm_engine_state()` / `marker_usable()`), and
+  `test_amd_setup.py` and `test_rocm.py` hold each pair equal.
+- `amd_setup.py` without `--yes` or `--probe` always exits 0, and `setup.cmd` / `setup.sh` call it
+  after the model download on a line of its own whose exit code nothing reads (`|| true` under
+  `set -e`): the setup never fails on the AMD engine. `test_setup_model.py` holds both call sites
+  and `scripts/launcher-smoke.sh` runs `setup.sh` with an `amd_setup.py` that fails.
+- The tests never touch the real `~/.shisu-ko`. `server.py` fixes every path at import, so
+  `server/tests/_serverlib.py` (`isolate_home()`) points `SHISUKO_HOME` at a fresh temporary folder
+  before the import unless the caller set one, and `conftest.py` calls it before any test module
+  is collected, so the child processes the tests start inherit it; `conftest.py` also lists the
+  real folder before the session and fails the run when it changed (`server.log` and
+  `server-<port>.lock` left out: the viewer's own server writes them). `load_server()` imports
+  `server.py` with `SHISUKO_ENGINE=default`, so an AMD engine installed on the machine never
+  changes what the tests see.
 - No absolute personal paths, no secrets and no `.env` in tracked files. `.env` is machine-specific
   and ignored; `.env.example` documents it.
 - Line endings: LF everywhere, CRLF only for `*.cmd` (`.gitattributes` enforces this).
@@ -124,8 +173,13 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   every later upload of it is refused: submit that draft in the Developer Dashboard by hand. So
   `cws-listing.yml` uploads only the release with the highest version, and a version the store
   rejected is fixed forward with the next patch version.
-- The Chrome Web Store takes one service account per publisher (Developer Dashboard, Account): the
-  one whose JSON key is the repository secret `CWS_SERVICE_ACCOUNT_JSON` (`docs/cws/README.md`).
+- The Chrome Web Store takes one service account per publisher: the one whose JSON key is the
+  repository secret `CWS_SERVICE_ACCOUNT_JSON`. It is linked in the Developer Dashboard on
+  PUBLISHER > Settings of the publisher that owns Shisu-ko, picked in the Publisher pull-down at
+  the top right, the page that also shows the Publisher ID that `CWS_PUBLISHER_ID` holds. Not
+  ACCOUNT > Profile: its "Create a new publisher" makes a second, empty publisher that links
+  nothing to Shisu-ko's, and a Google account may create one only once (`docs/cws/README.md`,
+  step 6).
 - The Developer Dashboard allows six review cancellations a day. `cws-listing.yml` withdraws a
   waiting review only when a run by hand asks for it (`cancel_review`), never by itself, and
   `cws.mjs submit --cancel-review` cancels nothing when no review waits.
@@ -161,12 +215,34 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
 - On Windows the CUDA libraries come from the `nvidia-cublas-cu12` / `nvidia-cudnn-cu12` wheels;
   `add_nvidia_dll_dirs()` must run before `ctranslate2` is imported.
 - GPU memory is often shared with games or wallpaper apps. `load_model()` reads free VRAM with
-  `nvidia-smi` and picks `int8_float16` below 4.5 GB; a driver reset shows up as a process death
-  without a traceback (Windows LiveKernelEvent 141). The launchers restart the server; exit code 2
-  means a startup error that must not be retried. Exit code 3 asks for a restart: a broken GPU
-  context, and also a failed model switch after which the previous model could not be reloaded,
-  which would leave the server running without any model. Exit code 4 (`EXIT_UPDATE`) asks the
-  launcher to run `update.py` before starting again; only `POST /update` produces it.
+  `nvidia-smi` (with the AMD engine, amdgpu's sysfs files on Linux and nothing on Windows, which
+  means `float16`) and picks `int8_float16` below 4.5 GB; a driver reset shows up as a process
+  death without a traceback (Windows LiveKernelEvent 141). The launchers restart the server; exit
+  code 2 means a startup error that must not be retried. Exit code 3 asks for a restart: a broken
+  GPU context (`gpu_context_broken()`, which knows ROCm's words too), a failed model switch after
+  which the previous model could not be reloaded, which would leave the server running without
+  any model, and with the AMD engine a model switch on Windows (a restart into `next-model`) and
+  an engine whose CTranslate2 does not load or sees no AMD GPU (the crash guard set to its limit,
+  so the restart runs on the default engine). Exit code 4 (`EXIT_UPDATE`) asks the launcher to run
+  `update.py` before starting again; only `POST /update` produces it.
+- The AMD engine (experimental, not yet tested on AMD hardware by the maintainer;
+  `server-runtime.md`, "How the AMD engine works"). CTranslate2's ROCm wheels are not on PyPI and
+  carry the PyPI wheels' file names, so pip takes them for the same distribution: they go into a
+  side folder with `pip install --target`, never into the venv, where they would replace the
+  NVIDIA build and `update.py`'s `pip install -r requirements.txt` could put that back. To
+  CTranslate2 and faster-whisper a HIP build is still `device="cuda"`. A card or driver the build
+  cannot use kills the process without a Python exception ("Memory access fault by GPU", a C++
+  terminate), so `load_model()`'s CPU fallback never sees it: hence the test in a child process
+  (`--probe-gpu`) before `config.json` turns the engine on, and the crash guard (`rocm-starts`)
+  that leaves it off after two starts that did not get a model onto the GPU. AMD's Windows runtime
+  has no rocBLAS kernels for gfx1030, so the RX 6800/6900 runs on Linux only. Linux's dynamic loader
+  reads `LD_LIBRARY_PATH` only when a process starts, so `rocm_engine()` starts the server once
+  more with `$ROCM_PATH/lib` on it (`SHISUKO_ROCM_REEXEC=1` stops a third start). A `ROCM_PATH`,
+  `HSA_OVERRIDE_GFX_VERSION` or `HIP_VISIBLE_DEVICES` exported in a terminal is not in the Start
+  button's environment: every start needs it in the login shell's profile (a user environment
+  variable on Windows). The engine runs on HIP device 0, which on a machine with an AMD
+  processor's graphics and an AMD card may be the integrated one; `HIP_VISIBLE_DEVICES` picks the
+  card.
 - AnkiConnect: send requests without a `Content-Type` header (a "simple" request needs no CORS
   preflight), call `requestPermission` first, find the newest card with `findNotes("added:1")`.
 - `data_collection_permissions` in the manifest requires `strict_min_version` 140 or later.

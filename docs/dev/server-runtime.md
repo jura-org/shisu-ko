@@ -1,6 +1,6 @@
 # Server runtime: live streams, models, the Start button, the update step
 
-The parts of the server that are not cue building. Read the matching section before changing `LiveFollower`, `switch_model_if_wanted()`, `server/native_host.py`, `server/update.py`, `POST /update` or the launchers.
+The parts of the server that are not cue building. Read the matching section before changing `LiveFollower`, `switch_model_if_wanted()`, `server/native_host.py`, `server/update.py`, `POST /update`, the launchers, the experimental AMD engine (`rocm_engine()`, `server/amd_setup.py`) or any way out of the server process (`hard_exit()`, `finish()`).
 
 ## How live streams work
 
@@ -55,8 +55,10 @@ runs while a window is being transcribed. It is a small state machine over `want
    whose memory is mostly held by other programs two models rarely fit side by side, then
    `load_model(args, wanted, path=dir)`. Success: `model_name = wanted`, error cleared,
    `restart_sessions()`. Failure: `model_error`, `wanted_model = previous`, `reload_model(previous)`;
-   if even that fails the server has no model left and calls `os._exit(3)` so the launcher
-   restarts it on `--model`.
+   if even that fails the server has no model left and calls `hard_exit(3)` (`os._exit(3)`
+   except with the AMD engine on Windows) so the launcher restarts it on `--model`. With the AMD
+   engine on Windows this step is a restart instead, since freeing a model can hang there: see
+   "A model switch on Windows" under "How the AMD engine works".
 
 `restart_session()` clears cues, covered ranges, speech and `seg_next`, gives the session a new
 token (the client drops everything on a token change, `dropCues()` in `content.js`), sets a
@@ -94,10 +96,14 @@ a model or takes the instance lock). The download runs on a daemon thread that t
 joins in half-second steps (`wait_for_thread()`): a Ctrl+C inside `snapshot_download()` would
 only surface once its thread pool has finished streaming the current file (model.bin, minutes),
 and Windows delivers the signal only between waits. The interrupt prints one line and ends the
-process with `os._exit(2)`, since a normal exit would wait for that pool's worker at shutdown;
+process with `hard_exit(2)`, since a normal exit would wait for that pool's worker at shutdown;
 the partial blob stays as `.incomplete` and the next download resumes it. `setup.cmd`'s pick
 line tests `errorlevel 3` before 2: `choice` answers 255 when it cannot read a key (stdin closed
-or empty), and that takes large-v3 like `setup.sh`'s EOF fallback.
+or empty), and that takes large-v3 like `setup.sh`'s EOF fallback. After the model download
+both setups run `amd_setup.py` without arguments, on a line of its own whose exit code nothing
+reads (`|| true` in `setup.sh`, under `set -e`), before "Setup is complete": it offers the
+experimental AMD engine where it finds an AMD card and never fails the setup (see "How the AMD
+engine works").
 
 ### YouTube's sign-in
 
@@ -285,9 +291,10 @@ The launchers also run the update on demand, for the popup's Update button: `run
 `App.exit_code = EXIT_UPDATE` (4), answers, and `stop_server_later()` calls `httpd.shutdown()`
 from a helper thread after `SHUTDOWN_DELAY` (0.5 s, so the answer leaves the socket;
 `shutdown()` blocks until `serve_forever()` returns, so the handler thread cannot call it),
-and `main()` runs `server_close()` and then `sys.exit(app.exit_code)`; every worker is a daemon
-thread, so nothing waits for a window. Exit code 4 means "run `update.py`, then start again":
-`run.cmd` has `if "%CODE%"=="4" goto update` after the 0 and 2 branches, `run.sh`
+and `main()` runs `server_close()` and then `finish(app.exit_code)` (`sys.exit()` except with the
+AMD engine on Windows); every worker is a daemon thread, so nothing waits for a window. Exit
+code 4 means "run `update.py`, then start again": `run.cmd` has `if "%CODE%"=="4" goto update`
+after the 0 and 2 branches, `run.sh`
 `[ "$code" -eq 4 ] && { update.py "$@"; native_host.py --register; continue; }` (the register
 call restores the wrapper's mode bits, which the zip update drops). Codes 0 and 2 keep their
 meaning, every other code keeps the 5 s restart.
@@ -307,3 +314,413 @@ otherwise refuse the button. `run.sh` cannot help itself the same way (bash pars
 inside `main()` before the loop and the server's 409 text names "an older launcher that has not
 been restarted since it was updated"; a restart by hand fixes it. 
 Tests: `server/tests/test_update.py` drives the real git against a bare repository in a temp directory and feeds a locally built zip in place of the GitHub download; `server/tests/test_update_endpoint.py` covers the endpoint over a real socket and the launcher texts.
+
+`update.py` never touches the AMD engine's side folder (below), and no launcher runs
+`amd_setup.py`: an engine installed from older pins keeps running until setup, or
+`amd_setup.py` run by hand, offers to update it.
+
+## How the AMD engine works (experimental)
+
+Experimental, and not yet tested on AMD hardware by the maintainer, whose PC has an NVIDIA GPU;
+CI has no GPU at all. CTranslate2 has published a build for AMD GPUs (ROCm/HIP) since 4.7, and
+faster-whisper 1.2.1 uses it unchanged: to both a HIP build is still `device="cuda"`, and
+`ctranslate2.get_cuda_device_count()` counts HIP devices, so `cuda_available()`, `--device auto`
+and `load_model()` work as they are, and `/health` reports device `cuda`. The build is not on
+PyPI but in zips of wheels on CTranslate2's GitHub release, whose wheels carry the PyPI wheels'
+file names, so pip takes them for the same distribution. On Windows it needs AMD's runtime
+wheels `rocm_sdk_core` and `rocm_sdk_libraries_custom` from repo.radeon.com as well; they install
+as the folders `_rocm_sdk_core` and `_rocm_sdk_libraries_custom`, and CTranslate2's own
+`__init__` adds their `bin` folders as DLL directories relative to its package folder, so the
+three must sit side by side. On Linux it links against a system ROCm 7.2.x (`libamdhip64.so.7`,
+`libhipblas.so.3` and `libhiprand.so.1` under `$ROCM_PATH/lib`, default `/opt/rocm`; OpenMP under
+`lib/llvm/lib`) and needs `/dev/kfd` and a user in the render and video groups. The NVIDIA and
+CPU paths stay exactly as they were: while the engine is off, nothing below changes a call.
+
+What it runs on. The build is compiled for gfx1030, gfx1100, gfx1101, gfx1102, gfx1150, gfx1151,
+gfx1200 and gfx1201, and AMD's Windows runtime carries rocBLAS kernels for all of them but
+gfx1030. On Windows that is the Radeon RX 7000 and RX 9000, the Radeon PRO W7000 and W9000 and
+the Radeon AI PRO R9700, the Radeon 890M/880M of Ryzen AI 300 and the Radeon 8060S/8050S/8040S of
+Ryzen AI Max, with AMD Software: Adrenalin Edition 26.2.2 or newer; not the RX 6000 or anything
+older. On Linux it is the same cards plus the RX 6800/6900 (gfx1030), on a ROCm 7.2.x the user
+installs (https://rocm.docs.amd.com/projects/install-on-linux/en/docs-7.2.4/, which also has the
+user join the render and video groups; AMD's unversioned `latest` guide now installs ROCm 10.0 and
+asks that ROCm 7.2.4 or older be uninstalled first); the RX 6600/6700 (gfx1032/gfx1031) is no
+target and runs, if at all, at the user's own risk with `HSA_OVERRIDE_GFX_VERSION=10.3.0`. It is
+never used in the Docker image or under Nix: the image holds `server.py` alone and runs no setup,
+a Nix install has no setup and no venv, and `rocm_engine()` refuses both even when a data folder
+shared with a native setup, or `SHISUKO_ENGINE=rocm`, asks for the engine. No build exists for
+macOS, ARM or a 32-bit Python.
+
+### Where it lives
+
+The side folder `ROCM_DIR`, `~/.shisu-ko/rocm`, holds CTranslate2's package and, on Windows,
+AMD's two runtime packages beside it, installed by `amd_setup.py` with `pip install --target`,
+plus the marker `shisuko-rocm.json` (`ROCM_MANIFEST`), a JSON object with `ctranslate2` (4.8.2),
+`rocm` (7.2.1 on Windows, `system` on Linux), `python` (the wheel's tag, such as `cp312`),
+`platform` (`win_amd64` or `linux_x86_64`) and `installed` (the time, ISO 8601). The venv's own
+CTranslate2 is never touched: an
+install into the venv would replace the NVIDIA build, and `update.py`'s `pip install -r
+requirements.txt` could later put the PyPI build back over it. `config.json`'s `"engine": "rocm"`
+turns the engine on. Only a `server.py --probe-gpu` that passed writes it; a probe drops it
+before it loads anything, and `amd_setup.py` drops it after a failed or cancelled test, before
+it replaces an installed engine, when it finds no AMD GPU, and on `--remove`.
+`SHISUKO_ENGINE=rocm|default` in the environment decides over `config.json`: the probe runs with
+`rocm`, before `config.json` says anything, and `default` keeps a start on the default engine
+whatever `config.json` says. Beside the side folder live `rocm-starts` (the crash guard),
+`next-model` (the model a switch on Windows restarts into) and, while `amd_setup.py` installs,
+`rocm.new`, `rocm.old` and `cache/rocm-download`.
+
+### The import: rocm_engine()
+
+`rocm_engine()` runs at import time, right after `NVIDIA_DIRS = add_nvidia_dll_dirs()` and before
+anything imports ctranslate2 or faster_whisper, never raises, and sets `ROCM_ACTIVE` and
+`ROCM_REASON` (why it is on or off, for `--check` and the start's log, `rocm_engine_line()`). The
+decision is `rocm_engine_state()`, pure, in this order: never in the Docker image
+(`in_container()`: the image may share the data folder with the native setup, side folder and
+crash guard included, but has no ROCm runtime, and a failed start there would count against the
+native server's guard); never under a Python from the Nix store (`sys.base_prefix` under
+`/nix/store/`: the manylinux build needs the system's libraries, which Nix's loader does not
+search, and `nix run .` shares `~/.shisu-ko` too); `SHISUKO_ENGINE`, else `config.json`; a
+`ctranslate2/__init__.py` in the side folder; a marker whose `python` is
+this interpreter's tag (`python_tag()`: `cp312`, or `cp314t` for a free-threaded build, so a venv
+rebuilt on a newer Python falls back to its own CTranslate2) and whose `platform` is this one's
+(`platform_key()`, `ROCM_PLATFORMS`); and a crash guard below its limit. `rocm_engine()` adds
+three rules. A program that only imports `server.py` (the tools in `server/tools`,
+`script=False`) keeps the default engine on Windows in every case, since it ends through the
+interpreter's own exit (see "Ending a process on Windows"), and on Linux unless
+`SHISUKO_ENGINE=rocm` asks for the engine and `$ROCM_PATH/lib` is on its `LD_LIBRARY_PATH`
+already. On Linux the engine stays off while `missing_rocm_libraries()` finds one of
+`ROCM_LINUX_LIBRARIES` missing from `$ROCM_PATH/lib` (ROCm removed or upgraded past 7.2, or a
+`ROCM_PATH` exported in the setup's terminal that the Start button's environment lacks); every
+start would otherwise fail on the import, and the server takes the engine again by itself once
+the libraries are back. And a folder that cannot be read leaves the engine off with the error as
+its reason.
+
+Turned on, `rocm_engine()` puts `ROCM_DIR` first on `sys.path` and sets
+`CT2_CUDA_ALLOCATOR=cub_caching` (`setdefault`, so an operator's own value stays) before the first
+allocation: CTranslate2's default allocator on Linux loses text silently or aborts on AMD cards
+(CTranslate2 #2090, up to 95 % of the text gone on gfx1030 and gfx1151; #2021, a crash on
+gfx1201), and the Windows HIP build uses cub_caching already, so there it changes nothing. On
+Linux the dynamic loader reads `LD_LIBRARY_PATH` only when a process starts, and not every ROCm
+install put its libraries in `ld.so.conf`: when `$ROCM_PATH/lib` is not on it,
+`rocm_library_path()` puts `$ROCM_PATH/lib` and `$ROCM_PATH/lib/llvm/lib` in front, and the
+server starts itself once more with `os.execv(sys.executable, [sys.executable] + sys.argv)`,
+stdout and stderr flushed first. `SHISUKO_ROCM_REEXEC=1` in the environment is the guard that
+keeps the second process from starting a third; an `execv` that fails puts both variables back
+and leaves the engine off. `run.sh` stays as it is, and `amd_setup.py` removes
+`SHISUKO_ROCM_REEXEC` from its probe's environment, since the guard belongs to the process that
+set it.
+
+### The crash guard and the hand-over
+
+A card or driver the build cannot use can end the process where no except clause sees it (a C++
+terminate, "Memory access fault by GPU"): `load_model()`'s CPU fallback never runs, and the
+launcher would restart the server into the same crash for ever. `rocm-starts`
+(`ROCM_STARTS_PATH`, an integer; a missing or garbled file is 0) counts the starts on the AMD
+engine since the last one that got a model onto the GPU. `main()` counts one
+(`count_rocm_start()`) after the instance lock and before the model loads, unless `--device cpu`
+keeps the start off the GPU; `load_model()` deletes the file once a model is loaded and warmed up
+with device `cuda` (`clear_rocm_starts()`); `start_app()` takes the count back
+(`uncount_rocm_start()`, one step down, so that an earlier crash stays counted) when
+the load ends on a Python exception other than an `ImportError`, which is the model's fault (a
+typo, no connection, a missing file) and ends the start on code 2, which the launcher does not
+retry; a Ctrl+C during the load takes it back too. At `ROCM_GUARD_LIMIT` (2) the next start keeps
+the engine off (`rocm_guard_allows()`), with a reason that names `server/amd_setup.py --probe`.
+`--probe-gpu` ignores the guard, since it is how a guarded engine gets tested again, and a passed
+probe deletes the file. The one-shot commands (`--check`, `--download-model`,
+`--save-cookies-from-browser`, `--setup-cookies`, `--probe-gpu`) never count, and a guard file
+that cannot be written costs a warning, not the start.
+
+`rocm_engine()` sees files, not whether they load. So before the model loads,
+`check_rocm_import(device)` imports ctranslate2 and looks up `get_cuda_device_count` (the
+compiled part: without it the package imports empty), and for a start that is to use the GPU it
+asks for the device count. A build that does not load (a system ROCm removed or upgraded past
+7.2, a DLL missing from the side folder, on Linux a `ROCM_PATH` the Start button's environment
+lacks) or that sees no AMD GPU (a card removed or replaced, a driver it cannot use: on Windows
+Adrenalin 26.2.2 or newer, on Linux `/dev/kfd` and the render and video groups) goes to
+`leave_rocm()`. It logs one error line that says what happens next and names
+`server/amd_setup.py --probe` and `--remove`, sets the guard to its limit and ends with
+`hard_exit(3)`: `run.cmd` / `run.sh` start the server again five seconds later, on the default
+engine; a start by hand just ends, and its next start uses the default engine. Without the
+hand-over a failed import would end the start on code 2, which the launcher never retries,
+without a word about the engine, and `--device auto` without an AMD GPU would run the model on
+the processor while an NVIDIA GPU beside it stayed idle. A guard that cannot be written ends the
+start on code 2 after all, since a restart would meet the same failure for ever.
+
+### Ending a process on Windows
+
+CTranslate2's ROCm build on Windows can hang the way out of a process: freeing a model (#2038),
+the interpreter's exit (#2085), and destructors or even `os._exit()` inside the runtime's DLL
+detach, even on the CPU (#2101). All three were open on 2026-09-26, and what helped there is
+`TerminateProcess`, which runs no DLL detach. The maintainer's PC reproduced it with the real
+4.8.2 Windows build running `tiny` on the CPU (no AMD GPU): after the model had run, a plain
+interpreter exit hung until it was killed after 90 s and `del model; gc.collect()` hung for
+60 s, while the same script on the default engine ended normally; a passing probe that returned,
+and so freed its model, hung the same way and would have been stopped by `amd_setup.py` after
+fifteen minutes and switched off. A launcher waiting on such a process never restarts it. So
+where `rocm_on_windows()` holds (`ROCM_ACTIVE` and `os.name == "nt"`), no exit is left to Python:
+
+- `hard_exit(code)` stands for every `os._exit()` (a broken GPU context, a lost model, the
+  hand-over and a switch's restart, code 3; the interrupted setup download, code 2; the probe's
+  end) and `finish(code)` for every `sys.exit()` of `main()`, `--check` and the normal end
+  (`finish(None)`, 0 there) included. Everywhere else they are `os._exit()` and `sys.exit()` (or
+  a plain return) as before; with the engine on Windows both call `terminate_process()`:
+  `flush_output()` (every logging handler, stdout, stderr), then
+  `kernel32.TerminateProcess(GetCurrentProcess(), code)` through ctypes, with its argument types
+  set.
+- `KEPT_MODELS` holds every model `load_model()` builds there, appended before the warm-up, so
+  no model is ever freed: not by a function that returns (`run_probe_gpu()`), nor by the
+  traceback of a failed warm-up. The process ends through `TerminateProcess` anyway, and its
+  model switch is a restart, so nothing is held longer than before.
+- `end_on_ctrl_c()`: a model load is one long call into CTranslate2, and a Ctrl+C during it
+  raises `KeyboardInterrupt` the moment the call returns, before faster-whisper has stored the
+  model, whose unwinding would free it. While the server's model loads, and for the whole probe,
+  Ctrl+C and Ctrl+Break get a handler that ends the process instead: `finish(0)` for the server,
+  which takes this start's count back first, `hard_exit(1)` for the probe. Ctrl+Break gets it too
+  because Python leaves that signal to the console, whose default handler ends the process
+  through `ExitProcess` and its DLL detach. Once the model is loaded both get Python's own handler
+  back, so a Ctrl+C or Ctrl+Break while serving raises `KeyboardInterrupt`, `server_close()` runs
+  and `finish()` ends the process.
+- `entry_point()` is what `python server.py` runs: `main()` inside a catch that passes
+  `SystemExit` on and, with the engine on Windows, ends a `KeyboardInterrupt` with `finish(0)` and
+  any other exception with its traceback in the log and `finish(1)`, the code after which
+  `run.cmd` restarts the server; everywhere else it re-raises, as before. Two such exceptions are
+  stopped earlier as well: `--port` refuses a number outside 1-65535 while the arguments are read
+  (`port_number()`), before the instance lock and the model load, since the listening socket
+  raises `OverflowError` for one, not `OSError`; and the listen step catches `OverflowError`,
+  `ValueError` and `TypeError` (a host that cannot be encoded) beside `OSError`, ending on 2.
+
+`test_rocm.py` holds by the syntax tree that the `os._exit()` in `hard_exit()` and the
+`sys.exit()` in `finish()` are `server.py`'s only exit calls (no other `os._exit()`, `sys.exit()`,
+`raise SystemExit`, `exit()`, `quit()`, `os.abort()` or `os.kill()`) and that the script runs
+`entry_point()`. The maintainer has no AMD card to see such a hang, so these tests are the only
+guard: a new way out of the server goes through `hard_exit()` or `finish()`.
+
+### A model switch on Windows
+
+Since freeing a model can hang there, `switch_model_if_wanted()` never frees one with the engine
+on Windows. The download runs as for every switch; once `prepare_model()` has the files,
+`restart_for_model()` writes the canonical name to `next-model` (`NEXT_MODEL_PATH`), logs that a
+switch restarts the server with the AMD engine on Windows, and ends with `hard_exit(3)`. `run.cmd`
+says that the server stopped unexpectedly and starts it again five seconds later; the popup's
+Start button runs `run.cmd`, so a server it started switches the same way. `start_app()` then
+takes the file (`take_next_model()`: the file goes first, whatever it holds, so that a model that
+kills the process while it loads is not asked for by every restart after it; a name that cannot
+be removed with it is not used, and only a name `valid_model_name()` accepts counts, in its
+canonical form), fetches its files through `download_model_files()` as a switch does, so that a
+client's name never reaches `WhisperModel()` as a folder, and passes it to
+`App(model_name=...)`. A model that does not load gives way to `--model`, and the failure is
+reported as a failed switch is. Only `run.cmd`'s loop starts the server again, which it says
+through `SHISUKO_LAUNCHER`: under a plain `python server.py` the switch is refused before its
+download (`restart_blocker()`, whose `model_error` names `run.cmd`, the Start button and
+`--model`), and unlike for `update_blocker()` `--no-update` does not matter, since `run.cmd`
+restarts after code 3 all the same. A `next-model` that cannot be written is a failed switch that
+keeps the old model. Everywhere else the switch stays in the process, exactly as above.
+
+### The probe: server.py --probe-gpu
+
+`--probe-gpu` (hidden from `--help`) is how `amd_setup.py` tests the engine, in a process of its
+own, so that a card that aborts the process takes the probe down and nothing else. It runs before
+the instance lock, like `--download-model`, with `SHISUKO_ENGINE=rocm` from its caller, and
+refuses (exit 1, `ROCM_REASON` printed) when the engine is not active. `run_probe_gpu()` first
+takes `"engine"` out of `config.json`, so that a probe that dies on the way leaves the default
+engine; imports ctranslate2 and prints its version, its folder and the device count; fails for a
+CTranslate2 that is not the side folder's and for 0 devices ("no AMD GPU visible to the ROCm
+engine"); loads `--model` (the model chosen at setup, else large-v3) with device `cuda` through
+`load_model(strict=True)`, which has no CPU fallback and raises on a failed warm-up; and requires
+device `cuda`. Then `write_config({"engine": "rocm"})`, the crash guard deleted, and `AMD GPU
+engine works: <the gfx target on Linux, else "device 0"> (<compute type>)`, exit 0. Every failure
+prints `The AMD GPU engine does not work here: <reason>` and exits 1. Every exit is `hard_exit()`
+after `flush_output()`, and a Ctrl+C or Ctrl+Break prints `The AMD GPU engine test was
+cancelled` and ends with `hard_exit(1)`.
+
+### What else changes with the engine on
+
+`gpu_memory_mb()` asks amdgpu instead of nvidia-smi: on Linux `amd_vram_mb()` reads
+`device/mem_info_vram_total` and `mem_info_vram_used` (bytes) of the AMD card (`device/vendor`
+`0x1002`) with the most memory under `/sys/class/drm`, since an AMD processor's own graphics shows
+up beside a card with a small carve-out of system memory; on Windows there is nothing to ask, so
+`float16`, as on an NVIDIA machine without nvidia-smi. `load_model()`'s line says "on the AMD GPU
+(ROCm)". `gpu_context_broken()`, the old `cuda`/`cudnn`/`cublas` test after a failed decode
+widened, also knows `hipblas`, `rocblas`, `hiprand`, `hip error` at the start of a word,
+`hsa_status` and `memory access fault`, in any case; the build mostly still says "CUDA failed",
+and every message that broke the context before still does. `run_check()` adds one line
+(`rocm_engine_line()`): `GPU engine: AMD ROCm (CTranslate2 <version> from <folder>)` in use,
+`GPU engine: AMD ROCm installed but not used: <reason>` for a side folder it leaves off, and
+nothing without one, which is every NVIDIA and CPU machine; with the engine on and 0 devices it
+says that a start hands over to the default engine, in place of the CPU-fallback hint. A start
+logs the same engine line. `--device` keeps its three choices.
+
+### server/amd_setup.py
+
+```
+amd_setup.py            look for a card, ask, download, install, test (what setup runs)
+amd_setup.py --yes      the same without the question
+amd_setup.py --probe    test the installed engine again
+amd_setup.py --status   what is detected, installed and switched on; no network
+amd_setup.py --remove   switch the engine off and delete the side folder
+```
+
+Stdlib only, like `update.py` and `native_host.py`, and it never imports `server.py`: it must run
+when the server's own requirements are broken, so it runs `server.py` only as the probe's child.
+It runs with the venv's Python (a venv under `~/.shisu-ko` and another interpreter: it names the
+venv's and stops, since the engine is built for one Python and the probe needs the venv's
+packages). Exit codes: without `--yes` or `--probe` always 0, whatever happened, so the setups
+can never fail on it. `--yes` exits 1 unless the engine ends up working (installed, tested and
+switched on, or found so already): no AMD GPU, adapters that could not be listed, a platform
+without a build, what Linux still lacks, the wrong Python, too little space, a failed download,
+install or test, or a Ctrl+C. `--probe` exits 1 without an installed engine, under the wrong
+Python, or when the test fails. `--status` and `--remove` exit 0. An unexpected error is one line,
+`the AMD engine setup failed (...)`.
+
+Detection. On Windows, Windows PowerShell by its full path under `%SystemRoot%` (not whatever
+`powershell` the folder or `PATH` holds first) runs `Get-CimInstance Win32_VideoController |
+Select-Object Name, PNPDeviceID | ConvertTo-Json -Compress` with a 20 s timeout; an adapter is AMD
+when its PNPDeviceID holds `VEN_1002`, NVIDIA for `VEN_10DE`. A query that cannot start, takes too
+long or fails without output is not "no AMD GPU" (`DetectError`): it says so, changes nothing
+and names the command to look again later. An AMD card that Windows shows as "Microsoft Basic
+Display Adapter" has lost its driver, and the line names Adrenalin 26.2.2 or newer. On Linux the
+cards are `/sys/class/drm/card*/device/vendor`, and the GPU targets come from
+`/sys/class/kfd/kfd/topology/nodes/*/properties` (`gfx_target_version`, major*10000 +
+minor*100 + stepping, the last two in hex: 110000 is gfx1100, 90010 gfx90a; 0 is a processor's
+node); an AMD card without a kfd target is an unknown one. An NVIDIA GPU is looked for on the PCI
+bus (display controllers, class `0x03`, under `/sys/bus/pci/devices`), which lists a headless one
+too, and not by nvidia-smi, which stays installed after the card is gone. Anywhere else nothing is
+looked for, and nothing is said.
+
+`classify()`: on Linux by the gfx target (the eight targets are supported, gfx1031/1032 are
+unsupported with the override named, anything else unsupported); on Windows by the adapter's
+name, the supported patterns first (RX 7xxx, RX 9xxx, PRO W7xxx/W9xxx, R9700, 890M/880M,
+8060S/8050S/8040S), then the unsupported ones (RX 6xxx and 5xxx, PRO W6xxx and W5xxx, Vega,
+780M/760M/740M, 680M/660M/610M, 860M/840M/820M and older Radeons), for which AMD's Windows runtime
+has no kernels; any other name is unknown and offered with a warning. `best_card()` offers the
+engine for the first supported card, else the first unknown one.
+
+The flow (`setup()`), in this order. No AMD card: one line, and an engine that is switched on is
+switched off (left on, every start would load it, see no AMD GPU and hand over; a `--probe` that
+passes turns it on again). An installed engine that is switched on: on Linux what the system
+still lacks, on Windows a card that lost its driver, a crash guard at its limit (`--yes` tests it
+again), else "installed and switched on" (beside an NVIDIA GPU, with `--remove` named as the way
+back to it) and, for one from older pins, that `--yes` updates it. An AMD card next to an NVIDIA
+GPU: not offered without `--yes`, since the server uses the NVIDIA GPU. An unsupported card: one
+line (for an RX 6600/6700 on Linux, how to try it with the override in the login shell's
+profile), unless `--yes` installs it anyway. On Linux without `/dev/kfd`, access to it, or ROCm
+7.2's libraries: what is missing, AMD's install guide and `sudo usermod -aG render,video "$USER"`.
+The wrong Python: the command to run with the venv's. An engine from these pins that is switched
+off: without `--yes` a line naming `--probe`, with it the test. Otherwise the offer: the card,
+"This is experimental, not yet tested on AMD hardware by the maintainer.", a warning for an
+unknown card, and what it takes (Windows: Adrenalin 26.2.2 or newer and a download of about
+1.27 GB, CTranslate2 4.8.2 and AMD's ROCm 7.2.1 runtime, about 3.90 GB once installed and about
+5.31 GB free while it installs; Linux: a download of about 284 MB), then `Download the AMD engine?
+[y/N]`, or `Update the AMD engine? [y/N]` over an engine from older pins. Only y or yes is a yes;
+an EOF, which an unattended `setup.sh` gives, is a no.
+
+The install (`install()`). `space_shortfall()` checks the room before the first download: on the
+data folder's disk the pinned files not downloaded yet, the wheel taken out of its zip (counted
+as the zip, which is larger) and the installed size, which `PINS` has for Windows only (measured:
+3,902,512,758 bytes); on the temporary folder's disk the installed size. Folders on one disk share
+its room, where the largest need counts, and a disk whose free space cannot be read counts as
+having room. Every pin is checked to be 64 hex characters before the first byte is fetched, so a
+pin that was never filled in can never pass. Each file is downloaded with urllib into
+`cache/rocm-download` through a `.part` file (a 60 s socket timeout, a line every 5 %, one more
+try after a failed download); more bytes than pinned, a SHA-256 that does not match (the file is
+deleted) and a full disk fail at once and are never tried again, and a file already there with
+its pinned size and digest is used as it is. The wheel for this Python's tag and platform comes
+out of the zip (a free-threaded Python takes the `cp314t` wheel, never the GIL build of the same
+version; no wheel for this Python fails with its tag named). Before pip the room is checked again
+for what the wheels unpack to, plus 1 %, on the side folder's disk and the temporary folder's,
+since pip unpacks into the temporary folder first and a disk that fills halfway leaves only its
+exit code. `pip install --no-deps --no-index --disable-pip-version-check --target rocm.new
+<wheels>`, with the running Python, installs the files as they are and nothing else from
+anywhere; a failed pip, or no `ctranslate2/__init__.py` afterwards, removes `rocm.new`. Then the
+marker, `config.json`'s engine switched off (a new engine is untested until its probe passes),
+`replace_dir()` (the old `rocm` moves to `rocm.old`, `rocm.new` takes its place, `rocm.old` is
+removed last and moves back when the new folder cannot take the place), and the downloads
+deleted. A failed install keeps the finished downloads for the next try and says which engine
+the server keeps using.
+
+The probe's child (`run_probe()`): `[sys.executable, server.py, --probe-gpu]` with
+`SHISUKO_ENGINE=rocm`, `SHISUKO_HOME` passed on and `PYTHONUNBUFFERED=1`, its output shown as it
+comes, for up to 900 s, waited for in one-second steps so that a Ctrl+C reaches `amd_setup.py`
+on Windows, and killed at the deadline. A pass says "The server will use the AMD GPU from its
+next start." and, on Linux, which variables of this shell every start needs too
+(`HSA_OVERRIDE_GFX_VERSION`, or a `ROCM_PATH` without which the libraries are not found), with the
+line for the login shell's profile (`~/.bash_profile`, `~/.zprofile` or `~/.profile`), since the
+Start button starts the server without this shell's environment. A failure (a crash named by its
+signal on Linux or its NTSTATUS on Windows) switches the engine off, since a child that crashed
+could not, and says that the server keeps using the NVIDIA GPU or the CPU, and that `--probe`
+tests again and `--remove` deletes the engine and frees its space; the side folder stays, so a
+new test needs no download. A cancelled test switches the engine off too, unless the child
+passed just before.
+
+`--status` prints the Python and platform, each AMD card with its verdict, whether an NVIDIA GPU
+is there, on Linux what is missing, the marker, whether the engine is switched on and by what,
+the crash guard, and whether the next start uses the engine as the files have it (`server.py
+--check` says what the server itself decides). `--remove` switches the engine off in
+`config.json` first, so that no start reaches for a folder that is half gone, then deletes
+`rocm`, `rocm.new`, `rocm.old`, `cache/rocm-download` and `rocm-starts`; a folder still in use (a
+running server on Windows) is named with the advice to stop the server and run `--remove` again.
+Every line that names a command (`rerun_line()`) gives the running interpreter bare where Command
+Prompt and PowerShell both take it, else in PowerShell's `& "..."` form with a note for Command
+Prompt, and in two forms for a path that holds `$` or a backtick.
+
+The pins live in one place, `PINS` at the top of `amd_setup.py`: CTranslate2 4.8.2's
+`rocm-python-wheels-Windows.zip` (137,538,158 bytes) and `rocm-python-wheels-Linux.zip`
+(284,315,912 bytes) with the SHA-256 digests GitHub lists for the release assets, and AMD's
+`rocm_sdk_core` and `rocm_sdk_libraries_custom` 7.2.1 wheels for Windows (644,793,492 and
+489,964,648 bytes), whose digests the maintainer pinned from a download, since AMD publishes
+none. Nothing else holds a pin. What the two files must agree on is written in both, since
+`amd_setup.py` never imports `server.py`: `ROCM_GUARD_LIMIT` and `GUARD_LIMIT`,
+`ROCM_LINUX_LIBRARIES` and `LINUX_LIBRARIES`, `ROCM_PLATFORMS` and `platform_key()`, the two
+`python_tag()`, `gfx_target()` and `gfx_name()`, and the marker check of `rocm_engine_state()` and
+`marker_usable()`; `test_amd_setup.py` and `test_rocm.py` hold each pair equal. New pins change
+`test_pins_hold_the_published_and_the_maintainers_digests` and the sizes the offer announces; an
+engine installed from older pins keeps running (the server asks only for its Python and
+platform) until setup offers the update.
+
+### When it fails, and the way back
+
+- At setup: a failed download, install or test is a few lines that end in the engine the server
+  keeps using and the commands to try again, and the setup goes on to "Setup is complete".
+- At a start: the log's `GPU engine:` line says whether the engine is in use and why not. A
+  build that does not load or sees no AMD GPU: one error line, the guard at its limit, exit 3,
+  and the launcher's next start runs on the default engine. A crash: after the second start
+  that did not get a model onto the GPU, the server leaves the engine off (`GPU engine: AMD ROCm
+  installed but not used: the AMD engine did not get a model onto the AMD GPU at its last start
+  ...`), and `--check` and `amd_setup.py --status` say the same.
+- Back to the default engine: `amd_setup.py --remove` switches the engine off and deletes it
+  (beside an NVIDIA GPU that is the way back to the NVIDIA GPU), and `SHISUKO_ENGINE=default`
+  keeps it off for the starts that have the variable. `amd_setup.py --probe` tests a guarded or
+  switched-off engine again and switches it on when it passes.
+
+Known limitations: the engine runs on the first AMD GPU, HIP device 0 (`load_model()` passes no
+device index), so on a machine with an AMD processor's graphics and an AMD card the model may
+land on the integrated one; `HIP_VISIBLE_DEVICES` set to the card's index where every start sees
+it (a user environment variable on Windows, the login shell's profile on Linux, and in the shell
+that runs `--probe`) leaves only the card in sight, while `gpu_memory_mb()` reads the card with
+the most memory either way. On Windows a model switch needs `run.cmd` or the Start button. Linux
+needs a system ROCm 7.2.x, whose libraries the wheel is linked against. The installed size on
+Linux is not measured, so its first space check counts the download and the wheel taken out of
+it, and only the check before pip counts what it unpacks to.
+
+### How it was tested
+
+Nothing has run on AMD hardware yet. `server/tests/test_rocm.py` covers `server.py`'s side and
+`server/tests/test_amd_setup.py` `amd_setup.py`, with stand-ins for everything that would reach a
+GPU, the network, PowerShell, pip or the real data folder (`build-and-test.md`, "Server tests");
+they run in CI on Linux and Windows without a GPU. `test_setup_model.py` and
+`scripts/launcher-smoke.sh` hold where the setups call `amd_setup.py`, and that one that fails
+does not stop `setup.sh`. On the maintainer's Windows PC (an NVIDIA RTX 4070 Laptop GPU, no AMD
+GPU) the real Windows engine was installed from the pinned files into a scratch data folder
+(through `install()` directly, since setup finds no AMD GPU there; pip took about 30 s, and the
+side folder held 2,433 files and 3.90 GB; its longest path is 163 characters inside the data
+folder, which leaves room under Windows' 260).
+`--check` named the engine and saw 0 devices where the venv's build sees the NVIDIA GPU, so the
+ROCm build was the one imported, with `CT2_CUDA_ALLOCATOR=cub_caching` set; `--probe` failed
+cleanly with "no AMD GPU visible to the ROCm engine" and left `config.json` without the engine.
+Server starts on it ran `tiny` on the processor, since the build saw no GPU, and ended on Ctrl+C
+and Ctrl+Break without hanging; such a start is what the hand-over of `check_rocm_import()` now
+prevents. `--remove` then deleted the folder and the guard. The exit hang above was reproduced
+on the same PC, and the passing probe was simulated (a device count of 1, `tiny` on the CPU
+reported as `cuda`): as first written it hung after `AMD GPU engine works`, and with
+`KEPT_MODELS` it ended through `hard_exit(0)` after about 10 s.
