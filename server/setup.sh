@@ -27,10 +27,13 @@ fi
 # again: on the Apple GPU that is large-v3-turbo, which fits beside the browser, and elsewhere
 # large-v3. An EOF on read (stdin closed or redirected from an empty file) takes it instead of
 # asking forever; `yes 1 | bash setup.sh` picks it the same way.
-BEST="$("${VENV}/bin/python" "${HERE}/server.py" --default-model 2>/dev/null || echo large-v3)"
+BEST="$("${VENV}/bin/python" "${HERE}/server.py" --default-model 2>/dev/null || true)"
 case "$BEST" in
   large-v3-turbo) BEST_LINE="large-v3-turbo  Whisper: about 1.6 GB, the one that keeps up on an Apple GPU beside a browser";;
-  *)              BEST_LINE="large-v3        Whisper: best quality, about 3 GB, wants a GPU with 4 GB or more free";;
+  # Anything else, an answer of nothing included: a server.py too old for --default-model prints
+  # nothing and exits 0, so `|| echo` would never fire and choice 1 would download the empty name.
+  *)              BEST=large-v3
+                  BEST_LINE="large-v3        Whisper: best quality, about 3 GB, wants a GPU with 4 GB or more free";;
 esac
 echo
 echo "Which model should the server use? (the popup can switch later)"

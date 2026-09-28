@@ -44,6 +44,18 @@ FAKE_MODELS = {"small": "Systran/faster-whisper-small", "large-v3": "Systran/fas
 GUARD_WORDS = "did not get a model onto the AMD GPU at its last start"
 
 
+@pytest.fixture(autouse=True)
+def not_an_apple_machine(monkeypatch):
+    """Every machine in this file is an NVIDIA, AMD or CPU one, never a Mac.
+
+    resolve_device("auto") asks mlx_available() first, so on an Apple Silicon machine with
+    mlx-whisper installed --device auto answers "mlx", no WhisperModel is built and the engine
+    these tests describe never runs. Pinning it keeps the file from passing or failing by where
+    it runs.
+    """
+    monkeypatch.setattr(server, "mlx_available", lambda: False)
+
+
 def forbidden_terminate(code):
     pytest.fail(f"the real TerminateProcess was reached (code {code})")
 

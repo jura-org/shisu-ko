@@ -3856,14 +3856,19 @@ def mlx_available() -> bool:
 
 
 def resolve_device(device: str) -> str:
-    """Turn --device auto into the backend that will actually run: an NVIDIA GPU, else Apple's, else the CPU."""
+    """Turn --device auto into the backend that will actually run: Apple's GPU, else an NVIDIA one, else the CPU.
+
+    Apple's is asked first, and the order costs nothing: mlx_available() is false off darwin, and no
+    Apple Silicon machine has a CUDA device, so the two can never both answer yes. It buys two
+    things. A Mac never imports ctranslate2 to be told what it already knows, and
+    "mlx_available()" becomes a faithful answer to "will the device be mlx", which
+    default_model_for() needs at parse time, where the CUDA probe must not run (see there).
+    """
     if device != "auto":
         return device
-    if cuda_available():
-        return "cuda"
     if mlx_available():
         return "mlx"
-    return "cpu"
+    return "cuda" if cuda_available() else "cpu"
 
 
 def mlx_repo_for(name: str) -> str:
@@ -4961,13 +4966,14 @@ def configured_model():
 def default_model_for(device: str = "auto") -> str:
     """The built-in --model for the backend that will run it; see MLX_DEFAULT_MODEL for why it differs.
 
-    It asks only whether this is the Apple GPU, never resolve_device(): cuda and cpu answer with the
-    same model, so the CUDA probe would buy nothing, and parse_args() calls this. A probe there
-    imports ctranslate2 before the AMD engine's crash guard has counted the start
-    (count_rocm_start(), then check_rocm_import()), which is the one import that guard exists to
-    survive.
+    It asks mlx_available() rather than resolve_device(), and the two cannot disagree: resolve_device()
+    answers mlx for exactly the machines that function accepts. The reason not to call it is that
+    parse_args() calls this, and resolve_device() would reach cuda_available() off darwin, importing
+    ctranslate2 before the AMD engine's crash guard has counted the start (count_rocm_start(), then
+    check_rocm_import()) — the one import that guard exists to survive. cuda and cpu answer with the
+    same model anyway, so the probe would buy nothing.
     """
-    apple = device == "mlx" or (device == "auto" and sys.platform == "darwin" and mlx_available())
+    apple = device == "mlx" or (device == "auto" and mlx_available())
     return MLX_DEFAULT_MODEL if apple else DEFAULT_MODEL
 
 

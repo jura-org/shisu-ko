@@ -242,13 +242,19 @@ SEGMENT_RESULT = {
 
 # --------------------------------------------------------------------------- picking the backend
 
-def test_auto_prefers_cuda_then_the_apple_gpu_then_the_cpu(monkeypatch):
-    monkeypatch.setattr(server, "cuda_available", lambda: True)
+def test_auto_prefers_the_apple_gpu_then_cuda_then_the_cpu(monkeypatch):
+    # Apple's GPU is asked first, and the order costs nothing: mlx_available() is false off darwin,
+    # and no Apple Silicon machine has a CUDA device, so the two can never both answer yes. It keeps
+    # a Mac from importing ctranslate2 to be told what it already knows, and makes mlx_available() a
+    # faithful answer to "will the device be mlx", which default_model_for() needs at parse time,
+    # where the CUDA probe must not run (it would precede the AMD engine's crash guard).
+    monkeypatch.setattr(server, "cuda_available", lambda: pytest.fail("CUDA was probed although MLX answered"))
     monkeypatch.setattr(server, "mlx_available", lambda: True)
-    assert server.resolve_device("auto") == "cuda"  # an NVIDIA GPU is the fastest of the three
-    monkeypatch.setattr(server, "cuda_available", lambda: False)
     assert server.resolve_device("auto") == "mlx"
     monkeypatch.setattr(server, "mlx_available", lambda: False)
+    monkeypatch.setattr(server, "cuda_available", lambda: True)
+    assert server.resolve_device("auto") == "cuda"
+    monkeypatch.setattr(server, "cuda_available", lambda: False)
     assert server.resolve_device("auto") == "cpu"
 
 

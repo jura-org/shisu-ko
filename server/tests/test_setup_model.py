@@ -232,24 +232,25 @@ def test_the_apple_gpu_default_is_the_turbo_model(monkeypatch):
 
 def test_every_other_backend_keeps_large_v3(monkeypatch):
     # The autouse fixture's machine has neither GPU; a CUDA card has memory of its own, so nothing
-    # there is gained by the smaller model.
+    # there is gained by the smaller model. resolve_device() asks Apple's GPU first, which costs
+    # nothing: mlx_available() is false off darwin, and no Apple Silicon machine has a CUDA device,
+    # so the two can never both answer yes.
     assert server.default_model_for() == server.DEFAULT_MODEL == "large-v3"
     monkeypatch.setattr(server, "cuda_available", lambda: True)
     assert server.resolve_device("auto") == "cuda"
     assert server.default_model_for() == "large-v3"
 
 
-def test_the_default_model_asks_only_whether_this_is_the_apple_gpu(monkeypatch):
-    # resolve_device() prefers CUDA to MLX, but default_model_for() must not ask it: cuda and cpu
-    # answer with the same model, and parse_args() calls this, where importing ctranslate2 for the
-    # CUDA probe would run before the AMD engine's crash guard has counted the start
-    # (count_rocm_start(), then check_rocm_import()) — the one import that guard exists to survive.
+def test_the_default_model_never_probes_cuda(monkeypatch):
+    # parse_args() calls default_model_for(), and a CUDA probe there imports ctranslate2 before the
+    # AMD engine's crash guard has counted the start (count_rocm_start(), then check_rocm_import()) —
+    # the one import that guard exists to survive. cuda and cpu answer with the same model anyway.
     monkeypatch.setattr(server, "cuda_available", lambda: pytest.fail("the CUDA probe ran at parse time"))
     monkeypatch.setattr(server, "mlx_available", lambda: True)
-    monkeypatch.setattr(server.sys, "platform", "darwin")
     assert server.default_model_for() == server.MLX_DEFAULT_MODEL == "large-v3-turbo"
-    monkeypatch.setattr(server.sys, "platform", "linux")
-    assert server.default_model_for() == "large-v3"  # no Apple GPU off darwin, whatever MLX answers
+    assert server.resolve_device("auto") == "mlx"  # and the two agree without either asking CUDA
+    monkeypatch.setattr(server, "mlx_available", lambda: False)
+    assert server.default_model_for("cpu") == server.default_model_for("cuda") == "large-v3"
 
 
 def test_a_named_device_decides_the_default_model_in_both_directions(monkeypatch):
@@ -945,7 +946,7 @@ def test_setup_scripts_offer_the_same_four_models():
 
 def test_setup_sh_asks_the_server_for_the_first_choice():
     text = sh_text()
-    assert 'BEST="$("${VENV}/bin/python" "${HERE}/server.py" --default-model 2>/dev/null || echo large-v3)"' in text
+    assert 'BEST="$("${VENV}/bin/python" "${HERE}/server.py" --default-model 2>/dev/null || true)"' in text
     assert "1) MODEL=large-v3" not in text, "option 1 is the answer, not a second copy of the rule"
     assert 'echo "  1  ${BEST_LINE}"' in text and '1) MODEL="$BEST"; break;;' in text
     assert "2) MODEL=small; break;;" in text, "the second choice is the small CPU model, as before"
@@ -957,7 +958,8 @@ def test_setup_sh_labels_both_answers_the_server_can_give():
     # promising large-v3 while $BEST said something else.
     text = sh_text()
     assert f'{server.MLX_DEFAULT_MODEL}) BEST_LINE="{server.MLX_DEFAULT_MODEL}  ' in text
-    assert f'*)              BEST_LINE="{server.DEFAULT_MODEL}' in text
+    assert f'*)              BEST={server.DEFAULT_MODEL}\n' in text, "the fallback names the model it offers"
+    assert f'BEST_LINE="{server.DEFAULT_MODEL}' in text
     assert "an Apple GPU beside a browser" in text, "why the smaller model is the one offered there"
 
 
@@ -1008,11 +1010,13 @@ def test_the_menus_first_entry_is_whatever_the_server_answered(tmp_path):
 
 
 @pytest.mark.skipif(BASH is None, reason="the shell block needs bash; setup.sh never runs on Windows")
-@pytest.mark.parametrize("stub", [dict(code=1), dict(python=False)])
+@pytest.mark.parametrize("stub", [dict(code=1), dict(python=False), dict(answer=None, code=0)])
 def test_a_server_that_cannot_answer_leaves_setup_on_large_v3(tmp_path, stub):
     # set -euo pipefail would end the whole script on a non-zero exit, and a missing venv python is
     # a 127 of the same kind: a broken install must still offer a model rather than stop at a line
-    # nobody will read the reason for (stderr goes to /dev/null).
+    # nobody will read the reason for (stderr goes to /dev/null). The third stub answers nothing and
+    # exits 0, which is what a server.py from before --default-model does: `|| echo` never fires
+    # there, so the fallback has to name the model itself or choice 1 downloads the empty name.
     best, line = run_best_block(tmp_path, **stub)
     assert best == "large-v3" and line.startswith("large-v3        Whisper: best quality")
 
