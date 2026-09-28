@@ -1,7 +1,9 @@
 @echo off
 setlocal
 REM One-time setup: creates an isolated Python environment under %USERPROFILE%\.shisu-ko
-REM and installs faster-whisper, yt-dlp and the CUDA runtime libraries.
+REM and installs faster-whisper, yt-dlp and the CUDA runtime libraries, and PyTorch through
+REM kitsune_setup.py when a Kitsune model is picked; where it finds an AMD graphics card,
+REM amd_setup.py offers the experimental AMD engine as well.
 
 set "ROOT=%USERPROFILE%\.shisu-ko"
 set "VENV=%ROOT%\venv"
@@ -63,17 +65,33 @@ echo Environment check:
 
 REM The model the server starts with, downloaded now so the first start is not the wait; the
 REM popup can switch to another one later. The check above said whether there is a CUDA
-REM device. choice waits for one of the two keys, so a wrong key is impossible, and its
+REM device. choice waits for one of the four keys, so a wrong key is impossible, and its
 REM errorlevel is the number of the key, or 255 when it cannot read one (stdin closed or
 REM empty: an unattended run). "if errorlevel N" means N or more, so the one line below tests
-REM 255 first and takes large-v3, as setup.sh does at an EOF, then 2; it stays one line, right
-REM after choice, since a set inside an if-block resets errorlevel to 0 for any test after it.
+REM 255 first and takes large-v3, as setup.sh does at an EOF, then 4, 3 and 2; it stays one
+REM line, right after choice, since a set inside an if-block resets errorlevel to 0 for any
+REM test after it.
 echo.
-echo Which Whisper model should the server use? (the popup can switch later)
-echo   1  large-v3  best quality, about 3 GB, wants a GPU with 4 GB or more free
-echo   2  small     about 500 MB, fine on a CPU, less accurate
-choice /c 12 /n /m "Type 1 or 2: "
-if errorlevel 3 (set "MODEL=large-v3") else if errorlevel 2 (set "MODEL=small") else (set "MODEL=large-v3")
+echo Which model should the server use? (the popup can switch later)
+echo   1  large-v3      Whisper: best quality, about 3 GB, wants a GPU with 4 GB or more free
+echo   2  small         Whisper: about 500 MB, fine on a CPU, less accurate
+echo   3  kitsune-0.6b  Kitsune-Transcribe: Japanese only, about 1.2 GB, plus PyTorch (about 3 GB)
+echo   4  kitsune-0.1b  Kitsune-Transcribe: Japanese only, about 200 MB, plus PyTorch, fine on a CPU
+choice /c 1234 /n /m "Type 1, 2, 3 or 4: "
+if errorlevel 5 (set "MODEL=large-v3") else if errorlevel 4 (set "MODEL=kitsune-0.1b") else if errorlevel 3 (set "MODEL=kitsune-0.6b") else if errorlevel 2 (set "MODEL=small") else (set "MODEL=large-v3")
+REM A Kitsune model runs on PyTorch, which kitsune_setup.py installs before the model downloads:
+REM the CUDA build where it finds an NVIDIA GPU, else the CPU build. Whisper needs none of it.
+REM The test is true when MODEL loses something by taking "kitsune-" out of it.
+if not "%MODEL:kitsune-=%"=="%MODEL%" (
+  echo.
+  "%VENV%\Scripts\python.exe" "%~dp0kitsune_setup.py"
+  if errorlevel 1 (
+    echo PyTorch could not be installed for the Kitsune model. Check the connection and run
+    echo setup.cmd again, or pick a Whisper model.
+    pause
+    exit /b 1
+  )
+)
 REM YouTube refuses some downloads ("Sign in to confirm you're not a bot") until they carry a
 REM signed-in browser's cookies. server.py asks, only where Firefox keeps a profile, and reads
 REM nothing before a yes; the answer goes to config.json, the default of every start, the
@@ -88,6 +106,12 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+REM An AMD graphics card can run the server through CTranslate2's ROCm build (experimental).
+REM amd_setup.py looks for one, asks before it downloads anything and says what went wrong, if
+REM anything did. Its errorlevel is not looked at: the setup that has just succeeded must not
+REM end on it.
+echo.
+"%VENV%\Scripts\python.exe" "%~dp0amd_setup.py"
 echo.
 echo Setup is complete: the %MODEL% model is downloaded and everything is ready.
 echo Close this window and start run.cmd.

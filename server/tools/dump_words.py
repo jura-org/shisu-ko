@@ -106,8 +106,9 @@ def main(argv=None) -> int:
     print(f"[{args.video_id}] {total:.0f}s decoded; dumping {args.start:.0f}-{end:.0f}s", flush=True)
 
     # Through load_model(), so the dump comes from the backend the server would have used here:
-    # CTranslate2, or MLX on an Apple GPU, where a WhisperModel() of our own would decode on the
-    # CPU instead and the words would not be the ones the server writes.
+    # CTranslate2, MLX on an Apple GPU, or Kitsune on PyTorch, which load_model() dispatches by
+    # name. A WhisperModel() of our own would decode on the CPU of a Mac instead, and the words
+    # would not be the ones the server writes.
     model, device, compute = server.load_model(args)
     lyrics_args = worker_args(args)
     # sung_in_target() lives on the transcriber and asks the App's model; the App's own worker
@@ -123,16 +124,9 @@ def main(argv=None) -> int:
         # The same decision and the same call Transcriber.process() makes, so the dump is what the
         # server would have seen: a window it would take the lyrics path on is decoded without the
         # detector, and the record says so.
-        lyrics = (server.wants_lyrics(lyrics_args, chunk, speech, start, stop)
+        lyrics = (getattr(model, "sings", True) and server.wants_lyrics(lyrics_args, chunk, speech, start, stop)
                   and worker.sung_in_target(stub, chunk, start, stop))
-        vad = {"vad_filter": False} if lyrics else {"vad_filter": True, "vad_parameters": server.vad_parameters()}
-        options = dict(
-            language=args.language, task="transcribe", beam_size=args.beam_size,
-            word_timestamps=True, condition_on_previous_text=False,
-            initial_prompt=None if lyrics else (args.initial_prompt or None),
-            temperature=[0.0, 0.2, 0.4, 0.6], no_speech_threshold=0.6, log_prob_threshold=-1.0,
-            compression_ratio_threshold=2.4, hallucination_silence_threshold=2.0, **vad,
-        )
+        options = server.transcribe_options(lyrics_args, model, lyrics)
         segments, _info = model.transcribe(chunk, **options)
         segments, skipped, spliced = list(segments), 0.0, 0
         if not lyrics:

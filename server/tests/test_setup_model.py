@@ -232,12 +232,24 @@ def test_the_apple_gpu_default_is_the_turbo_model(monkeypatch):
 
 def test_every_other_backend_keeps_large_v3(monkeypatch):
     # The autouse fixture's machine has neither GPU; a CUDA card has memory of its own, so nothing
-    # there is gained by the smaller model, and CUDA wins over MLX when a machine offers both.
+    # there is gained by the smaller model.
     assert server.default_model_for() == server.DEFAULT_MODEL == "large-v3"
     monkeypatch.setattr(server, "cuda_available", lambda: True)
-    monkeypatch.setattr(server, "mlx_available", lambda: True)
     assert server.resolve_device("auto") == "cuda"
     assert server.default_model_for() == "large-v3"
+
+
+def test_the_default_model_asks_only_whether_this_is_the_apple_gpu(monkeypatch):
+    # resolve_device() prefers CUDA to MLX, but default_model_for() must not ask it: cuda and cpu
+    # answer with the same model, and parse_args() calls this, where importing ctranslate2 for the
+    # CUDA probe would run before the AMD engine's crash guard has counted the start
+    # (count_rocm_start(), then check_rocm_import()) — the one import that guard exists to survive.
+    monkeypatch.setattr(server, "cuda_available", lambda: pytest.fail("the CUDA probe ran at parse time"))
+    monkeypatch.setattr(server, "mlx_available", lambda: True)
+    monkeypatch.setattr(server.sys, "platform", "darwin")
+    assert server.default_model_for() == server.MLX_DEFAULT_MODEL == "large-v3-turbo"
+    monkeypatch.setattr(server.sys, "platform", "linux")
+    assert server.default_model_for() == "large-v3"  # no Apple GPU off darwin, whatever MLX answers
 
 
 def test_a_named_device_decides_the_default_model_in_both_directions(monkeypatch):
@@ -340,7 +352,7 @@ def test_default_model_loads_nothing_and_takes_no_lock(monkeypatch, tmp_path, ca
     # from the lock, the load and the socket; Untouchable does it from the first import.
     monkeypatch.setitem(sys.modules, "faster_whisper", Untouchable("faster_whisper"))
     monkeypatch.setitem(sys.modules, "huggingface_hub", Untouchable("huggingface_hub"))
-    monkeypatch.setattr(server, "run_check", lambda: pytest.fail("the check ran"))
+    monkeypatch.setattr(server, "run_check", lambda *a: pytest.fail("the check ran"))
     monkeypatch.setattr(server, "run_download_model", lambda *a, **k: pytest.fail("a download started"))
     assert run_main_quietly(monkeypatch, "--default-model") == 0
     assert capsys.readouterr().out == "large-v3\n"
@@ -349,7 +361,7 @@ def test_default_model_loads_nothing_and_takes_no_lock(monkeypatch, tmp_path, ca
 def test_default_model_is_answered_before_the_check_and_the_download(monkeypatch, tmp_path, capsys):
     # main() looks at it first, so a caller that passes it beside anything else still gets one
     # parsable line rather than the check's twenty or a three-gigabyte download.
-    monkeypatch.setattr(server, "run_check", lambda: pytest.fail("the check ran"))
+    monkeypatch.setattr(server, "run_check", lambda *a: pytest.fail("the check ran"))
     monkeypatch.setattr(server, "run_download_model", lambda *a, **k: pytest.fail("a download started"))
     assert run_main_quietly(monkeypatch, "--default-model", "--check", "--download-model", "small") == 0
     assert capsys.readouterr().out == "large-v3\n"
@@ -804,16 +816,31 @@ def index_of(lines, predicate, what):
 def test_setup_cmd_asks_then_downloads_then_says_it_is_done():
     lines = cmd_lines()
     check = index_of(lines, lambda l: l.endswith('"%~dp0server.py" --check'), "--check")
-    choice = index_of(lines, lambda l: l == 'choice /c 12 /n /m "Type 1 or 2: "', "choice")
-    pick = index_of(lines, lambda l: l == 'if errorlevel 3 (set "MODEL=large-v3") else if errorlevel 2 (set "MODEL=small") else (set "MODEL=large-v3")', "the pick")
+    choice = index_of(lines, lambda l: l == 'choice /c 1234 /n /m "Type 1, 2, 3 or 4: "', "choice")
+    pick = index_of(lines, lambda l: l == ('if errorlevel 5 (set "MODEL=large-v3") else if errorlevel 4 (set "MODEL=kitsune-0.1b") '
+                                           'else if errorlevel 3 (set "MODEL=kitsune-0.6b") else if errorlevel 2 (set "MODEL=small") '
+                                           'else (set "MODEL=large-v3")'), "the pick")
+    kitsune = index_of(lines, lambda l: l == '  "%VENV%\\Scripts\\python.exe" "%~dp0kitsune_setup.py"', "kitsune_setup.py")
     download = index_of(lines, lambda l: l == '"%VENV%\\Scripts\\python.exe" "%~dp0server.py" --download-model %MODEL%', "download")
     done = index_of(lines, lambda l: l == "echo Close this window and start run.cmd.", "the last line")
     cookies = index_of(lines, lambda l: l == '"%VENV%\\Scripts\\python.exe" "%~dp0server.py" --setup-cookies', "--setup-cookies")
-    assert check < choice < pick < cookies < download < done
+    amd = index_of(lines, lambda l: "amd_setup.py" in l and not l.startswith("REM"), "amd_setup.py")
+    assert check < choice < pick < kitsune < cookies < download < amd < done
     # choice's errorlevel is the key's number, or 255 when it cannot read one (stdin closed or
-    # empty), and "if errorlevel N" means N or more: 3 is tested first, so that 255 takes large-v3
-    # like setup.sh's EOF fallback, then 2; the pick is the first thing after choice that looks at
-    # errorlevel (a set inside an if-block resets it to 0).
+    # empty), and "if errorlevel N" means N or more: 5 is tested first, so that 255 takes large-v3
+    # like setup.sh's EOF fallback, then 4, 3 and 2; the pick is the first thing after choice that
+    # looks at errorlevel (a set inside an if-block resets it to 0).
+    # PyTorch is installed only for a Kitsune model, before its download, and a failure ends setup.
+    assert lines[kitsune - 2] == 'if not "%MODEL:kitsune-=%"=="%MODEL%" ('
+    assert lines[kitsune + 1:kitsune + 8] == [
+        "  if errorlevel 1 (",
+        "    echo PyTorch could not be installed for the Kitsune model. Check the connection and run",
+        "    echo setup.cmd again, or pick a Whisper model.",
+        "    pause",
+        "    exit /b 1",
+        "  )",
+        ")",
+    ]
     assert pick == choice + 1
     errorlevel_tests = [i for i, l in enumerate(lines) if l.startswith("if errorlevel") and i > choice]
     assert errorlevel_tests[0] == pick
@@ -828,6 +855,18 @@ def test_setup_cmd_asks_then_downloads_then_says_it_is_done():
     assert [l for l in lines[done + 1:] if l] == ["pause"]
     assert not any("downloaded on the first start" in l for l in lines)
     assert any("1  large-v3" in l for l in lines) and any("2  small" in l for l in lines)
+    # The AMD engine's offer runs once the model is there, with the venv's Python and nothing on
+    # its command line, on a line of its own after the download's failure block has closed: only
+    # comments and blank echoes lie between them, so no if-block holds it. Nothing after it reads
+    # its errorlevel or leaves early, so neither a no nor a failure there can end the setup short
+    # of "Setup is complete".
+    assert lines[amd] == '"%VENV%\\Scripts\\python.exe" "%~dp0amd_setup.py"'
+    closed = failed + 5
+    assert lines[closed] == ")" and closed < amd
+    assert all(l.startswith("REM ") or l == "echo." for l in lines[closed + 1:amd])
+    assert lines[amd + 1:done - 1] == ["echo."]
+    after = [l.lower() for l in lines[amd + 1:]]
+    assert not any("errorlevel" in l or "exit" in l or "goto" in l for l in after)
 
 
 def test_setup_sh_asks_then_downloads_then_says_it_is_done():
@@ -836,37 +875,68 @@ def test_setup_sh_asks_then_downloads_then_says_it_is_done():
     check = text.index('"${HERE}/server.py" --check')
     best = text.index('BEST="$(')
     loop = text.index("while :; do")
-    read = text.index('read -r -p "Type 1 or 2: " pick || pick=1')
+    read = text.index('read -r -p "Type 1, 2, 3 or 4: " pick || pick=1')
     large = text.index('1) MODEL="$BEST"; break;;')
     small = text.index("2) MODEL=small; break;;")
-    done_loop = text.index("done", small)
+    kit6 = text.index("3) MODEL=kitsune-0.6b; break;;")
+    kit1 = text.index("4) MODEL=kitsune-0.1b; break;;")
+    done_loop = text.index("done", kit1)
+    # PyTorch only for a Kitsune model, before its download; a failure ends setup.
+    kitsune = text.index('  kitsune-*)\n    echo\n    if ! "${VENV}/bin/python" "${HERE}/kitsune_setup.py"; then\n'
+                         '      echo "PyTorch could not be installed for the Kitsune model. Check the connection and run"\n'
+                         '      echo "setup.sh again, or pick a Whisper model."\n      exit 1\n    fi;;\nesac\n')
     # Its own line, and never the end of setup under set -e: the model download still follows.
     cookies = text.index('\n"${VENV}/bin/python" "${HERE}/server.py" --setup-cookies || true\n')
     download = text.index('if ! "${VENV}/bin/python" "${HERE}/server.py" --download-model "$MODEL"; then')
     failed = text.index('echo "The model could not be downloaded. Check the connection and run setup.sh again,"\n'
                         '  echo "or start ./run.sh: the server then downloads $MODEL itself, without a progress bar."')
     exit_line = text.index("exit 1", failed)
+    closed = text.index("\nfi\n", exit_line)
+    # The AMD engine's offer: its own line, after the download's if-block has closed, and `|| true`
+    # so that under set -e neither a failure nor a crash in it ends the setup before its last lines.
+    amd_call = '\n"${VENV}/bin/python" "${HERE}/amd_setup.py" || true\n'
+    amd = text.index(amd_call)
+    calls = [l for l in text.splitlines() if "amd_setup.py" in l and not l.startswith("#")]
+    assert calls == [amd_call.strip("\n")], "amd_setup.py is called once, with the venv's Python and no arguments"
     complete = text.index('echo "Setup is complete: the $MODEL model is downloaded and everything is ready."')
     last = text.index('echo "Close this window and start ./run.sh."')
-    assert check < best < loop < read < large < small < done_loop < cookies < download < failed < exit_line < complete < last
+    assert check < best < loop < read < large < small < kit6 < kit1 < done_loop < kitsune < cookies < download < failed \
+        < exit_line < closed < amd < complete < last
+    between = text[closed + len("\nfi\n"):amd].splitlines()
+    assert all(l.startswith("#") or l == "echo" for l in between), "nothing but comments and a blank line before it"
+    assert text[amd + len(amd_call):complete] == "echo\n"
     assert text.rstrip("\n").endswith('echo "Close this window and start ./run.sh."')
     assert "downloaded on the first start" not in text
     assert 'echo "  1  ${BEST_LINE}"' in text and "2  small" in text
     assert "also downloads it on its first start" not in text and not any("also downloads it" in l for l in cmd_lines())
 
 
-def test_setup_scripts_offer_the_same_two_models():
+def test_the_amd_helper_both_setups_call_is_there():
+    # Neither setup looks at the call's verdict, so a missing file would only print Python's
+    # "can't open file" and go on to "Setup is complete": its absence shows here instead.
+    assert (SERVER_DIR / "amd_setup.py").is_file()
+    assert '"%~dp0amd_setup.py"' in "\n".join(cmd_lines()) and '"${HERE}/amd_setup.py"' in sh_text()
+
+
+def test_setup_scripts_offer_the_same_four_models():
     cmd = "\n".join(cmd_lines())
     sh = sh_text()
     for text in (cmd, sh):
-        assert "Which Whisper model should the server use? (the popup can switch later)" in text
-        assert "best quality, about 3 GB, wants a GPU with 4 GB or more free" in text
-        assert "about 500 MB, fine on a CPU, less accurate" in text
-    # setup.cmd spells the first entry out; setup.sh builds it, and its columns are wider because
-    # large-v3-turbo is the longer of the two names it may have to print.
-    assert "1  large-v3  best quality" in cmd and "2  small     about 500 MB" in cmd
-    assert "2  small           about 500 MB" in sh
+        # The descriptions without their column, which the two scripts pad differently.
+        assert "Which model should the server use? (the popup can switch later)" in text
+        assert "Whisper: best quality, about 3 GB, wants a GPU with 4 GB or more free" in text
+        assert "Whisper: about 500 MB, fine on a CPU, less accurate" in text
+        assert "Kitsune-Transcribe: Japanese only, about 1.2 GB, plus PyTorch (about 3 GB)" in text
+        assert "Kitsune-Transcribe: Japanese only, about 200 MB, plus PyTorch, fine on a CPU" in text
+    # setup.cmd spells the first entry out; setup.sh builds it, and its column is two wider because
+    # large-v3-turbo is the longest name it may have to print there.
+    assert "1  large-v3      Whisper: best quality" in cmd and "2  small         Whisper: about 500 MB" in cmd
+    assert "3  kitsune-0.6b  Kitsune-Transcribe" in cmd and "4  kitsune-0.1b  Kitsune-Transcribe" in cmd
+    assert "2  small           Whisper: about 500 MB" in sh
+    assert "3  kitsune-0.6b    Kitsune-Transcribe" in sh and "4  kitsune-0.1b    Kitsune-Transcribe" in sh
     assert server.MODEL_SIZES["large-v3"] == "about 3 GB" and server.MODEL_SIZES["small"] == "about 500 MB"
+    assert server.kitsune_size("kitsune-0.6b") == "about 1.2 GB" and server.kitsune_size("kitsune-0.1b") == "about 210 MB"
+    assert (SERVER_DIR / "kitsune_setup.py").is_file() and (SERVER_DIR / "requirements-kitsune.txt").is_file()
 
 
 # --- setup.sh asks the server which model to offer --------------------------------------------
@@ -896,7 +966,7 @@ def test_setup_cmd_names_large_v3_itself_and_asks_nothing():
     # always large-v3 and a subprocess for it would only be one more thing to fail.
     lines = cmd_lines()
     assert not any("--default-model" in line for line in lines)
-    assert any("1  large-v3  best quality" in line for line in lines)
+    assert any("1  large-v3      Whisper: best quality" in line for line in lines)
     assert any('set "MODEL=large-v3"' in line for line in lines)
 
 
@@ -934,7 +1004,7 @@ def test_the_menus_first_entry_is_whatever_the_server_answered(tmp_path):
     best, line = run_best_block(tmp_path, answer="large-v3-turbo")
     assert best == "large-v3-turbo" and line.startswith("large-v3-turbo  ")
     best, line = run_best_block(tmp_path, answer="large-v3")
-    assert best == "large-v3" and line.startswith("large-v3        best quality")
+    assert best == "large-v3" and line.startswith("large-v3        Whisper: best quality")
 
 
 @pytest.mark.skipif(BASH is None, reason="the shell block needs bash; setup.sh never runs on Windows")
@@ -944,7 +1014,7 @@ def test_a_server_that_cannot_answer_leaves_setup_on_large_v3(tmp_path, stub):
     # a 127 of the same kind: a broken install must still offer a model rather than stop at a line
     # nobody will read the reason for (stderr goes to /dev/null).
     best, line = run_best_block(tmp_path, **stub)
-    assert best == "large-v3" and line.startswith("large-v3        best quality")
+    assert best == "large-v3" and line.startswith("large-v3        Whisper: best quality")
 
 
 # --- server/tools/retranscribe.py: its --model default is the server's ---------------------------

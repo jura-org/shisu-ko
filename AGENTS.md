@@ -7,8 +7,8 @@ The detail behind every section lives in `docs/dev/` (index: `docs/dev/README.md
 ## What this project is
 
 Shisu-ko shows live Japanese subtitles on YouTube in Firefox and Chrome. A local Python server transcribes
-the video's audio with Whisper (faster-whisper / CTranslate2, or MLX on the Apple GPU) a little
-ahead of the playhead; the
+the video's audio with Whisper (faster-whisper / CTranslate2, or MLX on the Apple GPU), or with a
+Kitsune-Transcribe student (PyTorch, `server/kitsune_engine.py`), a little ahead of the playhead; the
 extension renders the cues as real DOM text so Yomitan can scan them, and can mine a screenshot
 plus sentence audio into the newest Anki card via AnkiConnect.
 
@@ -19,8 +19,13 @@ addon/        Firefox source extension, Manifest V3, plain JS; directly loadable
 server/       server.py (single file) + setup/run scripts + update.py; runtime data in ~/.shisu-ko
               native_host.py: the native-messaging host behind the popup's "Start server" button
               (stdlib only); Firefox and Chrome run it through native-host.cmd / native-host.sh
+              amd_setup.py: installs and tests the experimental AMD GPU engine (stdlib only;
+              setup runs it after the model download)
               mlx_beam.py: the beam search mlx-whisper lacks; server.py loads it by path on the
               Apple GPU and nowhere else
+              kitsune_engine.py: the Kitsune-Transcribe models on PyTorch (loaded by path, torch
+              imported lazily); kitsune_setup.py installs PyTorch + requirements-kitsune.txt
+              (stdlib only; setup runs it for a Kitsune pick, before the download)
 docker/       Windows wrappers for docker compose, WSL Docker Engine installer
 docs/dev/     developer docs: the full design of each subsystem, its reasons and measurements
 docs/cws/     Chrome Web Store setup: the service account and publisher id cws-listing.yml needs
@@ -80,9 +85,10 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   its first `await` and by nothing else.
 - A client's model name (`model` in `/sync`) must match `MODEL_NAME_RE` and contain no `..`, else it
   gets `MODEL_NAME_HINT` and is never stored. A valid name is reduced by `canonical_model_name()`
-  and resolved through `download_model_files()` — faster-whisper's own download, or the MLX repo's
-  on the Apple GPU — before it is loaded. A raw client string must never reach `WhisperModel()`;
-  only the operator's `--model` may be a folder, and it skips the download.
+  and resolved through `download_model_files()` — faster-whisper's own download, the MLX repo's on
+  the Apple GPU, or, for a Kitsune name, `KITSUNE_REPOS` and `kitsune_download_plan()` — before it
+  is loaded. A raw client string must never reach `WhisperModel()` or `kitsune_engine.load()`; only
+  the operator's `--model` may be a folder, and it skips the download.
 - A transcription backend is `transcribe()` and `detect_language()`, and nothing else in the server
   may know which one is loaded. `--device` names it, `resolve_device()` is the single place `auto`
   becomes one of `cuda`, `mlx` and `cpu`, and `canonical_model_name()` gives one set of weights one
@@ -97,6 +103,14 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   reaches the audio detector. The detector is the fallback for a video YouTube names nothing for.
   A refusal writes the same session state the detector writes and nothing to the cache.
   `--language-patience 0` must switch all of it off, the metadata refusal included.
+- `server.py` imports without torch: PyTorch and transformers live in `server/kitsune_engine.py`,
+  which `kitsune_engine()` loads by path and which imports torch only inside the functions that
+  load and run a model (its pure helpers and `test_kitsune.py` need numpy alone). A Kitsune model
+  is Japanese only (another `--language` is refused), has no language watch, no lyrics path and no
+  initial prompt (`detects_language`, `sings`, `takes_prompt` are False); `process()` and
+  `dump_words.py` read those flags, and `transcribe_options()` builds both callers' options.
+  Quantised weights are unpacked at load (16-bit on a GPU, fp32 on the CPU): every precision runs on every machine, and
+  `-w8a8` / `-w8a16` spellings (byte-identical files) are one model.
 - `enabled` is the master switch (popup header toggle, Alt+Shift+S). Off means nothing happens on
   YouTube pages: no `/sync`, no overlay, no native-caption hiding, no arrow keys, no Anki polling,
   no mining, no known word marked, no status badge switched, no `cardStatus` ask
@@ -111,10 +125,27 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   `config.json` (`write_config()`, `read_config()`, `resolve_default_model()`,
   `resolve_default_cookies()`: `model` and `cookies_from_browser`, the browser whose YouTube
   cookies every download sends; the Docker image never takes the latter, `in_container()` is
-  `SHISUKO_CONTAINER` only, since toolbox and distrobox share the home folder's Firefox),
-  `server-<port>.lock`, `server.log` and, on Windows, `native-messaging/shisuko.json` (Firefox's
-  host manifest) and `native-messaging/shisuko-chrome.json` (Chrome's). Detail:
-  `docs/dev/cue-building.md`, "Runtime data and the cue cache".
+  `SHISUKO_CONTAINER` only, since toolbox and distrobox share the home folder's Firefox; and
+  `engine`, whose `"rocm"` only a passed `server.py --probe-gpu` writes), `server-<port>.lock`,
+  `server.log`, the AMD engine's `rocm/` (with its marker `shisuko-rocm.json`), `rocm-starts` and
+  `next-model`, and, on Windows, `native-messaging/shisuko.json` (Firefox's host manifest) and
+  `native-messaging/shisuko-chrome.json` (Chrome's). Detail: `docs/dev/cue-building.md`, "Runtime
+  data and the cue cache", and `docs/dev/server-runtime.md` for the AMD engine.
+- With the AMD engine on Windows (`rocm_on_windows()`) every exit goes through `hard_exit()` /
+  `finish()` (TerminateProcess), never `os._exit`, `sys.exit`, `raise SystemExit` or the
+  interpreter's own exit, and a model is never freed (`KEPT_MODELS`; a model switch restarts the
+  server through `next-model` and exit 3): CTranslate2's ROCm build hangs there otherwise.
+  `test_rocm.py` holds that the two helpers hold `server.py`'s only exit calls.
+- `rocm_engine()` sets `CT2_CUDA_ALLOCATOR=cub_caching` before the first ctranslate2 import, on the
+  AMD engine only: without it the Linux build loses text or aborts on AMD cards.
+- The AMD engine's pins (versions, URLs, sizes, SHA-256) live only in `PINS` in
+  `server/amd_setup.py`; what `server.py` and `amd_setup.py` both hold (`ROCM_GUARD_LIMIT`,
+  `ROCM_LINUX_LIBRARIES`, `ROCM_PLATFORMS`, `python_tag()`, `gfx_target()`, the marker check) must
+  match, and the tests hold it. `amd_setup.py` is stdlib only, never imports `server.py`, and
+  without `--yes` / `--probe` always exits 0: setup never fails on it.
+- The tests never touch the real `~/.shisu-ko`: `_serverlib.isolate_home()` points `SHISUKO_HOME`
+  at a temporary folder before `server.py` is imported, and `conftest.py` fails the run when the
+  real folder changed.
 - The cue cache is forever. `CACHE_FORMAT` (6) is the only migration: `load_cache()` drops every
   older record whole before reading anything out of it, so a geometry change bumps it. Cue caches
   are reused only when model (compared canonically) and language match. `covered` always means
@@ -144,14 +175,21 @@ a lyrics window), `build_cues()` and `merge_segments()`. Rules that must not reg
 switching: `App.request_model()` and `App.switch_model_if_wanted()`, run before every window,
 never during one. Backends: `resolve_device()` decides `cuda` / `mlx` / `cpu` once and
 `load_model()` builds either a `WhisperModel` or an `MlxWhisperModel`, which presents the same two
-methods over mlx-whisper; `server/mlx_beam.py` gives that path the beam search the library lacks. The Start button: `startServer()` in `background.js`, the native host's
+methods over mlx-whisper; `server/mlx_beam.py` gives that path the beam search the library lacks.
+Kitsune models: `kitsune_name()`, `kitsune_download_plan()`, `load_kitsune_model()`, and in
+`kitsune_engine.py` `read_package()`, `dequantize()`, `ctc_spans()`, `attention_boundaries()`,
+`KitsuneModel.transcribe()`. The Start button: `startServer()` in `background.js`, the native host's
 `handle()` and `launch()`, the instance lock `hold_instance_lock()` / `try_lock()`. The update
-step: `server/update.py`, `POST /update`, exit code 4. Launcher rules that must not regress:
+step: `server/update.py`, `POST /update`, exit code 4. The AMD engine (experimental):
+`rocm_engine()` at import, the crash guard and `check_rocm_import()`, `hard_exit()` / `finish()`
+and `entry_point()`, `run_probe_gpu()`, `server/amd_setup.py`. Launcher rules that must not regress:
 - `run.cmd`: the update call and `goto loop` stay on one line, `:loop` keeps its name, `:update`
   sits directly above that line, and `set "SHISUKO_LAUNCHER=1"` sits directly after `:loop`.
 - `run.sh`: everything stays in `main()`, the file ends with `main "$@"; exit`, and
   `export SHISUKO_LAUNCHER=1` sits inside `main()` before the loop.
 - `update.py` always exits 0: the server must start even when the update fails.
+- `setup.cmd` / `setup.sh`: `amd_setup.py` runs after the model download, on a line of its own
+  whose exit code nothing reads (`|| true` in `setup.sh`).
 
 **Mining** (`docs/dev/mining.md`). `electSyncTab()` in `background.js` picks the one tab whose
 `/sync` reaches the server; it never names a tab that did not ask. `ankiPoll()` watches for the note
@@ -200,6 +238,14 @@ start sends; setup asks through `server.py --setup-cookies`.
 Start-button launcher, with the venv's Python (`run.cmd` / `setup.cmd` and their `.sh` twins do
 this themselves): `~/.shisu-ko/venv/Scripts/python server/native_host.py --register --verbose`
 (`venv/bin/python` on Linux/macOS), `--status`, `--unregister`.
+AMD GPUs (experimental, not yet tested on AMD hardware by the maintainer): setup offers the engine
+where it finds an AMD card (next to an NVIDIA GPU only with `--yes`). By hand, with the venv's
+Python: `server/amd_setup.py` (look, ask, install, test), `--yes` (no question; exit 1 unless the
+engine ends up working), `--probe` (test again; exit 1 when it fails), `--status`, `--remove`
+(back to the default engine); see `docs/dev/server-runtime.md`.
+Kitsune-Transcribe models (Japanese only, PyTorch): setup installs PyTorch for a Kitsune pick; by
+hand, with the venv's Python: `server/kitsune_setup.py` (`--cpu`, `--force`, `--status`). Names:
+`kitsune-0.6b` / `-0.3b` / `-0.1b` (bf16), plus `-fp16`, `-int8`, `-fp8`, `-nvfp4`, `-mxfp4`.
 
 Docker: `docker\up.cmd`, `docker\logs.cmd`, `docker\down.cmd` (or `docker compose up -d` etc.).
 `up.cmd` keeps a minimized "Shisu-ko WSL keep-alive" window open when Docker Engine runs inside
@@ -278,8 +324,14 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
 - On Windows the CUDA libraries come from the `nvidia-cublas-cu12` / `nvidia-cudnn-cu12` wheels;
   `add_nvidia_dll_dirs()` must run before `ctranslate2` is imported.
 - GPU memory is often shared. `load_model()` picks `int8_float16` below 4.5 GB free VRAM. Exit codes:
-  2 is a startup error not to retry, 3 asks for a restart (broken GPU context, or a failed switch
-  with no model left), 4 (`EXIT_UPDATE`, only from `POST /update`) runs `update.py` first.
+  2 is a startup error not to retry, 3 asks for a restart (broken GPU context, a failed switch
+  with no model left, and with the AMD engine a switch on Windows or an engine that does not load
+  or sees no AMD GPU), 4 (`EXIT_UPDATE`, only from `POST /update`) runs `update.py` first.
+- The AMD engine: a bad card or driver kills the process without a Python exception, hence the
+  test in a child process (`--probe-gpu`) and the crash guard (`rocm-starts`). No RX 6000 on
+  Windows (AMD's runtime has no gfx1030 kernels). Linux reads `LD_LIBRARY_PATH` only at process
+  start (one re-exec, `SHISUKO_ROCM_REEXEC=1`). `ROCM_PATH`, `HSA_OVERRIDE_GFX_VERSION` and
+  `HIP_VISIBLE_DEVICES` go where every start sees them, not in a terminal. It runs on HIP device 0.
 - AnkiConnect: send requests without a `Content-Type` header, call `requestPermission` first, find
   the newest card with `findNotes("added:1")`.
 - `data_collection_permissions` in the manifest requires `strict_min_version` 140 or later.
@@ -311,7 +363,9 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
 
 ## Making changes
 
-1. Keep `server.py` a single dependency-light file (stdlib + numpy + faster-whisper + yt-dlp + PyAV).
+1. Keep `server.py` a single dependency-light file (stdlib + numpy + faster-whisper + yt-dlp + PyAV);
+   PyTorch and transformers in `kitsune_engine.py`, imported lazily (server.py touches them only
+   lazily too: `kitsune_runtime_line()` for `--check`, `release_torch_memory()`).
 2. Bump `version` in `addon/manifest.json` and `VERSION` in `server/server.py` together, inside
    the change's last commit, with its entry in `docs/amo/release-notes.md`; the release notes and
    `reviewer-notes.md` must each stay within AMO's 3,000 characters (see "Release"; `npm test`
@@ -340,6 +394,11 @@ Full process: `docs/dev/updates-and-release.md`.
   (`gh workflow run amo-listing.yml -f tag=v<version>`) for the newest release only, never by a tag.
 - web-ext runs pinned to one exact version (`web-ext@10.7.0`) in every workflow and in
   `publish-addon.cmd` / `sign-addon.cmd`.
+- The actions run on Node 24, one major each across the workflows: `actions/checkout@v7`,
+  `actions/setup-node@v7`, `actions/setup-python@v7`, `actions/upload-artifact@v7`,
+  `softprops/action-gh-release@v3`. A new action gets its first Node 24 major in
+  `release-workflows.test.mjs`. setup-node sets `package-manager-cache: false` in every job that
+  holds a key or writes to the releases.
 - Every release goes to the Chrome Web Store by itself: `.github/workflows/cws-listing.yml` uploads
   the release's own Chrome zip (the highest release, never rebuilt) through `scripts/cws.mjs`,
   store API v2 only, with the repository secret `CWS_SERVICE_ACCOUNT_JSON` and the repository

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { decide } from "../cws.mjs";
 
@@ -135,7 +135,7 @@ test("the listing is its own workflow, run by hand for the newest release, as <v
   assert.deepEqual(triggers(listing), ["workflow_dispatch"]);
   assert.match(listing, /\n {6}tag:\n {8}description: .+\n {8}required: true\n/);
   // The add-on comes from the tag, the scripts from the workflow's own commit.
-  assert.match(listing, /- uses: actions\/checkout@v4\n {6}- uses: actions\/checkout@v4\n {8}with:\n {10}ref: refs\/tags\/\$\{\{ inputs\.tag \}\}\n {10}path: release\n/);
+  assert.match(listing, /- uses: actions\/checkout@v7\n {6}- uses: actions\/checkout@v7\n {8}with:\n {10}ref: refs\/tags\/\$\{\{ inputs\.tag \}\}\n {10}path: release\n/);
   const lines = shellLines(listing);
   const format = at(lines, /^if \[\[ ! "\$TAG" =~ \^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$ \]\]; then$/);
   // 0.14.1 is a listed version of its own: tags before 0.14.2 have no listed build to publish.
@@ -331,6 +331,32 @@ test("every release goes to the Chrome Web Store by itself, the newest one, as t
   // A refused upload or publish is fixed in the Developer Dashboard, and the errors say so.
   const error = (label) => branch(label).find((line) => line.startsWith('echo "::error::'));
   for (const label of ["submit", "waiting", "rejected-older"]) assert.match(error(label), /Developer Dashboard/);
+  // A refused upload leaves nothing on the store, and a later run uploads again. A refused publish
+  // leaves the version as a draft that the store refuses as a new upload, so every later run fails
+  // the same way: that draft is submitted in the Dashboard by hand, and no error sends anyone to
+  // wait for the schedule or to run the workflow again for it. Each error tells the two apart by
+  // the words scripts/cws.mjs starts their lines with (scripts/tests/cws.test.mjs holds those),
+  // the upload's first, so that what follows the publish's words is about the publish alone.
+  for (const label of ["submit", "waiting", "rejected-older"]) {
+    const text = error(label);
+    const refusedUpload = text.indexOf("'the upload failed'");
+    const refusedPublish = text.indexOf("'publish failed'");
+    assert.ok(refusedUpload >= 0 && refusedPublish > refusedUpload, `${label}: the error names a failed upload, then a failed publish`);
+    const publishCase = text.slice(refusedPublish);
+    assert.match(publishCase, /as a draft.*Developer Dashboard.*Privacy.*submit the draft there with Submit for review/, label);
+    assert.doesNotMatch(publishCase, /schedule|three hours|gh workflow run|by hand/, label);
+    // A later run meets that draft at the upload, which the store then refuses: the upload's case
+    // sends the reader to the Dashboard's Package tab first, and to the draft if it holds one,
+    // before it says that nothing reached the store.
+    const uploadCase = text.slice(refusedUpload, refusedPublish);
+    assert.match(uploadCase, /Package tab.*as a draft.*submit that draft there with Submit for review.*if it does not, nothing reached the store/, label);
+  }
+  // Only a failed upload waits for the schedule, and only where the schedule submits: never past a
+  // rejected older version, whose error sends the reader to a run by hand (below).
+  for (const label of ["submit", "waiting"]) {
+    const text = error(label);
+    assert.match(text.slice(text.indexOf("'the upload failed'"), text.indexOf("'publish failed'")), /the schedule .*within three hours/, label);
+  }
   // "rejected-older" uploads only in a run by hand or in the first run of this version's own
   // release: a re-run of any tag's release workflow, another tag's release and the schedule reach
   // the warning. That arm never uploads and never fails, and says to read the review and then run
@@ -366,7 +392,7 @@ test("every release goes to the Chrome Web Store by itself, the newest one, as t
   // Nothing is built again, and no action but GitHub's own two runs in the job that has the key.
   assert.equal(count(lines, /build\.mjs|web-ext|\bnpm\b|\bnpx\b/), 0);
   const uses = [...store.matchAll(/^ *(?:- )?uses: (\S+)/gm)].map((match) => match[1]);
-  assert.deepEqual(uses, ["actions/checkout@v4", "actions/setup-node@v4"]);
+  assert.deepEqual(uses, ["actions/checkout@v7", "actions/setup-node@v7"]);
   // The key reaches one step, the one that talks to the store.
   const secret = "${{ secrets.CWS_SERVICE_ACCOUNT_JSON }}";
   assert.equal(store.split(secret).length - 1, 1);
@@ -438,6 +464,53 @@ test("web-ext runs at one pinned version wherever it gets the AMO key or lints",
     versions.add(pinned[1]);
   }
   assert.equal(versions.size, 1, [...versions].join(", "));
+});
+
+test("every action runs on Node 24, at one major version in all the workflows", () => {
+  // GitHub runs an action built for Node 20 on Node 24 with a warning on every run, and takes Node
+  // 20 off its runners (github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners).
+  // Each action runs at its first major built for Node 24 or a later one, and at one major in every
+  // workflow, so that a bump reaches them all. An action not listed here fails until it is added
+  // with its first Node 24 major. Every workflow in the folder is read, one added later too.
+  const node24 = {
+    "actions/checkout": 5,
+    "actions/setup-node": 5,
+    "actions/setup-python": 6,
+    // v5 could run on Node 24 but ran on Node 20 unless told otherwise.
+    "actions/upload-artifact": 6,
+    "softprops/action-gh-release": 3,
+  };
+  const majors = {};
+  const files = readdirSync(new URL("../../.github/workflows/", import.meta.url)).filter((file) => /\.ya?ml$/.test(file));
+  assert.ok(files.includes("release.yml") && files.includes("tests.yml"), files.join(", "));
+  for (const file of files) {
+    for (const [, ref] of read(`.github/workflows/${file}`).matchAll(/^ *(?:- )?uses: (\S+)/gm)) {
+      // A workflow of this repository, called: it runs no action of its own.
+      if (ref.startsWith("./")) continue;
+      const action = /^([\w.-]+\/[\w.-]+)@v(\d+)$/.exec(ref);
+      assert.ok(action, `${file}: ${ref} is not owner/repo@v<major>`);
+      const [, name, major] = action;
+      assert.ok(Object.hasOwn(node24, name), `${file}: ${name} is not known to run on Node 24; add it here with its first Node 24 major`);
+      assert.ok(Number(major) >= node24[name], `${file}: ${ref} runs on Node 20; ${name} runs on Node 24 from v${node24[name]}`);
+      (majors[name] ??= new Set()).add(major);
+    }
+  }
+  for (const [name, seen] of Object.entries(majors)) assert.equal(seen.size, 1, `${name} runs at ${[...seen].map((major) => `v${major}`).join(" and ")}`);
+});
+
+test("setup-node restores no cache in a job that holds a key or writes to the releases", () => {
+  // From v5 on, setup-node restores and saves an npm cache by itself once package.json names npm in
+  // packageManager or devEngines.packageManager, and actions/setup-node advises against a cache in
+  // a job with privileges. These jobs hold the AMO key or the store's, or write to the releases;
+  // tests.yml holds neither and may cache.
+  for (const [name, yaml] of [["release.yml", release], ["amo-listing.yml", listing], ["amo-xpi.yml", attach], ["cws-listing.yml", store]]) {
+    const setups = yaml.split(/\n {6}- /).filter((step) => /(?:^|\n {8})uses: actions\/setup-node@/.test(step));
+    assert.ok(setups.length > 0, `${name} has no setup-node step`);
+    for (const step of setups) {
+      assert.match(step, /\n {10}package-manager-cache: false(?:\n|$)/, `${name}: ${step}`);
+      assert.doesNotMatch(step, /\n {10}cache(?:-dependency-path)?:/, `${name}: ${step}`);
+    }
+  }
 });
 
 test("the manual scripts check the tag, then build, stamp and submit like the workflows", () => {

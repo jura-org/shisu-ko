@@ -1,0 +1,4 @@
+# Kitsune-Transcribe models (kitsune_engine.py). PyTorch itself comes from kitsune_setup.py, which
+# picks its CUDA or CPU build; Whisper models need none of this.
+transformers>=5.13
+safetensors>=0.6

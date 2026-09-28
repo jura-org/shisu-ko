@@ -53,14 +53,17 @@ jobs:
             exit 1
           fi
       # The scripts come from this workflow's own commit, the add-on and its texts from the tag.
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           ref: refs/tags/${{ inputs.tag }}
           path: release
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
+          # setup-node restores and saves an npm cache by itself once package.json names npm as its
+          # packageManager: a job with the AMO key takes none.
+          package-manager-cache: false
       - name: Check the tag's version
         run: test "v$(node -p "require('./release/addon/manifest.json').version")" = "$TAG"
       - name: Build the listing texts

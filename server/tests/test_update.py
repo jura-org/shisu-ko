@@ -94,7 +94,9 @@ def write_checkout(root: Path, version: str = "0.4.0", requirements: str = "yt-d
 
 def install_calls(monkeypatch):
     calls = []
-    monkeypatch.setattr(update, "install_requirements", lambda root: calls.append(root))
+    # requirements.txt as the root alone, any other file as (root, name)
+    monkeypatch.setattr(update, "install_requirements",
+                        lambda root, name="requirements.txt": calls.append(root if name == "requirements.txt" else (root, name)))
     return calls
 
 
@@ -283,6 +285,29 @@ def test_zip_installs_requirements_when_they_changed(tmp_path, monkeypatch):
     fake_github(monkeypatch, "v0.4.1", release_zip("0.4.1", requirements="yt-dlp>=2\n"))
     assert update.update(tmp_path) is True
     assert calls == [tmp_path]
+
+
+def test_zip_installs_the_kitsune_requirements_when_they_changed(tmp_path, monkeypatch):
+    write_checkout(tmp_path)
+    (tmp_path / "server" / "requirements-kitsune.txt").write_text("transformers>=5.13\n", encoding="utf-8")
+    calls = install_calls(monkeypatch)
+    entries = [("shisu-ko-0.4.1/server/requirements-kitsune.txt", "transformers>=5.20\n")]
+    fake_github(monkeypatch, "v0.4.1", release_zip("0.4.1", extra_entries=entries))
+    assert update.update(tmp_path) is True
+    assert calls == [(tmp_path, "requirements-kitsune.txt")]
+
+
+def test_the_kitsune_requirements_are_installed_only_where_pytorch_is(tmp_path, monkeypatch, capsys):
+    (tmp_path / "server").mkdir()
+    pip = []
+    monkeypatch.setattr(update.subprocess, "call", lambda cmd: pip.append(cmd) or 0)
+    monkeypatch.setattr(update.sys, "prefix", "/venv")  # a venv, where installing is allowed
+    monkeypatch.setattr(update.importlib.util, "find_spec", lambda name: None)
+    update.install_requirements(tmp_path, "requirements-kitsune.txt")
+    assert pip == []
+    monkeypatch.setattr(update.importlib.util, "find_spec", lambda name: object())
+    update.install_requirements(tmp_path, "requirements-kitsune.txt")
+    assert pip and pip[0][-1].endswith("requirements-kitsune.txt")
 
 
 def test_zip_does_not_download_an_older_or_equal_release(tmp_path, monkeypatch, capsys):

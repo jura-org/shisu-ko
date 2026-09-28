@@ -37,9 +37,12 @@ by `run.cmd` / `run.sh` before each start and by the extension once a day.
   conjugations.
 - **Your hardware, your model.** Setup offers the model your machine runs best — large-v3 on an
   NVIDIA GPU, large-v3-turbo on an Apple Silicon one, where the weights share memory with the
-  browser — or small, and downloads it; it runs on an NVIDIA GPU, on an Apple Silicon GPU through
-  MLX, or on the CPU, whichever the server finds. The popup switches to any other model without restarting the
-  server: a faster-whisper size or a Hugging Face repo id of a CTranslate2 model, such as
+  browser — or small, or a [Kitsune-Transcribe](#kitsune-transcribe-models) model (small
+  Japanese-only models distilled from Cohere Transcribe), and downloads it; it runs on an NVIDIA
+  GPU, on an Apple Silicon GPU through MLX, or on the CPU, whichever the server finds. The popup
+  switches to any other model without restarting the server (on Windows the experimental
+  [AMD engine](#amd-graphics-cards-experimental) restarts it): a Kitsune model in any of its
+  precisions, a faster-whisper size or a Hugging Face repo id of a CTranslate2 model, such as
   `kotoba-tech/kotoba-whisper-v2.0-faster` (Japanese-specialised, about 6x faster) or a small
   CPU model. `--model` only sets the default.
 - **Native, Nix or Docker.** A one-time setup script on Windows, Linux and macOS, a Nix flake,
@@ -59,6 +62,11 @@ by `run.cmd` / `run.sh` before each start and by the extension once a day.
   large-v3-turbo instead: on a Mac the GPU's memory is the browser's memory, and large-v3 does not
   fit beside the video you are watching. Without either GPU, pick the small model at setup and run
   on the CPU.
+- Or, experimental and for the native server on Windows and Linux, an AMD graphics card:
+  Radeon RX 7000 or RX 9000, Radeon PRO W7000/W9000 or AI PRO R9700, or the graphics of a Ryzen
+  AI 300 (890M, 880M) or Ryzen AI Max (8060S, 8050S, 8040S); on Windows with Adrenalin 26.2.2 or
+  newer, on Linux also an RX 6800/6900, with ROCm 7.2 installed. Setup offers it when it finds
+  one; see [AMD graphics cards](#amd-graphics-cards-experimental).
 - Optional: [Yomitan](https://yomitan.wiki/) for lookups, [Anki](https://apps.ankiweb.net/)
   with the [AnkiConnect](https://ankiweb.net/shared/info/2055492159) add-on for mining.
 
@@ -76,15 +84,19 @@ zip, where Windows would start them without the rest of the files.
 
 Setup creates an isolated Python environment in `~/.shisu-ko/venv` and installs faster-whisper,
 yt-dlp, the CUDA runtime libraries and, on Apple Silicon, mlx-whisper; nothing else on the system
-is touched. It then asks which Whisper model the server should use: `1` is what this machine runs
-best, large-v3 on Windows and Linux (best quality, about 3 GB, wants a GPU with 4 GB or more free)
-and large-v3-turbo on an Apple Silicon Mac (about 1.6 GB, the one that keeps up beside a browser),
-`2` is small (about 500 MB, fine on a CPU, less accurate); it downloads the choice into
+is touched. It then asks which model the server should use: `1` is the Whisper model this machine
+runs best, large-v3 on Windows and Linux (best quality, about 3 GB, wants a GPU with 4 GB or more
+free) and large-v3-turbo on an Apple Silicon Mac (about 1.6 GB, the one that keeps up beside a
+browser), `2` is Whisper small (about 500 MB, fine on a CPU, less accurate), `3` is kitsune-0.6b
+and `4` kitsune-0.1b (Japanese only; setup first installs PyTorch for them, see
+[Kitsune-Transcribe models](#kitsune-transcribe-models)); it downloads the choice into
 `~/.shisu-ko/models` with a progress bar and remembers the choice in `~/.shisu-ko/config.json`. Where Firefox is installed it also asks whether the server should send
 Firefox's YouTube cookies with every download: YouTube refuses some downloads ("Sign in to confirm
 you're not a bot") until they carry a signed-in browser's cookies. Say yes if you are signed in to
 YouTube in Firefox; the answer goes to the same file (see [YouTube sign-in](#youtube-sign-in)).
-When it says that everything is ready, close its window and start
+Last, where it finds an AMD graphics card, it offers the experimental AMD engine and asks before
+it downloads anything (see [AMD graphics cards](#amd-graphics-cards-experimental)); that step
+never makes the setup fail. When it says that everything is ready, close its window and start
 `run.cmd` / `run.sh`. The choice is kept even when the download fails or is stopped with Ctrl+C:
 the first start then downloads the chosen model itself, without the progress bar. The server is
 ready when it prints `Listening on http://127.0.0.1:8790`. Keep the window open while you watch; it
@@ -533,7 +545,9 @@ box, an outline, and the transcript docked left:
 | Transcript panel side | Docks the panel right or left; the subtitle moves out of its way |
 | Reset style | Restores the seven settings above and nothing else |
 
-The **Transcription model** drawer picks the Whisper model the server runs. The field takes a
+The **Transcription model** drawer picks the model the server runs. The field takes a
+Kitsune-Transcribe model (`kitsune-0.6b`, `kitsune-0.3b-int8`, ...; see
+[Kitsune-Transcribe models](#kitsune-transcribe-models)), a
 faster-whisper size (`large-v3`, `large-v3-turbo`, `distil-large-v3`, `medium`, `small`, ...)
 or the Hugging Face repo id `owner/name` of a CTranslate2 model
 (`kotoba-tech/kotoba-whisper-v2.0-faster`); empty means the server's own default (`--model`, else
@@ -548,6 +562,8 @@ the new model. Meanwhile the badge on the video says "Loading model X…"; a nam
 use shows "Shisu-ko: model X: …" with the reason, even with progress messages off, and the previous
 model keeps running. The popup mirrors this under the field: the status badge says "Loading model"
 during a switch, and the hint under the field carries the server's verdict on the name you typed.
+With the experimental AMD engine on Windows the swap is a restart of the server (see
+[AMD graphics cards](#amd-graphics-cards-experimental)).
 
 The last drawer, **Anki, clips and server**, holds where mined material goes (Anki's newest
 card or the Downloads folder, with an optional Downloads fallback when Anki is unreachable), the
@@ -656,7 +672,7 @@ sends the YouTube cookies of the browser chosen there (see [YouTube sign-in](#yo
 
 | Option | Effect |
 |---|---|
-| `--model kotoba-tech/kotoba-whisper-v2.0-faster` | Default model (here the Japanese-specialised distilled one, about 6x faster and lighter on memory than large-v3). The popup overrides the default with any faster-whisper size or Hugging Face repo id, without a restart |
+| `--model kotoba-tech/kotoba-whisper-v2.0-faster` | Default model (here the Japanese-specialised distilled one, about 6x faster and lighter on memory than large-v3). The popup overrides the default with any faster-whisper size or Hugging Face repo id, without a restart (with the AMD engine on Windows, through one) |
 | `--model large-v3-turbo` | OpenAI's faster large model as the default; already the default on an Apple GPU |
 | `--model small --device cpu` | CPU-only operation |
 | `--download-model small` | Download the model now, with a progress bar, and make it the default of later starts (what setup runs after its environment check); exits instead of starting the server, with code 2 on a failure or Ctrl+C, which `run.cmd` / `run.sh` do not restart on |
@@ -679,7 +695,7 @@ sends the YouTube cookies of the browser chosen there (see [YouTube sign-in](#yo
 | `--retry-after 30` | Seconds before a failed audio fetch is retried, and the wait before a model name that failed to download or load is tried again |
 | `--js-runtime deno` | JavaScript runtime for yt-dlp: auto, node, deno, bun, or name:path |
 | `--allow-remote-ejs` | Lets yt-dlp fetch updated YouTube challenge-solver scripts from GitHub |
-| `--check` | Print environment diagnostics (CUDA, MLX and the backend `--device auto` would pick, yt-dlp's JavaScript runtime, downloaded models, the model a bare start would run, whether the popup's Start button has its launcher registered) and exit |
+| `--check` | Print environment diagnostics (CUDA, the AMD engine where it is installed, MLX and the backend `--device auto` would pick, yt-dlp's JavaScript runtime, downloaded models, the model a bare start would run, whether the popup's Start button has its launcher registered) and exit |
 | `--no-update` | Start without looking for a newer version of Shisu-ko first (`run.cmd` / `run.sh`). The popup's **Update** button is refused too, since the launcher would restart the server without updating |
 
 `run.cmd` / `run.sh` set `SHISUKO_LAUNCHER=1` for the server they start. Only with it does
@@ -706,9 +722,9 @@ work. The server only listens on 127.0.0.1 and answers browser requests
 only from the extension itself or from pages served on this machine, so an arbitrary website
 cannot drive downloads and transcription; `/update` is narrower still and takes browser
 requests from the extension alone, never from a page, so nothing served on this machine can
-restart the server. A model name is validated (a size alias or
-`owner/name`, never a path) and resolved through faster-whisper's own download before anything
-is loaded, so a request can never point the server at a local folder.
+restart the server. A model name is validated (a Kitsune name, a size alias or
+`owner/name`, never a path) and resolved through the server's Kitsune table or faster-whisper's
+own download before anything is loaded, so a request can never point the server at a local folder.
 
 ### YouTube sign-in
 
@@ -738,6 +754,182 @@ secondary account is the careful choice. The Docker image never takes the browse
 `config.json` (it has none to read): Docker users export a `cookies.txt` into the data folder and
 add `--cookies /data/cookies.txt` to the `command:` line. Toolbox and distrobox share your home
 folder and its Firefox, so there the saved browser is used as on the host.
+
+## Kitsune-Transcribe models
+
+[Kitsune-Transcribe](https://github.com/Multysquid/Kitsune-Transcribe) distils Cohere Transcribe
+into small Japanese-only speech recognisers that run on an 8 GB consumer GPU, or on a CPU. The
+server runs them next to Whisper; pick one at setup or type its name in the popup's
+Transcription model field.
+
+| Name | What it is |
+|---|---|
+| `kitsune-0.6b`, `kitsune-0.3b`, `kitsune-0.1b` | the student of that size, in bf16 (about 1.2 GB, 600 MB, 200 MB) |
+| `kitsune-0.6b-fp16` | the same weights in fp16 |
+| `kitsune-0.6b-int8` (also `-int8-w8a16`, `-int8-w8a8`) | 8-bit integer weights, about half the download |
+| `kitsune-0.6b-fp8` (also `-fp8-w8a8`) | 8-bit float weights |
+| `kitsune-0.6b-nvfp4` (also `-nvfp4-w4a16`, `-nvfp4-w4a4`) | 4-bit NVFP4 weights, about a third of the download |
+| `kitsune-0.6b-mxfp4` (also `-mxfp4-w4a4`) | 4-bit MXFP4 weights |
+
+Every precision works for every size, on an NVIDIA GPU and on the CPU (an AMD or Apple GPU is not
+used: there the model runs on the CPU, the AMD engine being Whisper's). The server unpacks the weights
+into 16 bits when it loads them (bf16 on a GPU that has it, else fp16; fp32 on the CPU), so a
+smaller precision saves download and disk, not GPU memory or time, and the W8A8/W4A4 formats run
+with 16-bit activations. Two spellings that differ only in the activations (`-int8-w8a16` and
+`-int8-w8a8`) load the same files and count as one model.
+
+What to know:
+
+- **PyTorch.** Kitsune models are not Whisper models and do not run on CTranslate2; the server
+  runs them on PyTorch and transformers. Setup installs both when you pick a Kitsune model
+  (`server/kitsune_setup.py`: the CUDA build where it finds an NVIDIA GPU, about 3 GB, else the
+  CPU build). To add them later, run
+  `~/.shisu-ko/venv/Scripts/python server/kitsune_setup.py` (`venv/bin/python` on Linux/macOS);
+  `--status` says what is installed. Without PyTorch the popup says so when you pick a Kitsune
+  model, and nothing is downloaded. `run.cmd --check` reports it too. The Docker image includes
+  PyTorch; the Nix package does not.
+- **Japanese only.** A Kitsune model refuses to start with another `--language`. It has no
+  language detector, so the language watch (`--language-patience`) does not pause a video in
+  another language, and it has no lyrics mode (`--lyrics`): music without detected speech stays
+  blank. `--initial-prompt`, `--beam-size` and the other decoding options are Whisper's; a
+  Kitsune model decodes greedily, as it was evaluated.
+- **Word timings.** The cue builder needs every word's start and end. A Parakeet-family student
+  (a CTC model) reads them off its 80 ms frames; a Transcribe-family student gets them from its
+  decoder's attention, aligned as Whisper aligns its own word timestamps.
+- **Licence.** The Kitsune students are released for non-commercial use (their training data
+  requires it); see the model card in each model's repo.
+
+`--compute-type` takes `bfloat16`, `float16` or `float32` for a Kitsune model. The models live in
+the repos `Multy123/kitsune-transcribe-<size>`, the bf16 export at the root and each precision in
+a folder of its own; `--model` also takes a local folder holding such a package.
+
+## AMD graphics cards (experimental)
+
+The native server can run Whisper on an AMD graphics card, through CTranslate2's build for AMD's
+ROCm. This is experimental: it is not yet tested on AMD hardware by the maintainer. Reports from
+AMD users, whether it works or not, are welcome as a
+[GitHub issue](https://github.com/Multysquid/shisu-ko/issues), with the card, the system and
+what `amd_setup.py --status` and `run.cmd --check` print.
+
+**Which cards.** On Windows: Radeon RX 7000 and RX 9000, Radeon PRO W7000 and W9000, Radeon AI
+PRO R9700, and the graphics of Ryzen AI 300 (Radeon 890M, 880M) and Ryzen AI Max (Radeon 8060S,
+8050S, 8040S), with AMD Software: Adrenalin Edition 26.2.2 or newer. AMD's Windows runtime has
+no kernels for the RX 6000 series or anything older, nor for other processor graphics such as
+the Radeon 780M or 860M, so on Windows those get no AMD engine. A card that Windows lists as
+"Microsoft Basic Display Adapter" has no AMD driver yet; install Adrenalin first. On Linux: the
+same cards and the RX 6800 and 6900 series (gfx1030), on a ROCm 7.2.x that you install yourself
+following [AMD's guide for 7.2](https://rocm.docs.amd.com/projects/install-on-linux/en/docs-7.2.4/),
+with your user in the `render` and `video` groups (`sudo usermod -aG render,video "$USER"`, then
+log out and in again); until then setup says what is missing and asks nothing. Follow the guide
+for 7.2, not AMD's latest one: that installs ROCm 10, and the engine needs ROCm 7.2's libraries.
+On Linux setup goes by the GPU target that the amdgpu driver reports (`gfx1100` and so on), not
+by the card's name. An RX 6600 or 6700 (gfx1032, gfx1031) is not one of the targets the build is
+compiled for, but is reported to run when told to pass for a gfx1030; that is at your own risk:
+put `export HSA_OVERRIDE_GFX_VERSION=10.3.0` in your login shell's profile (`~/.bash_profile`,
+`~/.zprofile` or `~/.profile`), log out and in again, and run `amd_setup.py --yes`. There is no
+AMD engine in the Docker image, with Nix or on macOS; the first two keep their own engine even
+when they share `~/.shisu-ko` with a native setup that has one.
+
+**What setup does.** After the model download, `setup.cmd` / `setup.sh` run
+`server/amd_setup.py`, which looks for an AMD graphics card. Where it finds one the engine runs
+on, it names the card, says that the engine is experimental, how much it downloads and, on
+Windows, how much room it takes, and asks `Download the AMD engine? [y/N]`; anything but `y` or
+`yes` is a no, and so is an unattended setup. A card it does not know gets the question with a
+warning; a card the engine cannot run gets one line saying why, and no question. Next to an
+NVIDIA GPU the server stays on the NVIDIA GPU and the engine is not offered; `amd_setup.py --yes`
+installs it anyway, and the server then uses the AMD card instead. Whatever happens in this step,
+the setup finishes.
+
+On Windows a yes downloads about 1.27 GB: CTranslate2 4.8.2's ROCm build from its GitHub release
+and AMD's ROCm 7.2.1 runtime from `repo.radeon.com`. Installed, the engine takes about 3.90 GB,
+and about 5.31 GB must be free on the disk of `~/.shisu-ko` while it installs (where the system's
+temporary folder is on another disk, pip needs about 3.90 GB there as well); setup checks the
+free space before the first download and again before it installs. On Linux the download is
+about 284 MB, since the runtime is the system's own ROCm. Each file is checked against the size
+and SHA-256 pinned in `amd_setup.py` and installed with pip into a folder of its own,
+`~/.shisu-ko/rocm`; the downloads wait in `~/.shisu-ko/cache/rocm-download` meanwhile and are
+deleted afterwards. The venv's own CTranslate2 is never touched, so the NVIDIA and CPU engines
+stay exactly as they are.
+
+Then setup tests the engine: `server.py --probe-gpu` loads the model chosen at setup on the AMD
+GPU, in a process of its own, and transcribes two seconds of silence with it. That can take some
+minutes; the test gives up after 15. Only a test that passes switches the server over
+(`"engine": "rocm"` in `~/.shisu-ko/config.json`), and it ends with "The server will use the AMD
+GPU from its next start." A card or driver that is not up to it can kill the test's process,
+never the setup's. From then on every start logs
+`GPU engine: AMD ROCm (CTranslate2 4.8.2 from ...)` and loads the model "on the AMD GPU (ROCm)".
+
+**Checking, testing again, removing.** `run.cmd --check` (`run.sh --check`) prints
+`GPU engine: AMD ROCm (CTranslate2 4.8.2 from ...)` when the server uses the engine, and
+`GPU engine: AMD ROCm installed but not used:` with the reason when it does not; without the
+engine there is no such line. To CTranslate2 the AMD card is a CUDA device, so the line above it
+counts it as one, and `/health` reports the device as `cuda`. `amd_setup.py` runs with the
+venv's Python, `~/.shisu-ko/venv/Scripts/python server/amd_setup.py --status` on Windows
+(`venv/bin/python` on Linux), and its messages give the whole command for the next step:
+
+```
+amd_setup.py            look for an AMD card, ask, download, install and test
+amd_setup.py --yes      the same without the question, also next to an NVIDIA GPU or for a card
+                        it does not support; exits with 1 unless the engine ends up working
+amd_setup.py --probe    test the installed engine again, without a download; exits with 1 unless
+                        the test passes
+amd_setup.py --status   what is found, installed and switched on; downloads and changes nothing
+amd_setup.py --remove   switch the engine off, delete ~/.shisu-ko/rocm and any leftover downloads
+```
+
+Without `--yes` or `--probe` it always exits with 0, so that the setup scripts never fail on it.
+
+**When it fails.** A test that fails or crashes says why (the reason `server.py` gave, or "the
+test crashed" with the exit code) and leaves the engine switched off: the server stays on the
+NVIDIA GPU or the CPU, as before. The installed engine stays too, so that `amd_setup.py --probe`
+can test it again without a download, after a driver update for instance. A download that breaks
+off is tried once more, a file that does not match its pin is deleted and stops the install, and
+finished downloads are kept for the next try. A setup that no longer finds an AMD GPU switches
+an installed engine off.
+
+At a server start the engine can fail where Python cannot catch it: a card or driver that is not
+up to it kills the process, and `run.cmd` / `run.sh` would start it into the same crash again.
+The server therefore counts its starts on the AMD engine until one has loaded its model on the
+GPU and warmed it up; after two that did not, it leaves the engine off and starts on the default
+engine. A start whose engine does not load, or whose ROCm runtime sees no AMD GPU (a card removed
+or replaced, a driver it cannot use), leaves it off at once: the log says why, and the server
+exits with code 3, which the launcher answers with a start on the default engine (a server
+started by hand just stops, and its next start is on the default engine). On Linux the engine
+also stays off while ROCm 7.2's libraries are missing from `$ROCM_PATH/lib` (`/opt/rocm/lib` by
+default). In each case `run.cmd --check` gives the reason, and `amd_setup.py --probe` tests the
+engine again and switches it back on when it passes.
+
+To go back to the default engine for good, run `amd_setup.py --remove`: it switches the engine
+off in `config.json` and deletes `~/.shisu-ko/rocm` and any downloads left over, and the next
+start runs on the NVIDIA GPU or the CPU as before. `SHISUKO_ENGINE=default` in the server's
+environment leaves the engine off for the starts that have it, without removing anything.
+
+**Known limitations.**
+
+- It is not yet tested on AMD hardware by the maintainer. The card lists follow the GPU targets
+  CTranslate2's ROCm build is compiled for and the kernels in AMD's Windows runtime.
+- The engine uses the first AMD GPU the ROCm runtime lists (HIP device 0). On a machine with
+  both an AMD processor's graphics and an AMD card, that can be the wrong one, and the test fails
+  or runs on the processor's graphics. `HIP_VISIBLE_DEVICES` set to the card's number (`1`, say)
+  hides the others: set it where every start sees it, the Start button's too (a user environment
+  variable on Windows, the login shell's profile on Linux), then run `amd_setup.py --probe`.
+- On Windows, switching the model in the popup restarts the server: freeing a model can hang
+  AMD's runtime there, so the server hands the new name to its next start and exits with code
+  3, and `run.cmd` (which the popup's **Start server** button runs too) starts it again five
+  seconds later with that model. The subtitles stop for the restart and the load. A server
+  started as a plain `python server.py` has nothing to restart it and refuses the switch;
+  choose the model with `--model` there.
+- On Windows the server cannot read the AMD card's free memory, so it loads float16 weights and
+  never switches to int8 by itself; with little free VRAM, start it with
+  `--compute-type int8_float16` or pick a smaller model. On Linux it reads the free memory from
+  the amdgpu driver.
+- The engine is built for the venv's Python version: a venv rebuilt on another one runs on the
+  default engine until `amd_setup.py` has installed the matching build. A Shisu-ko update that
+  pins a newer engine leaves the installed one working, and `amd_setup.py` offers the update
+  (`Update the AMD engine? [y/N]`).
+- On Linux a variable that every start needs (`ROCM_PATH` when ROCm is not in `/opt/rocm`,
+  `HSA_OVERRIDE_GFX_VERSION`, `HIP_VISIBLE_DEVICES`) belongs in the login shell's profile: the
+  popup's **Start server** button starts the server without a terminal's exports.
 
 ## Docker
 
@@ -795,6 +987,8 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | "Loading model X…" stays on the video for a long time | A model picked in the popup is downloaded first, at your connection speed (large-v3 is 3 GB, small about 500 MB); the current model keeps subtitling meanwhile, and the transcript starts over once the new one is in. The popup's status line follows along. |
 | "Shisu-ko: model X: unknown model size" or "… was not found on Hugging Face" | The name in the popup's Transcription model field is not a faster-whisper size or an existing `owner/name` repo. Fix the name there; the previous model keeps running meanwhile. |
 | "Shisu-ko: model X: … not a CTranslate2/faster-whisper model" | The repo holds a PyTorch checkpoint, not converted weights. Convert it with `ct2-transformers-converter`, or pick a `*-ct2` or `faster-whisper` repo of the same model. |
+| "Shisu-ko: model kitsune-…: Kitsune models run on PyTorch, which is not installed" | Run `server/kitsune_setup.py` with the venv's Python (see [Kitsune-Transcribe models](#kitsune-transcribe-models)), or setup again picking a Kitsune model, then pick the model again. |
+| "Shisu-ko: model kitsune-…: its repo has no … folder" (or "no model at its root") | That size or precision is not published (yet). Pick another one. |
 | Server log says it has no model left and exits with code 3 | A switch failed and the previous model could not be reloaded either (usually GPU memory). The launcher restarts the server on its `--model`; fix or clear the name in the popup. |
 | Popup says "X was not found on this computer; the preset is used" or that a font name is letters, digits, spaces, dots, hyphens and underscores | Install the font, or type its family name exactly as the operating system lists it. Quotes, commas and other punctuation are refused; in both cases the preset font applies until the name resolves. |
 | "yt-dlp needs Node.js or Deno" | Install [Node.js](https://nodejs.org/) 20+ or [Deno](https://deno.com/), then restart the server. |
@@ -804,7 +998,8 @@ The extension does not change between native and Docker; both listen on `127.0.0
 | "This live stream offers no audio segments (DVR may be disabled)" | The streamer turned DVR off. Nothing can be done until the stream is published as a video. |
 | "The live stream has ended" | Reload the page once YouTube shows the recording; the server starts over on the video's clock. |
 | Server says "Only N MiB of GPU memory is free" or restarts by itself | Other programs (games, Wallpaper Engine, VR software) hold most of the VRAM. The server switches to int8 weights; with under about 2.5 GB free the display driver can reset under load (Windows logs LiveKernelEvent 141). Close GPU-heavy apps or type `kotoba-tech/kotoba-whisper-v2.0-faster` into the popup's model field. Cached cues survive restarts. |
-| CPU fallback, transcription far too slow | `run.cmd --check` should list one CUDA device; update the NVIDIA driver or type `small` into the popup's model field. On a Mac, `run.sh --check` should end with `Backend for --device auto: mlx`; if it says MLX is not usable, run `bash server/setup.sh` again (mlx-whisper needs Apple Silicon, not an Intel Mac). |
+| CPU fallback, transcription far too slow | `run.cmd --check` should list one CUDA device (with the AMD engine, the AMD card counts as one); update the NVIDIA driver or type `small` into the popup's model field. On a Mac, `run.sh --check` should end with `Backend for --device auto: mlx`; if it says MLX is not usable, run `bash server/setup.sh` again (mlx-whisper needs Apple Silicon, not an Intel Mac). |
+| `run.cmd --check` says "GPU engine: AMD ROCm installed but not used" | The rest of the line says why: no test of the engine has passed yet, it was installed for another Python, it did not get a model onto the AMD GPU at its last start, or (Linux) ROCm 7.2's libraries are missing. `amd_setup.py --probe` tests it again and switches it on when it passes; `amd_setup.py --remove` takes it out. See [AMD graphics cards](#amd-graphics-cards-experimental). |
 | Subtitles fall further and further behind on a Mac, although the GPU is being used | The model is too large for the memory left over by the browser. large-v3 on an M1 Pro runs at half playback speed with one YouTube video playing, because the GPU's memory is the browser's memory. Type `large-v3-turbo` into the popup's model field; it is the default for new installs and runs at eight times playback speed with the browser open. |
 | A word is wrong that the same model got right on another machine | On a Mac, check the model first: the default there is large-v3-turbo, whose decoder is a quarter of large-v3's and which mishears about one word in twenty lines; type `large-v3` into the popup's model field if the machine can afford it. Beyond that the two backends do not always pick the same homophone (線状降水帯 came out 線上降水帯 on the GPU). Both search five beams, so there is nothing to turn on; check that the server was not started with `--beam-size 1`, and `--device cpu` gives the CPU's answer at about half the speed. |
 | Mining says "AnkiConnect denied access" | Click **Yes** in the dialog Anki shows, then mine again. |
@@ -846,7 +1041,12 @@ server/
   server.py           HTTP server: yt-dlp + faster-whisper (MLX on Apple Silicon) + live
                       follower + clip cutting
   mlx_beam.py         the beam search mlx-whisper lacks; server.py loads it on the Apple GPU
+  kitsune_engine.py   the Kitsune-Transcribe models on PyTorch behind faster-whisper's interface:
+                      packages, quantised weights, CTC and cross-attention word timings
+  kitsune_setup.py    installs PyTorch and transformers for them, run by setup (stdlib only)
   setup.cmd/.sh       setup, downloads the model     run.cmd/.sh   start (with auto-restart)
+  amd_setup.py        the experimental AMD engine, run by setup: looks for a card, installs
+                      CTranslate2 for ROCm into ~/.shisu-ko/rocm and tests it (stdlib only)
   update.py           self-update run by run.cmd/.sh, first and after the server exits with code 4
                       (POST /update): git fast-forward or newest release
   native_host.py      native-messaging host behind the popup's Start server button (stdlib only);
@@ -882,8 +1082,10 @@ Checks:
 - Nix: `nix develop` gives the Python environment, `web-ext`, Node and Deno; `nix run .#tests`
   runs both test suites; `nix build .#addon` produces the extension zip.
 - Data lives in `~/.shisu-ko` (override with `SHISUKO_HOME`): `venv/`, `models/`, `cache/`,
-  `config.json` (the model and the browser for YouTube's sign-in chosen at setup), the instance
-  lock `server-8790.lock` (one per port,
+  `config.json` (the model and the browser for YouTube's sign-in chosen at setup, and
+  `"engine": "rocm"` once the AMD engine's test has passed), the AMD engine's `rocm/` with its
+  crash guard `rocm-starts` and, on Windows, `next-model` (the model a switch restarts the server
+  into), the instance lock `server-8790.lock` (one per port,
   held while a server runs), `server.log` (the output of a server the popup started,
   Linux/macOS) and, on Windows, the launcher's host manifests `native-messaging/shisuko.json`
   (Firefox) and `native-messaging/shisuko-chrome.json` (Chrome).
@@ -952,7 +1154,10 @@ Built on [faster-whisper](https://github.com/SYSTRAN/faster-whisper) and
 with [mlx-whisper](https://pypi.org/project/mlx-whisper/) on Apple Silicon,
 [yt-dlp](https://github.com/yt-dlp/yt-dlp),
 [PyAV](https://github.com/PyAV-Org/PyAV), OpenAI's [Whisper](https://github.com/openai/whisper)
-and [Kotoba-Whisper](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0).
+and [Kotoba-Whisper](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0), and for the Kitsune
+models on [PyTorch](https://pytorch.org/), [transformers](https://github.com/huggingface/transformers),
+[Cohere Transcribe](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) and NVIDIA's
+[Parakeet](https://huggingface.co/nvidia/parakeet-tdt_ctc-0.6b-ja).
 `server/mlx_beam.py` ports openai-whisper's beam search decoder (MIT) onto MLX. The mining flow
 follows the conventions of [Yomitan](https://yomitan.wiki/), [AnkiConnect](https://foosoft.net/projects/anki-connect/)
 and [asbplayer](https://github.com/killergerbah/asbplayer).

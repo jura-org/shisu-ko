@@ -17,7 +17,7 @@ player, so cues line up whatever latency the viewer is watching at.
 
 Endpoints
   GET  /health   -> {ok, version, model, default_model, model_loading, model_error, models, device, compute_type,
-                     language, launcher}
+                     engine, language, launcher}
   POST /sync     -> {ok, session, status, error, duration, title, live, covered, speech, cues, next, busy,
                      model, model_loading, model_error, heard, language_paused}
   GET  /clip?video_id=..&start=..&end=..&format=mp3|wav -> audio clip of a sentence (mining)
@@ -32,6 +32,11 @@ the Python environment, downloaded models, cached audio and cue files, and confi
 the model chosen at setup (server.py --download-model NAME), the default of --model, and the
 browser whose YouTube cookies every download sends (server.py --save-cookies-from-browser NAME),
 the default of --cookies-from-browser.
+
+The AMD engine (experimental) is CTranslate2's ROCm build, which server/amd_setup.py installs into
+~/.shisu-ko/rocm, apart from the venv, and turns on in config.json ("engine": "rocm") once a test
+run (server.py --probe-gpu) got a model through on the GPU. rocm_engine() puts that folder in front
+of the venv's own CTranslate2 before anything imports it; to faster-whisper it is still "cuda".
 """
 from __future__ import annotations
 
@@ -46,9 +51,11 @@ import math
 import os
 import re
 import shutil
+import signal
 import site
 import subprocess
 import sys
+import sysconfig
 import threading
 import time
 import uuid
@@ -69,23 +76,45 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.14.6"
+VERSION = "0.16.0"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
-# (sys.exit; a failed --download-model ends on it too), 3 asks for a plain restart (os._exit: a broken
-# GPU context, no model left) and
+# (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
+# broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
+# whose CTranslate2 does not load) and
 # EXIT_UPDATE asks the launcher to run update.py first and then start the server again (POST /update).
 EXIT_UPDATE = 4
 SAMPLE_RATE = 16000
 APP_DIR = Path(os.environ.get("SHISUKO_HOME") or (Path.home() / ".shisu-ko"))
 CACHE_DIR = APP_DIR / "cache"
 MODELS_DIR = APP_DIR / "models"
-CONFIG_PATH = APP_DIR / "config.json"  # {"model": ..., "cookies_from_browser": ...}, written at setup; read_config()
+# {"model": ..., "cookies_from_browser": ..., "engine": "rocm"}, written at setup; read_config()
+CONFIG_PATH = APP_DIR / "config.json"
+# The AMD engine: CTranslate2's ROCm build in a folder of its own (amd_setup.py installs it with pip
+# --target), never in the venv, whose PyPI build stays the NVIDIA/CPU engine. ROCM_MANIFEST in it
+# says what was installed and for which Python ({"ctranslate2", "rocm", "python", "platform", ...}).
+ROCM_DIR = APP_DIR / "rocm"
+ROCM_MANIFEST = "shisuko-rocm.json"
+# The platforms CTranslate2's ROCm wheels exist for: sysconfig's name, and the wheel's (and
+# ROCM_MANIFEST's "platform"). amd_setup.platform_key() maps them the same way.
+ROCM_PLATFORMS = {"win-amd64": "win_amd64", "linux-x86_64": "linux_x86_64"}
+# What the Linux wheel loads from the system's ROCm 7.2, in $ROCM_PATH/lib (amd_setup.LINUX_LIBRARIES).
+ROCM_LINUX_LIBRARIES = ("libamdhip64.so.7", "libhipblas.so.3", "libhiprand.so.1")
+# The crash guard: the number of server starts on the AMD engine since the last one that got a model
+# loaded and warmed up on the GPU. A card or driver the ROCm build cannot use can kill the process
+# where no except clause sees it, and the launcher would restart it into the same crash for ever.
+ROCM_STARTS_PATH = APP_DIR / "rocm-starts"
+ROCM_GUARD_LIMIT = 2  # starts that did not get through before the AMD engine is left off
+# The model a switch with the AMD engine on Windows restarts the server into (App.restart_for_model()).
+NEXT_MODEL_PATH = APP_DIR / "next-model"
+# Where Linux shows the AMD card's memory (amdgpu) and the GPUs' gfx targets (the ROCm kernel driver).
+DRM_ROOT = Path("/sys/class/drm")
+KFD_NODES_ROOT = Path("/sys/class/kfd/kfd/topology/nodes")
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,20}$")
 # A faster-whisper size or a Hugging Face repo id. WhisperModel() also opens local directories, so
 # anything else (paths, "..") is refused before it can point the server at an arbitrary folder.
 MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}(/[A-Za-z0-9][A-Za-z0-9._-]{0,95})?$")
-MODEL_NAME_HINT = ("not a model name: use a faster-whisper size (large-v3, large-v3-turbo, small, ...) "
-                   "or a Hugging Face repo id like owner/name")
+MODEL_NAME_HINT = ("not a model name: use a Kitsune model (kitsune-0.6b, kitsune-0.3b-int8, ...), a faster-whisper "
+                   "size (large-v3, large-v3-turbo, small, ...) or a Hugging Face repo id like owner/name")
 DEFAULT_MODEL = "large-v3"  # --model when neither the flag nor config.json names one
 # ... except on the Apple GPU, where large-v3's 2.9 GB of weights share unified memory with the
 # browser the viewer is watching in. Once they no longer fit, every decoder step pages them:
@@ -94,6 +123,27 @@ DEFAULT_MODEL = "large-v3"  # --model when neither the flag nor config.json name
 # decoder layers instead of thirty-two and 1.5 GB of weights, so it fits and stays at 7.9x real
 # time with the browser running, for one misheard word in the twenty-two lines of that window.
 MLX_DEFAULT_MODEL = "large-v3-turbo"
+# Kitsune-Transcribe's Japanese students (kitsune_engine.py), by name. Each repo holds the training
+# run's bf16 export at its root (the bare name) and each precision in a folder of its own, as
+# `python -m kitsune.quant export` writes it: kitsune-0.6b-int8 loads <repo>/int8-w8a16.
+KITSUNE_REPOS = {
+    "kitsune-0.6b": "Multy123/kitsune-transcribe-0.6b",
+    "kitsune-0.3b": "Multy123/kitsune-transcribe-0.3b",
+    "kitsune-0.1b": "Multy123/kitsune-transcribe-0.1b",
+}
+# A precision's short name -> its folder. The W8A8 / W4A4 files are byte-identical to the W8A16 /
+# W4A16 ones (the formats differ in the activations, which the server keeps 16-bit), so both
+# spellings load one folder and are one model to the server.
+PROBE_WHISPER_MODEL = "tiny"  # what --probe-gpu tests the AMD engine with when config.json names a Kitsune model
+KITSUNE_FORMATS = {"fp16": "fp16", "int8": "int8-w8a16", "fp8": "fp8-w8a8", "nvfp4": "nvfp4-w4a16", "mxfp4": "mxfp4-w4a4"}
+KITSUNE_FORMAT_ALIASES = {"bf16": "", "int8-w8a16": "int8", "int8-w8a8": "int8", "fp8-w8a8": "fp8",
+                          "nvfp4-w4a16": "nvfp4", "nvfp4-w4a4": "nvfp4", "mxfp4-w4a4": "mxfp4"}
+# The files of a Kitsune package that the server fetches (config, processor, tokenizer, weights, recipe, card).
+KITSUNE_FILES = ("config.json", "generation_config.json", "processor_config.json", "preprocessor_config.json",
+                 "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "model.safetensors",
+                 "quantization.json", "student_meta.json", "README.md", "MODEL_CARD.md")
+KITSUNE_INSTALL_HINT = ("Kitsune models run on PyTorch, which is not installed for this server: run server/setup.cmd "
+                        "(setup.sh) again and pick a Kitsune model, or install it with server/kitsune_setup.py")
 # The browsers yt-dlp reads cookies from (yt_dlp.cookies.SUPPORTED_BROWSERS), the names
 # --save-cookies-from-browser takes and config.json's "cookies_from_browser" may hold.
 COOKIE_BROWSERS = ("brave", "chrome", "chromium", "edge", "firefox", "opera", "safari", "vivaldi", "whale")
@@ -146,8 +196,221 @@ os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 # through: a failed download is reported by friendly_model_error() with its own words.
 os.environ.setdefault("HF_HUB_VERBOSITY", "error")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+# transformers (Kitsune models only) logs advice meant for training code at warning level.
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 NVIDIA_DIRS = add_nvidia_dll_dirs()
+
+
+def read_json_object(path: Path) -> dict:
+    """The JSON object in `path`, or {} for a missing, unreadable or corrupt file; never raises.
+
+    For what rocm_engine() reads at import time, before logging has a handler: config.json is read
+    again by read_config() moments later, which says why it ignores a file.
+    """
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except Exception:  # noqa: BLE001  (a deeply nested file raises RecursionError, not ValueError)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def python_tag(version_info=None, gil_disabled=None) -> str:
+    """This interpreter's CPython wheel tag (cp312; cp314t for a free-threaded build).
+
+    CTranslate2's wheels are built per tag, and the one in ROCM_DIR loads only into the Python it
+    was installed for: a venv rebuilt on a newer Python must fall back to its own CTranslate2.
+    """
+    major, minor = tuple(version_info or sys.version_info)[:2]
+    if gil_disabled is None:
+        gil_disabled = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+    return f"cp{major}{minor}" + ("t" if gil_disabled else "")
+
+
+def platform_key(name: Optional[str] = None) -> Optional[str]:
+    """This Python's platform as the ROCm wheels name it (win_amd64, linux_x86_64), from sysconfig's
+    name; None where no ROCm build exists (macOS, ARM, a 32-bit Python)."""
+    return ROCM_PLATFORMS.get(sysconfig.get_platform() if name is None else name)
+
+
+def in_container(environ=os.environ) -> bool:
+    """True inside Shisu-ko's Docker image (SHISUKO_CONTAINER, set by the Dockerfile).
+
+    Not any container: /.dockerenv and /run/.containerenv are in toolbox and distrobox too, which
+    share the home folder and its Firefox profile, so a setup run there reads and saves a browser
+    that its starts must then send.
+    """
+    return bool(environ.get("SHISUKO_CONTAINER"))
+
+
+def read_rocm_starts(path: Path) -> int:
+    """The crash guard's count (ROCM_STARTS_PATH); 0 for a missing, unreadable or garbled file."""
+    try:
+        return max(int(path.read_text(encoding="utf-8").strip()), 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def rocm_guard_allows(count: int) -> bool:
+    """Whether the AMD engine may be tried again after `count` starts that did not get through."""
+    return count < ROCM_GUARD_LIMIT
+
+
+def rocm_engine_state(config: dict, env, rocm_dir: Path, tag: str, guard_count: int,
+                      platform: Optional[str], prefix: str = "") -> tuple:
+    """(active, reason): whether this process runs on the AMD engine, and why or why not.
+
+    Never in Shisu-ko's Docker image (in_container()), whatever else says so: it shares the data
+    folder with the native setup (DATA_DIR), side folder and crash guard included, but has no ROCm
+    runtime, and a start that failed there would count against the native server's guard. Nor
+    under a Python from the Nix store (`prefix`, sys.base_prefix: `nix run .` and its dev shell
+    share ~/.shisu-ko too): the side folder's manylinux build needs the system's libraries, which
+    Nix's loader does not search.
+    SHISUKO_ENGINE=rocm|default decides over config.json (--probe-gpu runs with rocm before
+    config.json says anything); config.json's "engine" is written only by a probe that passed.
+    The engine also needs the CTranslate2 package in `rocm_dir`, installed for this Python (`tag`)
+    on this platform (`platform`, platform_key()), and a crash guard that has not given up on it.
+    The reason is shown by --check and the log.
+    """
+    if in_container(env):
+        return False, ("Shisu-ko's Docker image keeps its own engine; the side folder in the data folder it shares "
+                       "with the native setup is that setup's")
+    if prefix.startswith("/nix/store/"):
+        return False, ("Nix's Python keeps its own engine; the side folder in the data folder it shares with the "
+                       "native setup is that setup's (it needs the system's libraries, which Nix's loader does not search)")
+    choice = str(env.get("SHISUKO_ENGINE") or "").strip().lower()
+    if choice == "default":
+        return False, "SHISUKO_ENGINE=default asks for the default engine"
+    if choice == "rocm":
+        source = "SHISUKO_ENGINE=rocm"
+    elif config.get("engine") == "rocm":
+        source = "config.json"
+    else:
+        return False, ("config.json does not turn it on, which only a passed test does "
+                       "(server/amd_setup.py --probe tests the AMD GPU again)")
+    if not (rocm_dir / "ctranslate2" / "__init__.py").is_file():
+        return False, f"{rocm_dir} holds no CTranslate2 (server/amd_setup.py installs it)"
+    manifest = read_json_object(rocm_dir / ROCM_MANIFEST)
+    built_for = manifest.get("python")
+    if built_for != tag:
+        return False, (f"it was installed for {built_for or 'an unknown Python'} and this Python is {tag} "
+                       "(server/amd_setup.py installs the matching one)")
+    built_on = manifest.get("platform")
+    if platform is None or built_on != platform:
+        return False, (f"it was installed for {built_on or 'an unknown platform'} and this is "
+                       f"{platform or 'a platform without an AMD build'} (server/amd_setup.py installs the matching one)")
+    if not rocm_guard_allows(guard_count):
+        # No count in the words: check_rocm_import() sets the guard to its limit after one start.
+        return False, ("the AMD engine did not get a model onto the AMD GPU at its last start (a crash, a CTranslate2 "
+                       "that did not load, or no AMD GPU in sight), so the server leaves it off until "
+                       "server/amd_setup.py --probe tests it again")
+    return True, f"AMD ROCm, CTranslate2 from {rocm_dir} (turned on by {source})"
+
+
+def rocm_root(env) -> str:
+    """Where the system's ROCm lives on Linux: $ROCM_PATH, default /opt/rocm (no trailing slash)."""
+    return (env.get("ROCM_PATH") or "/opt/rocm").rstrip("/")
+
+
+def rocm_library_path(env) -> Optional[str]:
+    """The LD_LIBRARY_PATH the ROCm build needs on Linux, or None when $ROCM_PATH/lib is on it already.
+
+    The Linux wheel links against the system's ROCm (libamdhip64.so.7, libhipblas.so.3 under
+    $ROCM_PATH/lib, default /opt/rocm; OpenMP under lib/llvm/lib). AMD's post-install step puts
+    them in ld.so.conf, but not every install did it, and the dynamic loader reads LD_LIBRARY_PATH
+    only when a process starts: rocm_engine() starts the server once more with this value.
+    """
+    root = rocm_root(env)
+    lib = root + "/lib"
+    current = env.get("LD_LIBRARY_PATH") or ""
+    if lib in (entry.rstrip("/") for entry in current.split(":")):
+        return None
+    return ":".join([lib, root + "/lib/llvm/lib"] + ([current] if current else []))
+
+
+def missing_rocm_libraries(env, exists=os.path.exists) -> list:
+    """The ROCM_LINUX_LIBRARIES that are not in $ROCM_PATH/lib (rocm_root()); [] when all are there.
+
+    amd_setup.py installs the Linux engine only where they are, but ROCm can be removed or
+    upgraded past 7.2 later, and a ROCM_PATH exported in the terminal that ran the setup is not
+    in the Start button's environment: every start would then fail on the import, with exit
+    code 2, which the launcher never retries. Without them the server keeps the default engine,
+    and takes the AMD one again by itself once they are back.
+    """
+    lib = rocm_root(env) + "/lib"
+    return [name for name in ROCM_LINUX_LIBRARIES if not exists(lib + "/" + name)]
+
+
+def rocm_engine(argv, environ, script: bool, platform: str = sys.platform) -> tuple:
+    """Put the AMD engine in front of the venv's CTranslate2 when it is turned on; (active, reason).
+
+    Runs at import time, before anything imports ctranslate2 or faster_whisper, and never raises.
+    With the engine off (no side folder, no "engine": "rocm") nothing changes at all. On, ROCM_DIR
+    goes first on sys.path and CTranslate2 gets the cub_caching allocator: its default on Linux
+    loses text or aborts on AMD cards (CTranslate2 #2090, #2021), and it must be set before the
+    first allocation. A program that only imports this file (the tools in server/tools) ends
+    through the interpreter's own exit, where main()'s finish() cannot reach: on Windows it keeps
+    the default engine even with SHISUKO_ENGINE=rocm, since once it has loaded a model, freeing it
+    and that exit hang every time with the ROCm runtime (CTranslate2 #2038, #2085, #2101). On Linux
+    SHISUKO_ENGINE=rocm turns the AMD engine on for it, provided $ROCM_PATH/lib is on its
+    LD_LIBRARY_PATH already, since it is not started again. On Linux the ROCm libraries have to
+    be on LD_LIBRARY_PATH from the start of the process, so the server starts itself once more
+    with them (SHISUKO_ROCM_REEXEC=1 makes it once); without them in $ROCM_PATH/lib it keeps the
+    default engine.
+    --probe-gpu ignores the crash guard: it is how a guarded engine gets tested again.
+    """
+    try:
+        probe = "--probe-gpu" in argv[1:]
+        guard = 0 if probe else read_rocm_starts(ROCM_STARTS_PATH)
+        active, reason = rocm_engine_state(read_json_object(CONFIG_PATH), environ, ROCM_DIR, python_tag(), guard,
+                                           platform_key(), sys.base_prefix)
+    except Exception as exc:  # noqa: BLE001  (a side folder this user may not read: is_file() raises on EACCES)
+        return False, f"{ROCM_DIR} could not be checked ({exc})"
+    if not active:
+        return False, reason
+    if not script and platform.startswith("win"):
+        return False, ("a program that only imports server.py keeps the default engine on Windows: once it has "
+                       "loaded a model, its exit through the interpreter hangs with the ROCm runtime "
+                       "(CTranslate2 #2085, #2101)")
+    if not script and str(environ.get("SHISUKO_ENGINE") or "").strip().lower() != "rocm":
+        return False, ("a program that only imports server.py keeps the default engine "
+                       "(SHISUKO_ENGINE=rocm turns the AMD engine on for it too, on Linux)")
+    if platform.startswith("linux"):
+        missing = missing_rocm_libraries(environ)
+        if missing:
+            return False, (f"{', '.join(missing)} of ROCm 7.2 not found under {rocm_root(environ)}/lib (set ROCM_PATH "
+                           "where it lives, or server/amd_setup.py --remove takes the AMD engine out)")
+    if platform.startswith("linux") and environ.get("SHISUKO_ROCM_REEXEC") != "1":
+        library_path = rocm_library_path(environ)
+        if library_path is not None:
+            if not script:
+                return False, (f"$ROCM_PATH/lib is not on LD_LIBRARY_PATH, which server.py sets itself only when it "
+                               f"runs as the server (export LD_LIBRARY_PATH={library_path} first)")
+            saved = {name: environ.get(name) for name in ("LD_LIBRARY_PATH", "SHISUKO_ROCM_REEXEC")}
+            environ["LD_LIBRARY_PATH"] = library_path
+            environ["SHISUKO_ROCM_REEXEC"] = "1"
+            for stream in (sys.stdout, sys.stderr):
+                try:
+                    stream.flush()  # execv() drops what this process has not written yet
+                except Exception:  # noqa: BLE001  (None under pythonw)
+                    pass
+            try:
+                os.execv(sys.executable, [sys.executable] + list(argv))
+            except Exception as exc:  # noqa: BLE001
+                for name, value in saved.items():
+                    if value is None:
+                        environ.pop(name, None)
+                    else:
+                        environ[name] = value
+                return False, f"the server could not start itself again with the ROCm libraries on LD_LIBRARY_PATH ({exc})"
+    sys.path.insert(0, str(ROCM_DIR))
+    environ.setdefault("CT2_CUDA_ALLOCATOR", "cub_caching")
+    return True, reason
+
+
+# The AMD engine, when setup installed it and its test passed. Logged by main(), shown by --check.
+ROCM_ACTIVE, ROCM_REASON = rocm_engine(sys.argv, os.environ, script=__name__ == "__main__")
 
 import numpy as np  # noqa: E402  (after the DLL setup on purpose)
 
@@ -2349,6 +2612,36 @@ def wants_lyrics(args, audio, speech, start: float, end: float) -> bool:
     return speech_seconds(speech, start, end) < LYRICS_MAX_SPEECH_S and rms(audio) >= LYRICS_MIN_RMS
 
 
+def transcribe_options(args, model, lyrics: bool) -> dict:
+    """The options of a window's model.transcribe() call: Transcriber.process() and dump_words.py
+    both take them from here, so the A/B rig decodes what the server does.
+
+    A Kitsune model reads the VAD options alone and gets no prompt (its decoder prompt is fixed,
+    `takes_prompt`), so retry_prompt_skips() never decodes a window twice for it.
+    """
+    options = dict(
+        language=args.language,
+        task="transcribe",
+        beam_size=args.beam_size,
+        word_timestamps=True,
+        condition_on_previous_text=False,
+        initial_prompt=(args.initial_prompt or None) if getattr(model, "takes_prompt", True) else None,
+        temperature=[0.0, 0.2, 0.4, 0.6],
+        no_speech_threshold=0.6,
+        log_prob_threshold=-1.0,
+        compression_ratio_threshold=2.4,
+        hallucination_silence_threshold=2.0,
+    )
+    if lyrics:
+        # No prompt on this path. The lyrics gates were measured on unprompted decodes, and the
+        # blocklist holds no sentence of the prompt, so a noisy window the language head lets
+        # through could echo the prompt itself into the cache with nothing to catch it.
+        options.update(vad_filter=False, initial_prompt=None)
+    else:
+        options.update(vad_filter=True, vad_parameters=vad_parameters())
+    return options
+
+
 def unsung_stretches(audio, start: float, end: float, speech, cues,
                      min_seconds: float = LYRICS_MIN_STRETCH_S) -> list:
     """The parts of a talk window, at least `min_seconds` long, that the detector heard nothing in
@@ -2392,6 +2685,18 @@ def language_vote(s: Session, heard: Optional[str], seconds: float, target: str,
     if s.foreign_seconds >= patience:
         s.language_paused = True
     return not s.language_paused
+
+
+# What a failed decode says when the GPU itself is gone (a driver reset, its memory exhausted): CUDA's
+# libraries, and ROCm's for the AMD engine, whose CTranslate2 build mostly still says "CUDA failed".
+# "hip error" must start a word, or "relationship error" would count.
+GPU_BROKEN_RE = re.compile(r"cuda|cudnn|cublas|hipblas|rocblas|hiprand|\bhip ?error|hsa_status|memory access fault",
+                           re.IGNORECASE)
+
+
+def gpu_context_broken(message) -> bool:
+    """Whether a failed transcription means a broken GPU context, which only a restart of the process mends."""
+    return GPU_BROKEN_RE.search(str(message)) is not None
 
 
 class Transcriber(threading.Thread):
@@ -2508,12 +2813,14 @@ class Transcriber(threading.Thread):
             speech = [[start, end]]
 
         # Detection costs an encoder pass of its own, about a second a window on large-v3 and the
-        # same on turbo, whose smaller decoder does not shrink the encoder. It buys nothing on a
-        # video YouTube has already named: declared_language() agreed with --language before the
-        # audio was fetched, and a video that disagreed was never fetched at all. So it runs only
-        # where it is still the only evidence there is, which is a video YouTube names nothing for.
+        # same on turbo, whose smaller decoder does not shrink the encoder. Three things make it
+        # pointless: --language-patience 0, a model without a language head (Kitsune is Japanese
+        # only), and a video YouTube has already named, where declared_language() agreed with
+        # --language before the audio was fetched and a video that disagreed was never fetched at
+        # all. So it runs only where it is still the only evidence there is.
         wanted = True
-        if float(getattr(args, "language_patience", 0.0) or 0.0) > 0:
+        if (float(getattr(args, "language_patience", 0.0) or 0.0) > 0
+                and getattr(self.app.model, "detects_language", True)):
             if s.declared_language != args.language:
                 try:
                     wanted = self.watch_language(s, audio, speech, start, end)
@@ -2548,27 +2855,10 @@ class Transcriber(threading.Thread):
         # noise and a foreign song stay with the detector, which decodes nothing of them. The
         # language watch above cast no vote on such a window, and the head's verdict here is no
         # vote either: a foreign song never pauses.
-        lyrics = wants_lyrics(args, audio, speech, start, end) and self.sung_in_target(s, audio, start, end)
-        options = dict(
-            language=args.language,
-            task="transcribe",
-            beam_size=args.beam_size,
-            word_timestamps=True,
-            condition_on_previous_text=False,
-            initial_prompt=args.initial_prompt or None,
-            temperature=[0.0, 0.2, 0.4, 0.6],
-            no_speech_threshold=0.6,
-            log_prob_threshold=-1.0,
-            compression_ratio_threshold=2.4,
-            hallucination_silence_threshold=2.0,
-        )
-        if lyrics:
-            # No prompt on this path. The lyrics gates were measured on unprompted decodes, and the
-            # blocklist holds no sentence of the prompt, so a noisy window the language head lets
-            # through could echo the prompt itself into the cache with nothing to catch it.
-            options.update(vad_filter=False, initial_prompt=None)
-        else:
-            options.update(vad_filter=True, vad_parameters=vad_parameters())
+        # A model whose gates this path has no figures for (Kitsune) never takes it.
+        lyrics = (getattr(self.app.model, "sings", True) and wants_lyrics(args, audio, speech, start, end)
+                  and self.sung_in_target(s, audio, start, end))
+        options = transcribe_options(args, self.app.model, lyrics)
         try:
             segments, _info = self.app.model.transcribe(audio, **options)
             segs = list(segments)
@@ -2577,9 +2867,9 @@ class Transcriber(threading.Thread):
                 segs, skipped, spliced = retry_prompt_skips(self.app.model, audio, options, segs, start, speech)
         except Exception as exc:  # noqa: BLE001
             log.error("[%s] transcription of %s-%s failed: %s", s.video_id, fmt_time(start), fmt_time(end), exc)
-            if "cuda" in str(exc).lower() or "cudnn" in str(exc).lower() or "cublas" in str(exc).lower():
+            if gpu_context_broken(exc):
                 log.error("The GPU context looks broken (driver reset or out of memory). Exiting so the launcher can restart the server.")
-                os._exit(3)
+                hard_exit(3)
             with s.lock:
                 s.busy = None
                 s.covered = merge_intervals(s.covered + [[start, end]])
@@ -2605,10 +2895,10 @@ class Transcriber(threading.Thread):
         # window went its way and nothing of the singing was decoded. Its loud unheard stretches are
         # not covered; the planner brings each back as a window of its own, where wants_lyrics()
         # sees next to no speech. Only a window that the speech heard in it kept from the lyrics
-        # path: one the head refused (or --lyrics off) is covered whole, or it would be planned
-        # for ever.
+        # path: one the head refused (or --lyrics off, or a model without the path) is covered
+        # whole, or it would be planned for ever.
         unsung: list = []
-        if not lyrics and getattr(args, "lyrics", "auto") == "auto" \
+        if not lyrics and getattr(args, "lyrics", "auto") == "auto" and getattr(self.app.model, "sings", True) \
                 and speech_seconds(speech, start, end) >= LYRICS_MAX_SPEECH_S:
             unsung = unsung_stretches(audio, start, new_end, speech, fresh)
 
@@ -2644,7 +2934,7 @@ class Transcriber(threading.Thread):
 # --------------------------------------------------------------------------- application
 
 class App:
-    def __init__(self, args, model, device: str, compute_type: str):
+    def __init__(self, args, model, device: str, compute_type: str, model_name: Optional[str] = None):
         self.args = args
         self.model = model
         self.device = device
@@ -2653,8 +2943,10 @@ class App:
         # Only the transcriber thread replaces self.model (switch_model_if_wanted, between windows),
         # so the HTTP threads never touch a model that is being freed or loaded. Names are kept in
         # their canonical form (canonical_model_name) so that an alias and its repo id compare equal.
+        # `model_name` is a model other than --model that this start loaded: the one a switch
+        # restarted the server into (restart_for_model()).
         self.default_model = canonical_model_name(getattr(args, "model", None))
-        self.model_name = self.default_model
+        self.model_name = model_name or self.default_model
         self.wanted_model = self.model_name
         self.model_loading: Optional[str] = None  # the name being prepared or swapped in
         self.model_preparing: Optional[str] = None  # a download runs for this name on prepare_thread
@@ -2682,6 +2974,7 @@ class App:
                 "models": downloaded_models(),
                 "device": self.device,
                 "compute_type": self.compute_type,
+                "engine": "kitsune" if getattr(self.model, "family", None) else "whisper",
             }
         return {"ok": True, "version": VERSION, **state, "language": self.args.language,
                 "launcher": self.update_blocker() is None}
@@ -2765,7 +3058,9 @@ class App:
         here, on the transcriber thread so no window runs meanwhile, and the old model is released
         before the new one loads: on a GPU whose memory is mostly held by other programs the two
         rarely fit side by side. If the previous model cannot come back after a failed swap, the
-        server exits with code 3 so the launcher restarts it with the default.
+        server exits with code 3 so the launcher restarts it with the default. With the AMD engine
+        on Windows the swap is a restart instead (restart_for_model()), refused before its download
+        when nothing would start the server again (restart_blocker()).
         """
         with self.lock:
             wanted, previous = self.wanted_model, self.model_name
@@ -2785,6 +3080,15 @@ class App:
                 self.model_prepared = None  # files of a name nobody wants any more
                 if self.in_cooldown(wanted):
                     return False
+                blocked = self.restart_blocker()
+                if blocked is not None:
+                    # Refused before the download: its files would be fetched for a switch that cannot happen.
+                    log.error("Staying with the model '%s' instead of '%s': %s", previous, wanted, blocked)
+                    self.model_error = (wanted, blocked)
+                    self.model_failed_at = time.time()
+                    self.wanted_model = previous  # nothing retries on its own: the client has to ask again
+                    self.model_loading = None
+                    return False
                 if self.model_error is not None and self.model_error[0] == wanted:
                     self.model_error = None  # a fresh attempt: the old verdict would be reported beside it
                 self.model_preparing = self.model_loading = wanted
@@ -2794,9 +3098,13 @@ class App:
                 return False
             self.model_prepared = None
             self.model_loading = wanted
+        if rocm_on_windows():
+            self.restart_for_model(wanted, previous)
+            return False  # the restart could not be asked for; the old model keeps working
         log.info("Switching from model '%s' to '%s'", previous, wanted)
         self.model = None
         gc.collect()  # CTranslate2 gives the GPU memory back once the last reference is gone
+        release_torch_memory()  # PyTorch (a Kitsune model) keeps it cached until asked
         try:
             loaded = load_model(self.args, wanted, path=prepared[1])
         except Exception as exc:  # noqa: BLE001
@@ -2817,11 +3125,52 @@ class App:
         self.restart_sessions()
         return True
 
+    def restart_blocker(self) -> Optional[str]:
+        """Why a model switch cannot happen here, or None when it can.
+
+        With the AMD engine on Windows a switch ends the process for run.cmd to start again
+        (restart_for_model()), and only run.cmd's loop does that, which it says through
+        SHISUKO_LAUNCHER: under a plain `python server.py` the exit would just end the server.
+        --no-update does not matter, unlike for update_blocker(): run.cmd restarts after code 3
+        all the same. Everywhere else the switch stays in the process and nothing blocks it.
+        """
+        if not rocm_on_windows() or os.environ.get("SHISUKO_LAUNCHER") == "1":
+            return None
+        return ("with the AMD engine on Windows a model switch restarts the server, which only run.cmd (or the "
+                "popup's Start button) does; start the server that way, or choose the model with --model")
+
+    def restart_for_model(self, name: str, previous) -> None:
+        """Switch to `name` by restarting the server into it: the switch of the AMD engine on Windows.
+
+        Freeing a model can deadlock the ROCm runtime there (CTranslate2 #2038), so the old one is
+        never released in this process: `name`, whose files prepare_model() has already fetched,
+        goes to NEXT_MODEL_PATH, and the process ends with code 3, which run.cmd answers with a
+        start five seconds later; start_app() loads the model named there. Returns only when the
+        file cannot be written, with the failure reported as a failed switch is.
+        """
+        try:
+            NEXT_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+            NEXT_MODEL_PATH.write_text(name + "\n", encoding="utf-8")
+        except OSError as exc:
+            log.error("Could not write %s (%s); staying with the model '%s'", NEXT_MODEL_PATH, exc, previous)
+            with self.lock:
+                self.model_error = (name, f"the server could not restart into '{name}' ({exc})")
+                self.model_failed_at = time.time()
+                if self.wanted_model == name:
+                    self.wanted_model = previous
+                self.model_loading = None
+            return
+        log.info("Switching from model '%s' to '%s': with the AMD engine on Windows a switch restarts the server "
+                 "(freeing a model can hang there)", previous, name)
+        hard_exit(3)
+
     def prepare_model(self, name: str) -> None:
         """Download (or locate) the files of `name` and hand them to the transcriber; runs on its own thread."""
         try:
-            if name == self.default_model and os.path.isdir(name):
-                path = name  # the operator's --model is a folder (see request_model): nothing to download
+            if operator_folder(self.args, name):
+                path = operator_folder(self.args, name)  # the operator's --model is a folder (see request_model): nothing to download
+            elif is_kitsune_model_named(name) and kitsune_language_error(self.args):
+                raise ValueError(kitsune_language_error(self.args))  # before gigabytes of a model that cannot load
             else:
                 # self.device is the backend the loaded model runs on, so the files are the ones
                 # the swap will need: CTranslate2 for cuda and cpu, MLX weights for the Apple GPU.
@@ -2847,7 +3196,7 @@ class App:
         except Exception as exc:  # noqa: BLE001
             log.error("Could not load the previous model '%s' either (%s). The server has no model left; "
                       "exiting so the launcher can restart it.", name, exc)
-            os._exit(3)
+            hard_exit(3)
         with self.lock:
             self.model, self.device, self.compute_type = loaded
             self.model_loading = None
@@ -3316,6 +3665,89 @@ class Handler(BaseHTTPRequestHandler):
 
 # --------------------------------------------------------------------------- startup
 
+def rocm_on_windows() -> bool:
+    """Whether this process runs the AMD engine on Windows, where the ROCm runtime can hang its end."""
+    return ROCM_ACTIVE and os.name == "nt"
+
+
+# Every model load_model() built where rocm_on_windows(): freeing one can deadlock the ROCm runtime
+# there (CTranslate2 #2038, #2101), so none is let go, not by a function that returns (--probe-gpu)
+# nor by the traceback of a failed warm-up. Such a process ends through TerminateProcess anyway,
+# and its model switch is a restart (App.restart_for_model()), so nothing is held longer than before.
+KEPT_MODELS: list = []
+
+
+def end_on_ctrl_c(on_interrupt):
+    """Where rocm_on_windows(), make Ctrl+C and Ctrl+Break call on_interrupt(), which ends the process,
+    instead of raising KeyboardInterrupt; returns the handler to put back on both afterwards (None
+    where nothing changed).
+
+    A model load is one long call into CTranslate2, and a Ctrl+C during it raises KeyboardInterrupt
+    the moment the call returns, before faster-whisper has stored the new model: the unwinding frees
+    it, which can hang the ROCm runtime on Windows (#2038), before any except clause could end the
+    process. A handler of Python's own runs at that same point, but nothing unwinds. Python leaves
+    Ctrl+Break (SIGBREAK) to the console, whose default handler ends the process through
+    ExitProcess, with the DLL detach that terminate_process() exists to skip; so it gets the same handler.
+    """
+    if not rocm_on_windows():
+        return None
+
+    def handler(signum, frame):
+        on_interrupt()
+
+    previous = signal.signal(signal.SIGINT, handler)
+    signal.signal(signal.SIGBREAK, handler)
+    return signal.default_int_handler if previous is None else previous
+
+
+def flush_output() -> None:
+    """Write out what the log handlers, stdout and stderr still hold, before an exit that skips Python's clean-up."""
+    handlers = list(logging.getLogger().handlers)
+    for logger in list(logging.Logger.manager.loggerDict.values()):
+        handlers.extend(getattr(logger, "handlers", []))  # placeholders have none
+    for stream in handlers + [sys.stdout, sys.stderr]:
+        try:
+            stream.flush()
+        except Exception:  # noqa: BLE001  (a closed handler, no stdout under pythonw)
+            pass
+
+
+def terminate_process(code: int) -> None:
+    """End this process at once with `code` through TerminateProcess, once the log and stdio are flushed.
+
+    CTranslate2's ROCm build on Windows can hang the way out of a process: freeing a model, the
+    interpreter's exit and even os._exit(), inside the runtime's DLL detach (CTranslate2 #2038,
+    #2085, #2101, the last even on the CPU). TerminateProcess runs no DLL detach at all; it is
+    what helped there. The process is gone when the call returns, unless it failed.
+    """
+    import ctypes
+
+    flush_output()
+    kernel32 = ctypes.windll.kernel32
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel32.TerminateProcess.argtypes = (ctypes.c_void_p, ctypes.c_uint)
+    kernel32.TerminateProcess(kernel32.GetCurrentProcess(), code)
+
+
+def hard_exit(code: int) -> None:
+    """os._exit(code), the exit that waits for no thread; TerminateProcess where rocm_on_windows()."""
+    if rocm_on_windows():
+        terminate_process(code)
+    os._exit(code)
+
+
+def finish(code: Optional[int] = None) -> None:
+    """How main() ends: sys.exit(code), or a plain return for None (its normal end).
+
+    Where rocm_on_windows() the interpreter's own exit can hang, so both end in TerminateProcess
+    instead, with 0 for the normal end.
+    """
+    if rocm_on_windows():
+        terminate_process(code or 0)
+    if code is not None:
+        sys.exit(code)
+
+
 def cuda_available() -> bool:
     try:
         import ctranslate2
@@ -3325,8 +3757,41 @@ def cuda_available() -> bool:
         return False
 
 
+def amd_vram_mb(root: Path):
+    """(free, total) MiB of the AMD card with the most memory under `root` (/sys/class/drm), or None.
+
+    amdgpu shows each card's memory in bytes (device/mem_info_vram_total and _used) next to its PCI
+    vendor (0x1002). The largest card is taken, since beside a dedicated card an AMD processor's
+    own graphics shows up too, with a small carve-out of system memory that is not where a model runs.
+    """
+    try:
+        cards = sorted((p for p in root.iterdir() if re.fullmatch(r"card\d+", p.name)), key=lambda p: int(p.name[4:]))
+    except OSError:
+        return None
+    best = None
+    for card in cards:
+        device = card / "device"
+        try:
+            if (device / "vendor").read_text(encoding="ascii").strip().lower() != "0x1002":
+                continue
+            total = int((device / "mem_info_vram_total").read_text(encoding="ascii").strip())
+            used = int((device / "mem_info_vram_used").read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            continue
+        if total > 0 and (best is None or total > best[1]):
+            best = (max(total - used, 0), total)
+    return None if best is None else (best[0] // (1024 * 1024), best[1] // (1024 * 1024))
+
+
 def gpu_memory_mb():
-    """(free, total) GPU memory in MiB via nvidia-smi, or None if unavailable."""
+    """(free, total) GPU memory in MiB via nvidia-smi, or None if unavailable.
+
+    With the AMD engine the model runs on an AMD card whatever else the machine holds: its memory
+    comes from amdgpu's sysfs files on Linux, and on Windows there is nothing to ask (float16, as
+    on an NVIDIA machine without nvidia-smi).
+    """
+    if ROCM_ACTIVE:
+        return amd_vram_mb(DRM_ROOT) if sys.platform.startswith("linux") else None
     exe = shutil.which("nvidia-smi")
     if exe is None and os.name == "nt":
         candidate = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "nvidia-smi.exe")
@@ -3612,15 +4077,37 @@ def model_alias_tables() -> tuple:
     return _MODEL_ALIASES
 
 
+def kitsune_name(name) -> Optional[tuple]:
+    """(base, precision) of a Kitsune model name, else None: kitsune-0.6b is ("kitsune-0.6b", ""), the
+    bf16 export; kitsune-0.6b-int8-w8a8 is ("kitsune-0.6b", "int8"). A repo id of KITSUNE_REPOS is its
+    base name. An unknown precision gives ("kitsune-0.6b", None), which download_model_files() refuses."""
+    if not isinstance(name, str):
+        return None
+    for base, repo in KITSUNE_REPOS.items():
+        if name in (base, repo):
+            return base, ""
+        if name.startswith(base + "-"):
+            suffix = name[len(base) + 1:]
+            if suffix in KITSUNE_FORMATS:
+                return base, suffix
+            return base, KITSUNE_FORMAT_ALIASES.get(suffix)
+    return None
+
+
 def canonical_model_name(name):
     """One name per set of weights: large-v3 for Systran/faster-whisper-large-v3, large and itself.
 
     faster-whisper's size aliases and their repo ids load the same files, so the server compares,
-    reports and caches under the first alias of the repo. An MLX repo is the same weights converted
-    for the Apple GPU, so it answers to the size too. Anything else passes through.
+    reports and caches under the first alias of the repo. A Kitsune name comes out as its base
+    plus its precision's short name (kitsune-0.6b-int8 for -int8-w8a8, kitsune-0.6b for its repo
+    id or -bf16). An MLX repo is the same weights converted for the Apple GPU, so it answers to
+    the size too. Anything it does not know passes through.
     """
     if not isinstance(name, str):
         return name
+    kit = kitsune_name(name)
+    if kit is not None and kit[1] is not None:
+        return kit[0] + (f"-{kit[1]}" if kit[1] else "")
     name = MLX_ALIASES.get(name, name)
     forward, reverse = model_alias_tables()
     return reverse.get(forward.get(name, name), name)
@@ -3633,6 +4120,12 @@ def model_spellings(name) -> list:
     popup can match whatever spelling the viewer typed without a table of its own. A name the
     table does not know is its own only spelling.
     """
+    kit = kitsune_name(name)
+    if kit is not None and kit[1] is not None:
+        base, fmt = kit
+        if not fmt:
+            return [base, f"{base}-bf16", KITSUNE_REPOS[base]]
+        return [f"{base}-{fmt}"] + [f"{base}-{alias}" for alias, short in KITSUNE_FORMAT_ALIASES.items() if short == fmt]
     forward, _ = model_alias_tables()
     # Through the canonical name, so that an MLX repo answers with the sizes too, not only itself.
     canonical = canonical_model_name(name)
@@ -3640,6 +4133,21 @@ def model_spellings(name) -> list:
     spellings = [alias for alias, target in forward.items() if target == repo] + [repo]
     mlx = MLX_REPOS.get(canonical)
     return spellings + [mlx] if mlx and mlx not in spellings else spellings
+
+
+def kitsune_downloaded(repo_dir: Path, base: str) -> set:
+    """The Kitsune names whose files are in the hub folder of `base`'s repo: the bare name for a
+    root package, base-<short> for each precision folder."""
+    names = set()
+    folders = {folder: short for short, folder in KITSUNE_FORMATS.items()}
+    for snap in (repo_dir / "snapshots").glob("*"):
+        if (snap / "config.json").is_file() and (snap / "model.safetensors").exists():
+            names.add(base)
+        for sub in snap.glob("*"):
+            short = folders.get(sub.name)
+            if short and (sub / "config.json").is_file() and (sub / "model.safetensors").exists():
+                names.add(f"{base}-{short}")
+    return names
 
 
 def downloaded_models() -> list:
@@ -3650,7 +4158,11 @@ def downloaded_models() -> list:
     for p in MODELS_DIR.glob("models--*"):
         parts = p.name[len("models--"):].split("--")
         if p.is_dir() and len(parts) == 2 and all(parts):
-            names.add(canonical_model_name("/".join(parts)))
+            kit = kitsune_name("/".join(parts))
+            if kit is not None:
+                names |= kitsune_downloaded(p, kit[0])
+            else:
+                names.add(canonical_model_name("/".join(parts)))
     return sorted(names)
 
 
@@ -3668,9 +4180,23 @@ def download_model_files(name: str, device: str = "cpu") -> str:
     size), treats owner/name as a Hugging Face repo id and downloads only the model files. Nothing
     here touches the GPU, so it runs beside the working model. A repo that is not a converted
     model (a PyTorch checkpoint, say) comes back without model.bin and is refused before
-    WhisperModel() can choke on it. On the Apple GPU the files are MLX weights instead, so `device`
-    decides which of the two downloads runs.
+    WhisperModel() can choke on it.
+
+    A Kitsune name fetches its package from its repo instead (kitsune_download_plan()), once PyTorch
+    is there to run it: without it the download would be gigabytes for a model that cannot load.
+    On the Apple GPU the files are MLX weights, so `device` decides which of the two downloads runs.
     """
+    if kitsune_name(name) is not None:
+        missing = kitsune_runtime_missing()
+        if missing:
+            raise ValueError(missing)
+        from huggingface_hub import snapshot_download
+
+        repo, folder, patterns = kitsune_download_plan(name)
+        root = snapshot_download(repo, cache_dir=str(MODELS_DIR), allow_patterns=patterns)
+        path = os.path.join(root, folder) if folder else root
+        require_kitsune_files(path, name, folder)
+        return path
     if device == "mlx":
         return download_mlx_model_files(name)
     from faster_whisper import download_model
@@ -3680,13 +4206,112 @@ def download_model_files(name: str, device: str = "cpu") -> str:
     return path
 
 
+def kitsune_download_plan(name: str) -> tuple:
+    """(repo id, folder or "" for the root, the files to fetch) of a Kitsune name; ValueError for an unknown precision."""
+    base, fmt = kitsune_name(name)
+    if fmt is None:
+        raise ValueError(f"unknown precision in '{name}': use {base} (bf16) or "
+                         + ", ".join(f"{base}-{short}" for short in KITSUNE_FORMATS))
+    folder = KITSUNE_FORMATS[fmt] if fmt else ""
+    return KITSUNE_REPOS[base], folder, [f"{folder}/{f}" if folder else f for f in KITSUNE_FILES]
+
+
+def require_kitsune_files(path: str, name: str, folder: str = "") -> None:
+    """Refuse a download that brought no package: the repo has no such precision (or no bf16 export at its root)."""
+    for needed in ("config.json", "model.safetensors"):
+        if not os.path.isfile(os.path.join(path, needed)):
+            # The popup puts "Shisu-ko: model <name>: " in front of this, so the name is not repeated.
+            where = f"no {folder} folder" if folder else "no model at its root"
+            raise ValueError(f"its repo has {where} ({needed} is missing); it may not be published yet")
+
+
+def kitsune_runtime_missing() -> Optional[str]:
+    """KITSUNE_INSTALL_HINT while PyTorch, transformers or safetensors cannot be imported, else None."""
+    import importlib.util
+
+    for module in ("torch", "transformers", "safetensors"):
+        try:
+            found = importlib.util.find_spec(module) is not None
+        except (ImportError, ValueError):
+            found = False
+        if not found:
+            return KITSUNE_INSTALL_HINT
+    return None
+
+
+_KITSUNE_ENGINE = None
+
+
+def kitsune_engine():
+    """kitsune_engine.py from next to this file, loaded by path (server.py runs as a script, and under
+    another module name in the tests). It imports numpy alone; torch only once a model loads."""
+    global _KITSUNE_ENGINE
+    if _KITSUNE_ENGINE is None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("shisuko_kitsune_engine", Path(__file__).with_name("kitsune_engine.py"))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module  # before exec: its dataclasses look their module up there
+        spec.loader.exec_module(module)
+        _KITSUNE_ENGINE = module
+    return _KITSUNE_ENGINE
+
+
+def is_kitsune_model(name, path: Optional[str] = None) -> bool:
+    """Whether `name` (or the folder `path` holds it in) is a Kitsune model: a KITSUNE_REPOS name, or a folder
+    whose config.json names one of the students' architectures. For the operator's own names alone
+    (--model, dump_words.py's): a client's name must never be probed as a directory, so load_model()
+    asks is_kitsune_folder() only of a prepared path or the operator's --model."""
+    return is_kitsune_model_named(name) or is_kitsune_folder(path or name)
+
+
+def is_kitsune_model_named(name) -> bool:
+    return kitsune_name(name) is not None
+
+
+def is_kitsune_folder(folder) -> bool:
+    return isinstance(folder, str) and os.path.isdir(folder) and kitsune_engine().architecture_of(folder) is not None
+
+
+def operator_folder(args, name) -> Optional[str]:
+    """The operator's --model folder when `name` is that model (as given, or its canonical form, which
+    the App keeps: a folder named like kitsune-0.6b-int8-w8a8 is kitsune-0.6b-int8 there), else None.
+    A client's name is never looked up on disk: only the folder the operator named is returned."""
+    model = getattr(args, "model", None)
+    if not isinstance(model, str) or name not in (model, canonical_model_name(model)):
+        return None
+    return model if os.path.isdir(model) else None
+
+
+def kitsune_language_error(args) -> Optional[str]:
+    """Why a Kitsune model cannot serve this server's --language, or None for Japanese."""
+    language = getattr(args, "language", "ja")
+    if language == "ja":
+        return None
+    return (f"Kitsune-Transcribe models transcribe Japanese only; --language is '{language}'. "
+            "Pick a Whisper model for other languages")
+
+
+def release_torch_memory() -> None:
+    """Give a freed Kitsune model's GPU memory back to the driver; PyTorch keeps it cached otherwise."""
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def friendly_model_error(exc: BaseException, name: str) -> str:
     """A short reason for the popup; huggingface_hub's exceptions run to several lines with request ids."""
     msg = str(exc) or exc.__class__.__name__
     low = msg.lower()
     if "invalid model size" in low:
         return f"unknown model size '{name}'; use a size such as large-v3 or a Hugging Face repo id owner/name"
-    if "no model.bin" in low:
+    # The server's own one-line reasons, which say what to do already.
+    if msg == KITSUNE_INSTALL_HINT or any(s in low for s in ("no model.bin", "unknown precision", "japanese only",
+                                                             "may not be published yet")):
         return msg
     if "404" in msg or "not found" in low:
         return f"'{name}' was not found on Hugging Face"
@@ -3703,6 +4328,20 @@ MODEL_SIZES = {
     "large-v3-turbo": "about 1.6 GB", "medium": "about 1.5 GB", "distil-large-v3": "about 1.5 GB",
     "small": "about 500 MB", "base": "about 150 MB", "tiny": "about 75 MB",
 }
+# A Kitsune precision's download next to its bf16 export: 1 byte a weight for int8
+# and fp8, half a byte and its scales for the 4-bit formats; the kept tensors stay 16-bit.
+KITSUNE_SIZE_SHARE = {"": 1.0, "fp16": 1.0, "int8": 0.55, "fp8": 0.55, "nvfp4": 0.33, "mxfp4": 0.32}
+
+
+def kitsune_size(name: str) -> str:
+    base, fmt = kitsune_name(name)
+    mb = {"kitsune-0.6b": 1230, "kitsune-0.3b": 610, "kitsune-0.1b": 210}.get(base)
+    if mb is None or fmt not in KITSUNE_SIZE_SHARE:
+        return "size unknown"
+    mb *= KITSUNE_SIZE_SHARE[fmt]
+    return f"about {mb / 1000:.1f} GB" if mb >= 1000 else f"about {int(round(mb, -1))} MB"
+
+
 # The files of a converted model, the list faster_whisper.download_model() gives snapshot_download().
 MODEL_FILE_PATTERNS = ("config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*")
 
@@ -3733,38 +4372,56 @@ def run_download_model(name: str, device: str = "auto") -> int:
         print(f"'{name}' is {MODEL_NAME_HINT}")
         return 2
     try:
-        from faster_whisper import utils as fw_utils
-        from huggingface_hub import snapshot_download
+        from huggingface_hub import snapshot_download  # faster-whisper's dependency, installed with it
     except Exception as exc:  # noqa: BLE001
         print(f"faster-whisper is not installed for {sys.executable} ({exc}); run setup first")
         return 2
     name = canonical_model_name(name)
-    sizes = dict(getattr(fw_utils, "_MODELS", None) or {})
-    # The backend that will run this model decides which conversion of it setup fetches: the
-    # CTranslate2 files, or the MLX ones for an Apple GPU. `device` is the launcher's own
-    # --device, so a download and the start that follows it agree; fetching the other format
-    # here would cost the viewer the whole wait twice.
-    mlx = resolve_device(device) == "mlx"
-    patterns, require = (MLX_FILE_PATTERNS, require_mlx_weights) if mlx else (MODEL_FILE_PATTERNS, require_model_bin)
-    try:
-        repo_id = mlx_repo_for(name) if mlx else (name if "/" in name else sizes.get(name))
-    except ValueError as exc:
-        print(str(exc))
-        return 2
-    if repo_id is None:
-        print(f"unknown model size '{name}': faster-whisper knows {', '.join(sizes) or 'no sizes at all'}; "
-              "a Hugging Face repo id is written owner/name")
-        return 2
+    folder = ""
+    if kitsune_name(name) is not None:
+        # A Kitsune name is known by its table, like a faster-whisper size, and its files are its
+        # package's (kitsune_download_plan()). PyTorch is not needed to download it: setup
+        # installs it first all the same (kitsune_setup.py), and a start without it says so.
+        try:
+            repo_id, folder, patterns = kitsune_download_plan(name)
+        except ValueError as exc:
+            print(exc)
+            return 2
+        alias, size, require = True, kitsune_size(name), None
+    else:
+        try:
+            from faster_whisper import utils as fw_utils
+        except Exception as exc:  # noqa: BLE001
+            print(f"faster-whisper is not installed for {sys.executable} ({exc}); run setup first")
+            return 2
+        sizes = dict(getattr(fw_utils, "_MODELS", None) or {})
+        # The backend that will run this model decides which conversion of it setup fetches: the
+        # CTranslate2 files, or the MLX ones for an Apple GPU. `device` is the launcher's own
+        # --device, so a download and the start that follows it agree; fetching the other format
+        # here would cost the viewer the whole wait twice.
+        mlx = resolve_device(device) == "mlx"
+        patterns, require = ((MLX_FILE_PATTERNS, require_mlx_weights) if mlx
+                             else (MODEL_FILE_PATTERNS, require_model_bin))
+        try:
+            repo_id = mlx_repo_for(name) if mlx else (name if "/" in name else sizes.get(name))
+        except ValueError as exc:
+            print(str(exc))
+            return 2
+        if repo_id is None:
+            print(f"unknown model size '{name}': faster-whisper knows {', '.join(sizes) or 'no sizes at all'}; "
+                  "a Hugging Face repo id is written owner/name; Kitsune models are " + ", ".join(KITSUNE_REPOS))
+            return 2
+        alias, size = name in sizes, MODEL_SIZES.get(name, "size unknown")
     # A size from faster-whisper's own table names a converted model that WhisperModel() fetches
     # by itself, so the choice is kept before the download: a start after a failed or interrupted
     # one then downloads this model, not the built-in default, as setup promises. A repo id is
     # kept only once its files were seen, since a typo or a PyTorch checkpoint would make every
-    # later start exit 2; a size whose repo turns out that way is taken back again.
-    alias = name in sizes
+    # later start exit 2; a size whose repo turns out that way is taken back again. A Kitsune
+    # name is kept early too, like a size.
     previous = configured_model()
     if alias:
         write_config({"model": name})
-    print(f"Downloading {name} ({MODEL_SIZES.get(name, 'size unknown')}) into {MODELS_DIR} ...", flush=True)
+    print(f"Downloading {name} ({size}) into {MODELS_DIR} ...", flush=True)
     # The download runs on a thread of its own, waited for in short steps, so that Ctrl+C is
     # honoured at once: snapshot_download() fetches the files through a thread pool that joins its
     # workers on the way out, and an interrupt raised inside it would only surface once the file
@@ -3788,12 +4445,16 @@ def run_download_model(name: str, device: str = "auto") -> int:
         # partial file stays behind as .incomplete, which the next download resumes.
         for stream in (sys.stdout, sys.stderr):
             stream.flush()
-        os._exit(2)
+        hard_exit(2)
     result = outcome[0]
     try:
         if isinstance(result, BaseException):
             raise result
-        require(result, name)
+        if folder or kitsune_name(name) is not None:
+            result = os.path.join(result, folder) if folder else result
+            require_kitsune_files(result, name, folder)
+        else:
+            require(result, name)
     except Exception as exc:  # noqa: BLE001
         if alias and not isinstance(result, BaseException):
             write_config({"model": previous})  # the files came, but they are no model
@@ -3805,15 +4466,23 @@ def run_download_model(name: str, device: str = "auto") -> int:
     return 0
 
 
-def load_model(args, name: Optional[str] = None, path: Optional[str] = None):
+def load_model(args, name: Optional[str] = None, path: Optional[str] = None, strict: bool = False):
     """Load `name` (default: --model), picking device and precision for the GPU memory free right now.
 
     `path` is the directory download_model_files() prepared for `name`; without it WhisperModel
     resolves the name itself, which is fine for the operator's --model (a size, a repo or a folder).
+    `strict` (--probe-gpu) means no CPU fallback, and a failed warm-up raises instead of warning.
+    With the AMD engine, a model loaded and warmed up on the GPU resets the crash guard.
+    A Kitsune model loads through load_kitsune_model() instead.
     """
+    name = name or args.model
+    # A folder is looked at only when the server prepared it or the operator named it (--model): a
+    # client's name reaches here without a path from reload_model(), and must not be probed on disk.
+    local = path or operator_folder(args, name)
+    if is_kitsune_folder(local) or is_kitsune_model_named(name):
+        return load_kitsune_model(args, name, path, strict)
     from faster_whisper import WhisperModel
 
-    name = name or args.model
     device = resolve_device(args.device)
     compute = args.compute_type
     if device == "mlx":
@@ -3844,25 +4513,32 @@ def load_model(args, name: Optional[str] = None, path: Optional[str] = None):
                             "under load. Consider closing other GPU apps, or run with --device cpu --model small.", free)
     if compute == "auto":
         compute = "float16" if device == "cuda" else "int8"
-    log.info("Loading Whisper model '%s' on %s (%s); models are stored in %s", name, device, compute, MODELS_DIR)
+    where = "the AMD GPU (ROCm)" if ROCM_ACTIVE and device == "cuda" else device
+    log.info("Loading Whisper model '%s' on %s (%s); models are stored in %s", name, where, compute, MODELS_DIR)
     kwargs = {"device": device, "compute_type": compute, "download_root": str(MODELS_DIR)}
     if args.cpu_threads:
         kwargs["cpu_threads"] = args.cpu_threads
     try:
         model = WhisperModel(path or name, **kwargs)
     except Exception as exc:  # noqa: BLE001
-        if device != "cuda":
+        if device != "cuda" or strict:
             raise
         log.warning("CUDA initialisation failed (%s). Falling back to CPU int8, which is slow for large models.", exc)
         device, compute = "cpu", "int8"
         kwargs.update(device=device, compute_type=compute)
         model = WhisperModel(path or name, **kwargs)
-    warm_up(model, args)
+    warm_up(model, args, device=device, strict=strict)
     return model, device, compute
 
 
-def warm_up(model, args) -> None:
-    """Decode two seconds of silence, so the first real window does not pay for the lazy load."""
+def warm_up(model, args, device: Optional[str] = None, strict: bool = False) -> None:
+    """Decode two seconds of silence, so the first real window does not pay for the lazy load.
+
+    With the AMD engine on Windows the model is held before the decode, and a decode that got
+    through resets the crash guard; the MLX path names no device, so neither runs there.
+    """
+    if rocm_on_windows():
+        KEPT_MODELS.append(model)  # before the warm-up: a strict one that raises must not free it either
     try:
         t0 = time.time()
         segs, _ = model.transcribe(np.zeros(SAMPLE_RATE * 2, dtype=np.float32), language=args.language,
@@ -3870,7 +4546,315 @@ def warm_up(model, args) -> None:
         list(segs)
         log.info("Model ready (warm-up took %.1fs)", time.time() - t0)
     except Exception as exc:  # noqa: BLE001
+        if strict:
+            raise
         log.warning("Warm-up transcription failed: %s", exc)
+    else:
+        if ROCM_ACTIVE and device == "cuda":
+            clear_rocm_starts()  # the AMD engine got through: the crash guard starts counting from zero
+
+
+def load_kitsune_model(args, name: str, path: Optional[str] = None, strict: bool = False):
+    """(model, device, compute label) of a Kitsune model, loaded by kitsune_engine.py on PyTorch.
+
+    The files come from download_model_files() (cached after the first time) unless `path` holds
+    them or the operator's --model is the folder itself. Only Japanese: another --language is
+    refused before anything loads. The GPU is PyTorch's CUDA; with the AMD engine on, it sees no
+    GPU and the model runs on the CPU.
+    """
+    wrong_language = kitsune_language_error(args)
+    if wrong_language:
+        raise ValueError(wrong_language)
+    missing = kitsune_runtime_missing()
+    if missing:
+        raise ValueError(missing)
+    engine = kitsune_engine()
+    if path is None:
+        path = operator_folder(args, name) or download_model_files(name)
+    if args.device != "cpu":
+        mem = gpu_memory_mb()
+        if mem:
+            log.info("GPU memory: %d MiB free of %d MiB", *mem)
+            if mem[0] < CRITICAL_VRAM_MB:
+                log.warning("Very little GPU memory is free (%d MiB); close other GPU apps if the model does not load "
+                            "or runs slowly, or run with --device cpu", mem[0])
+    log.info("Loading Kitsune model '%s' (PyTorch); models are stored in %s", name, MODELS_DIR)
+    try:
+        model = engine.load(path, device=args.device, compute=args.compute_type, cpu_threads=args.cpu_threads)
+    except ImportError as exc:
+        # transformers without the architecture (too old), or a torch whose import fails. Not an
+        # ImportError to the caller: start_app() reads that as CTranslate2's own, the AMD engine's.
+        raise ValueError(f"PyTorch / transformers cannot run this model ({exc}); run server/kitsune_setup.py "
+                         "--force with the venv's Python") from exc
+    except Exception as exc:  # noqa: BLE001
+        if args.device == "cpu" or strict or isinstance(exc, engine.PackageError):
+            raise
+        log.warning("Loading on the GPU failed (%s). Falling back to the CPU, which is slow for large models.", exc)
+        release_torch_memory()
+        model = engine.load(path, device="cpu", compute="auto", cpu_threads=args.cpu_threads)
+    try:
+        t0 = time.time()
+        model.transcribe(np.zeros(SAMPLE_RATE * 2, dtype=np.float32), language="ja", vad_filter=False)
+        log.info("Model ready on %s (%s; warm-up took %.1fs)", model.device, model.compute_label, time.time() - t0)
+    except Exception as exc:  # noqa: BLE001
+        if strict:
+            raise
+        log.warning("Warm-up transcription failed: %s", exc)
+    if ROCM_ACTIVE:
+        # main() counted this start for the AMD engine's crash guard, and PyTorch never touches the
+        # ROCm runtime: a start that got here did not crash it, so the count goes back to zero as
+        # after a Whisper model's warm-up on the GPU. Left counted, two Kitsune starts would turn
+        # the engine off as if it had crashed.
+        clear_rocm_starts()
+    return model, model.device, model.compute_label
+
+
+def count_rocm_start() -> bool:
+    """Count one more start on the AMD engine before its model loads (the crash guard, ROCM_STARTS_PATH).
+
+    load_model() takes the count back once a model is warmed up on the GPU, start_app() when the
+    load ends on a Python exception and main() when it ends on a Ctrl+C; a process that dies on
+    the way leaves it standing, and after ROCM_GUARD_LIMIT of them rocm_engine() keeps the engine
+    off. Only a start that can reach the GPU counts (not --device cpu). Never stops a start: a
+    file that cannot be written costs the guard, not the server. True when this start was counted.
+    """
+    try:
+        ROCM_STARTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ROCM_STARTS_PATH.write_text(f"{read_rocm_starts(ROCM_STARTS_PATH) + 1}\n", encoding="utf-8")
+    except OSError as exc:
+        log.warning("Could not write %s (%s); the AMD engine's crash guard does not count this start", ROCM_STARTS_PATH, exc)
+        return False
+    return True
+
+
+def uncount_rocm_start() -> None:
+    """Take back this start's count (count_rocm_start()): it ended on a Python exception or a Ctrl+C, not a crash.
+
+    One step down, not to zero: a crash counted by an earlier start stays counted.
+    """
+    count = read_rocm_starts(ROCM_STARTS_PATH)
+    try:
+        if count <= 1:
+            ROCM_STARTS_PATH.unlink(missing_ok=True)
+        else:
+            ROCM_STARTS_PATH.write_text(f"{count - 1}\n", encoding="utf-8")
+    except OSError as exc:
+        log.warning("Could not write %s (%s)", ROCM_STARTS_PATH, exc)
+
+
+def clear_rocm_starts() -> None:
+    """Forget the starts the crash guard counted: the AMD engine loaded a model, or its probe passed."""
+    try:
+        ROCM_STARTS_PATH.unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("Could not remove %s (%s)", ROCM_STARTS_PATH, exc)
+
+
+def check_rocm_import(device: str) -> None:
+    """End the process with code 3 and the AMD engine off when it cannot run this start here.
+
+    rocm_engine() sees files, not whether they load: a system ROCm removed or upgraded past 7.2, a
+    DLL missing from the side folder, or on Linux a ROCM_PATH that the terminal of the setup had
+    and the Start button's environment has not, fail the import that load_model() would meet, and
+    the start would end on 2, which the launcher never retries, without a word about the engine.
+    Nor do they say whether the ROCm runtime sees an AMD GPU: a card removed or replaced (by an
+    NVIDIA one, say), a driver it cannot use, or on Linux a user outside the render group, and
+    --device auto would run the model on the processor, with an NVIDIA GPU beside it left idle.
+    So a start that is to use the GPU (not --device cpu) asks for its devices first.
+    Either way the crash guard goes to its limit and the process ends with code 3 (leave_rocm()).
+    """
+    try:
+        import ctranslate2
+
+        count_devices = ctranslate2.get_cuda_device_count  # the compiled part: without it the package imports empty
+    except Exception as exc:  # noqa: BLE001  (a DLL or shared object that does not load can raise OSError)
+        hint = " (is ROCM_PATH set for the Start button too?)" if sys.platform.startswith("linux") else ""
+        leave_rocm(f"The AMD engine's CTranslate2 in {ROCM_DIR} does not load ({exc})", hint)
+        return
+    if device == "cpu":
+        return  # the ROCm runtime is never started for it
+    try:
+        devices = count_devices()
+    except Exception:  # noqa: BLE001
+        devices = 0
+    if devices < 1:
+        leave_rocm("The AMD engine sees no AMD GPU (a card removed or replaced, or a driver it cannot use: on Windows "
+                   "Adrenalin 26.2.2 or newer; on Linux /dev/kfd and this user in the render and video groups)")
+
+
+def leave_rocm(problem: str, hint: str = "") -> None:
+    """End a start the AMD engine cannot run: the crash guard at its limit, then code 3.
+
+    Under run.cmd / run.sh (SHISUKO_LAUNCHER) the launcher starts the server again from its own
+    environment, and rocm_engine() keeps the engine off there until server/amd_setup.py --probe
+    has tested it again; a hand start just ends, and its next start is on the default engine. A
+    guard that cannot be written would restart into the same failure for ever, so then the start
+    ends on 2 after all.
+    """
+    if os.environ.get("SHISUKO_LAUNCHER") == "1":
+        then = "exiting so that the launcher starts the server again on the default engine"
+    else:
+        then = "the server stops, and its next start uses the default engine"
+    log.error("%s; %s. server/amd_setup.py --probe tests it again, --remove takes it out%s", problem, then, hint)
+    try:
+        ROCM_STARTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ROCM_STARTS_PATH.write_text(f"{ROCM_GUARD_LIMIT}\n", encoding="utf-8")
+    except OSError as error:
+        log.error("Could not write %s (%s), so a restart would meet the same failure", ROCM_STARTS_PATH, error)
+        finish(2)
+    hard_exit(3)
+
+
+def take_next_model(path: Path) -> Optional[str]:
+    """The model a switch restarted the server into (restart_for_model()), canonical; None without one.
+
+    The file goes first, whatever it holds, so that a model that kills the process while it loads
+    is not asked for again by every restart after it; a name that cannot be removed with it is
+    not used either. Only a name valid_model_name() accepts counts: the file is outside the server.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        text = ""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log.warning("Could not remove %s (%s); starting with the default model", path, exc)
+        return None
+    name = text.strip()
+    return canonical_model_name(name) if valid_model_name(name) else None
+
+
+def start_app(args) -> "App":
+    """Load this start's model and build the App around it; ends the process with code 2 when none loads.
+
+    With the AMD engine on Windows a model switch is a restart (App.restart_for_model()), and the
+    model it named is this start's. Its files come from download_model_files(), as in a switch, so
+    that a name from the client never reaches WhisperModel() as a folder. When it does not load,
+    the server starts with --model instead and reports the failure, as a failed switch does.
+    """
+    wanted = take_next_model(NEXT_MODEL_PATH) if rocm_on_windows() else None
+    failed = None
+    if wanted is not None and wanted != canonical_model_name(args.model):
+        log.info("Starting with the model '%s' that the switch asked for", wanted)
+        try:
+            # No local name for the model: the switch frees it through App alone (see switch_model_if_wanted).
+            return App(args, *load_model(args, wanted, path=download_model_files(wanted)), model_name=wanted)
+        except Exception as exc:  # noqa: BLE001
+            log.error("Could not load the model '%s' (%s); starting with '%s'", wanted, exc, args.model)
+            failed = (wanted, friendly_model_error(exc, wanted))
+    try:
+        app = App(args, *load_model(args))
+    except Exception as exc:  # noqa: BLE001
+        log.error("Could not load the model '%s': %s", args.model, exc)
+        if ROCM_ACTIVE and args.device != "cpu" and not isinstance(exc, ImportError):
+            # A Python exception after load_model()'s CPU fallback (or on the CPU, where no GPU was
+            # seen): the model's fault (a typo, offline, a missing file), not a crash of the engine,
+            # which no except clause would see. Code 2 is never retried, so no crash loop follows.
+            uncount_rocm_start()
+        finish(2)
+    if failed is not None:
+        with app.lock:
+            app.model_error, app.model_failed_at = failed, time.time()
+    return app
+
+
+def amd_gpu_label() -> str:
+    """What --probe-gpu calls the AMD GPU: its gfx target on Linux (gfx1100), else CTranslate2's "device 0"."""
+    targets = kfd_gfx_targets(KFD_NODES_ROOT) if sys.platform.startswith("linux") else []
+    return targets[0] if targets else "device 0"
+
+
+def gfx_target(version: int) -> str:
+    """The gfx name of a KFD gfx_target_version: major*10000 + minor*100 + stepping, the last two in hex."""
+    return f"gfx{version // 10000}{version // 100 % 100:x}{version % 100:x}"
+
+
+def kfd_gfx_targets(nodes_root: Path) -> list:
+    """The gfx targets of the GPUs under `nodes_root` (/sys/class/kfd/kfd/topology/nodes), in node order.
+
+    Each node's `properties` has a line "gfx_target_version N"; N is 0 for the processor's node.
+    """
+    try:
+        nodes = sorted((p for p in nodes_root.iterdir() if p.name.isdigit()), key=lambda p: int(p.name))
+    except OSError:
+        return []
+    targets = []
+    for node in nodes:
+        try:
+            text = (node / "properties").read_text(encoding="ascii")
+        except (OSError, ValueError):
+            continue
+        for line in text.splitlines():
+            key, _, value = line.strip().partition(" ")
+            if key == "gfx_target_version" and value.strip().isdigit() and int(value):
+                targets.append(gfx_target(int(value)))
+    return targets
+
+
+def run_probe_gpu(args) -> int:
+    """--probe-gpu, what amd_setup.py runs with SHISUKO_ENGINE=rocm: does the AMD engine work here?
+
+    A card or driver the ROCm build cannot use does not always raise: it can abort the process (a
+    C++ terminate, "Memory access fault by GPU") where load_model()'s CPU fallback never sees it,
+    so the test runs in a process of its own, and what reaches config.json is its verdict. The
+    engine is taken out of config.json first, so that a probe that dies on the way leaves the
+    server on the default engine; only --model loaded on the GPU without the fallback and warmed
+    up turns it on, and resets the crash guard. Returns the exit code, 0 or 1 (main() ends on it
+    through hard_exit(), since the interpreter's exit can hang with this engine on Windows). The
+    model is not freed when this returns: on Windows load_model() keeps it (KEPT_MODELS) until
+    hard_exit(), as freeing it can hang there too.
+    """
+    if not ROCM_ACTIVE:
+        print(f"The AMD engine is not active: {ROCM_REASON}", flush=True)
+        return 1
+
+    def failed(reason: str) -> int:
+        print(f"The AMD GPU engine does not work here: {reason}", flush=True)
+        return 1
+
+    try:
+        if "engine" in read_config():
+            write_config({"engine": None})
+    except OSError as exc:
+        return failed(f"could not write {CONFIG_PATH} ({exc})")
+    try:
+        import ctranslate2
+
+        count = ctranslate2.get_cuda_device_count()
+    except Exception as exc:  # noqa: BLE001
+        return failed(f"CTranslate2 from {ROCM_DIR} could not be loaded ({exc})")
+    where = os.path.dirname(os.path.abspath(getattr(ctranslate2, "__file__", None) or "?"))
+    print(f"CTranslate2 {getattr(ctranslate2, '__version__', '?')} from {where}: {count} device(s)", flush=True)
+    if os.path.normcase(where) != os.path.normcase(os.path.abspath(ROCM_DIR / "ctranslate2")):
+        return failed(f"that is not the CTranslate2 in {ROCM_DIR}")
+    if count < 1:
+        return failed("no AMD GPU visible to the ROCm engine")
+    args.device = "cuda"
+    if is_kitsune_model(args.model):
+        # The test is of CTranslate2's ROCm build, which runs Whisper alone; a Kitsune model (setup's
+        # pick, in config.json) runs on PyTorch and would load on the CPU here. Whisper's smallest
+        # model (about 75 MB) stands in, and config.json keeps the Kitsune choice.
+        print(f"The model chosen at setup, {args.model}, runs on PyTorch, not on this engine; "
+              f"testing with {PROBE_WHISPER_MODEL} instead", flush=True)
+        args.model = PROBE_WHISPER_MODEL
+    try:
+        _model, device, compute = load_model(args, strict=True)
+    except Exception as exc:  # noqa: BLE001
+        return failed(f"the model '{args.model}' did not load and run on it ({exc})")
+    if device != "cuda":
+        return failed(f"the model '{args.model}' loaded on {device}, not on the GPU")
+    try:
+        write_config({"engine": "rocm"})
+    except OSError as exc:
+        return failed(f"could not write {CONFIG_PATH} ({exc})")
+    clear_rocm_starts()
+    print(f"AMD GPU engine works: {amd_gpu_label()} ({compute})", flush=True)
+    return 0
 
 
 INSTANCE_LOCK = None  # the open, locked file of hold_instance_lock(); lives as long as the process
@@ -3975,8 +4959,16 @@ def configured_model():
 
 
 def default_model_for(device: str = "auto") -> str:
-    """The built-in --model for the backend that will run it; see MLX_DEFAULT_MODEL for why it differs."""
-    return MLX_DEFAULT_MODEL if resolve_device(device) == "mlx" else DEFAULT_MODEL
+    """The built-in --model for the backend that will run it; see MLX_DEFAULT_MODEL for why it differs.
+
+    It asks only whether this is the Apple GPU, never resolve_device(): cuda and cpu answer with the
+    same model, so the CUDA probe would buy nothing, and parse_args() calls this. A probe there
+    imports ctranslate2 before the AMD engine's crash guard has counted the start
+    (count_rocm_start(), then check_rocm_import()), which is the one import that guard exists to
+    survive.
+    """
+    apple = device == "mlx" or (device == "auto" and sys.platform == "darwin" and mlx_available())
+    return MLX_DEFAULT_MODEL if apple else DEFAULT_MODEL
 
 
 def resolve_default_model(args):
@@ -4005,16 +4997,6 @@ def configured_cookies_browser():
         return chosen.strip().lower()
     log.warning("Ignoring cookies_from_browser %r in %s: not one of %s", chosen, CONFIG_PATH, ", ".join(COOKIE_BROWSERS))
     return None
-
-
-def in_container(environ=os.environ) -> bool:
-    """True inside Shisu-ko's Docker image (SHISUKO_CONTAINER, set by the Dockerfile).
-
-    Not any container: /.dockerenv and /run/.containerenv are in toolbox and distrobox too, which
-    share the home folder and its Firefox profile, so a setup run there reads and saves a browser
-    that its starts must then send.
-    """
-    return bool(environ.get("SHISUKO_CONTAINER"))
 
 
 def resolve_default_cookies(args, environ=os.environ):
@@ -4163,20 +5145,64 @@ def run_setup_cookies(ask=input) -> int:
     return 0
 
 
+def rocm_engine_line() -> Optional[str]:
+    """What --check and a server start say about the AMD engine; None where it is not installed.
+
+    In use, it names the CTranslate2 build in ROCM_DIR; installed but off, it says why (ROCM_REASON:
+    no passed test, another Python, the crash guard). A machine without the side folder, every
+    NVIDIA and CPU one, hears nothing about it.
+    """
+    if ROCM_ACTIVE:
+        version = read_json_object(ROCM_DIR / ROCM_MANIFEST).get("ctranslate2") or "?"
+        return f"GPU engine: AMD ROCm (CTranslate2 {version} from {ROCM_DIR})"
+    try:
+        installed = ROCM_DIR.is_dir()
+    except OSError:
+        installed = True  # there, but not for this user to read: ROCM_REASON says what the check met
+    return f"GPU engine: AMD ROCm installed but not used: {ROCM_REASON}" if installed else None
+
+
+def kitsune_runtime_line() -> str:
+    """What --check says about the Kitsune models' runtime: PyTorch and transformers, and whether PyTorch sees a GPU."""
+    if kitsune_runtime_missing():
+        return "Kitsune models: PyTorch not installed (server/kitsune_setup.py installs it; Whisper models work without)"
+    try:
+        import torch
+        import transformers
+
+        gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+        return (f"Kitsune models: PyTorch {torch.__version__}, transformers {transformers.__version__}, "
+                + (f"GPU {gpu}" if gpu else "no CUDA GPU (CPU only)"))
+    except Exception as exc:  # noqa: BLE001
+        return f"Kitsune models: PyTorch import failed: {exc}"
+
 
 def run_check(device: str = "auto") -> None:
     print(f"Python {sys.version.split()[0]} at {sys.executable}")
     print(f"Data directory: {APP_DIR}")
     print(f"NVIDIA library directories registered: {len(NVIDIA_DIRS)}")
+    n = None
     try:
         import ctranslate2
 
         n = ctranslate2.get_cuda_device_count()
-        hint = "" if n else ("  -> the Apple GPU runs it instead" if mlx_available()
-                             else "  -> CPU fallback; consider --model small")
-        print(f"CTranslate2 {ctranslate2.__version__}: {n} CUDA device(s)" + hint)
+        # With the AMD engine a start that sees no GPU hands over to the default engine
+        # (check_rocm_import()), said below; on a Mac the Apple GPU runs it instead.
+        if n or ROCM_ACTIVE:
+            fallback = ""
+        elif mlx_available():
+            fallback = "  -> the Apple GPU runs it instead"
+        else:
+            fallback = "  -> CPU fallback; consider --model small"
+        print(f"CTranslate2 {ctranslate2.__version__}: {n} CUDA device(s){fallback}")
     except Exception as exc:  # noqa: BLE001
         print(f"CTranslate2 import failed: {exc}")
+    engine = rocm_engine_line()
+    if engine:
+        print(engine)
+    if ROCM_ACTIVE and n == 0:
+        print("The AMD engine sees no AMD GPU, so a start leaves it for the default engine "
+              "(server/amd_setup.py --probe says why)")
     if sys.platform == "darwin":
         try:
             import mlx.core as mx
@@ -4193,6 +5219,7 @@ def run_check(device: str = "auto") -> None:
         print(f"faster-whisper {faster_whisper.__version__}")
     except Exception as exc:  # noqa: BLE001
         print(f"faster-whisper import failed: {exc}")
+    print(kitsune_runtime_line())
     try:
         import yt_dlp.version
 
@@ -4229,14 +5256,28 @@ def run_check(device: str = "auto") -> None:
         print(f"Start button launcher: could not check ({exc})")
 
 
+def port_number(text: str) -> int:
+    """--port's type: a TCP port, 1-65535. Refused while the arguments are read, before the instance lock
+    and the model load: the listening socket raises OverflowError, not OSError, for one out of range."""
+    value = int(text)
+    if not 1 <= value <= 65535:
+        raise argparse.ArgumentTypeError(f"{text} is not a port (1-65535)")
+    return value
+
+
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="Shisu-ko: local Whisper transcription server for the Firefox extension")
+    p = argparse.ArgumentParser(description="Shisu-ko: local transcription server for the Firefox extension")
     p.add_argument("--host", default="127.0.0.1", help="bind address (keep it local)")
-    p.add_argument("--port", type=int, default=8790, help="default 8790 (8765 is left free for AnkiConnect)")
-    p.add_argument("--model", default=None, help="faster-whisper model size or CTranslate2 repo, e.g. large-v3, large-v3-turbo, kotoba-tech/kotoba-whisper-v2.0-faster (default: the model chosen at setup (config.json), else large-v3)")
+    p.add_argument("--port", type=port_number, default=8790, help="default 8790 (8765 is left free for AnkiConnect)")
+    p.add_argument("--model", default=None, help="a Kitsune-Transcribe model (Japanese only, needs PyTorch), e.g. kitsune-0.6b, kitsune-0.3b-int8, kitsune-0.1b-nvfp4; "
+                                                 "a faster-whisper model size or CTranslate2 repo, e.g. large-v3, large-v3-turbo, kotoba-tech/kotoba-whisper-v2.0-faster; "
+                                                 "or a local folder holding either (default: the model chosen at setup (config.json), else large-v3)")
     p.add_argument("--device", default="auto", choices=["auto", "cuda", "mlx", "cpu"],
                    help="auto picks an NVIDIA GPU, else the Apple GPU through MLX, else the CPU")
-    p.add_argument("--compute-type", default="auto", help="float16, int8_float16, int8, ... (auto = float16 on GPU, int8 on CPU; mlx knows float16 and float32)")
+    p.add_argument("--compute-type", default="auto", help="Whisper: float16, int8_float16, int8, ... (auto = float16 on GPU, int8 on CPU); "
+                                                          "MLX: float16 or float32; Kitsune: bfloat16, float16 or float32 (auto = bfloat16 on a GPU that has it, else float16, "
+                                                          "and float16 for an -fp16 model; float32 on CPU); "
+                                                          "a Kitsune model's weight precision is in its name")
     p.add_argument("--language", default="ja")
     p.add_argument("--language-patience", type=float, default=60.0,
                    help="seconds of speech in another language before subtitles stop for that video (0 = never detect, always transcribe)")
@@ -4278,6 +5319,8 @@ def parse_args(argv=None):
     p.add_argument("--default-model", action="store_true",
                    help="print this machine's built-in default model and exit, ignoring config.json; setup asks this rather than keeping a copy of the rule")
     p.add_argument("--download-model", metavar="NAME", help="download NAME now, showing progress, and make it the default model for later starts; used by setup")
+    # amd_setup.py's test of the AMD engine (run_probe_gpu()), with SHISUKO_ENGINE=rocm; not for the viewer.
+    p.add_argument("--probe-gpu", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--no-update", action="store_true", help="start without looking for a newer version first (run.cmd / run.sh skip server/update.py) and refuse the popup's Update button (POST /update answers 409), since the launcher would restart the server without updating")
     args = p.parse_args(argv)
     if args.initial_prompt is None:
@@ -4302,39 +5345,86 @@ def main() -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Every way out of main() goes through finish() (hard_exit() for --probe-gpu), and so does a
+    # Ctrl+C or Ctrl+Break while the model loads with the AMD engine on Windows: the interpreter's
+    # own exit can hang there, and they end the process instead. entry_point() catches whatever
+    # still gets out.
     if getattr(args, "default_model", False):
         # The built-in default, not what a start would load: setup.sh reads this to name the
         # choice it is about to offer, and config.json is what that choice will write.
         print(default_model_for(args.device))
+        finish()
         return
     if args.check:
         run_check(args.device)
+        finish()
         return
     if getattr(args, "download_model", None) is not None:
-        sys.exit(run_download_model(args.download_model, args.device))
+        finish(run_download_model(args.download_model, args.device))
+    if getattr(args, "probe_gpu", False):
+        def cancelled() -> None:
+            # amd_setup.py's wait for this process cannot be interrupted on Windows, and the
+            # interpreter's exit could hang there: the test ends through hard_exit() all the same.
+            # run_probe_gpu() took the engine out of config.json before the load.
+            print("\nThe AMD GPU engine test was cancelled", flush=True)
+            flush_output()
+            hard_exit(1)
+
+        end_on_ctrl_c(cancelled)  # no restore: the process ends right after the test
+        try:
+            code = run_probe_gpu(args)
+        except KeyboardInterrupt:
+            cancelled()  # inside the except clause, while its traceback still holds what it holds
+        flush_output()  # os._exit() leaves unwritten what the buffers still hold
+        hard_exit(code)
     if getattr(args, "save_cookies_from_browser", None) is not None:
-        sys.exit(run_save_cookies(args.save_cookies_from_browser))
+        finish(run_save_cookies(args.save_cookies_from_browser))
     if getattr(args, "setup_cookies", False):
-        sys.exit(run_setup_cookies())
+        finish(run_setup_cookies())
     if getattr(args, "cookies_from_browser", ""):
         log.info("Downloads send %s's YouTube cookies", args.cookies_from_browser)
+    engine = rocm_engine_line()
+    if engine:
+        log.info("%s", engine)
 
     if not hold_instance_lock(args.port):
         log.error("Another server is already starting or running on port %d (it holds %s). Stop it first.",
                   args.port, instance_lock_path(args.port))
-        sys.exit(2)
+        finish(2)
+    counted = False
+
+    def interrupted() -> None:
+        # A Ctrl+C while the model loads with the AMD engine on Windows (end_on_ctrl_c(), or the
+        # except clause below): the viewer's, not a crash of the engine, so the guard takes it back.
+        if counted:
+            uncount_rocm_start()
+        log.info("Shutting down")
+        finish(0)  # 0, as a Ctrl+C while serving ends; the interpreter's exit can hang with the AMD engine on Windows
+
+    previous = end_on_ctrl_c(interrupted)
     try:
-        # No local name for the model: the switch frees it through App alone (see switch_model_if_wanted).
-        app = App(args, *load_model(args))
-    except Exception as exc:  # noqa: BLE001
-        log.error("Could not load the model '%s': %s", args.model, exc)
-        sys.exit(2)
+        if ROCM_ACTIVE:
+            if args.device != "cpu":
+                counted = count_rocm_start()  # the crash guard; load_model() takes it back once the GPU got through
+            check_rocm_import(args.device)  # ends the process with code 3, the engine off, when it cannot run here
+        app = start_app(args)
+    except KeyboardInterrupt:
+        if not rocm_on_windows():
+            if counted:
+                uncount_rocm_start()
+            raise  # everywhere else the interpreter's own exit, as before
+        interrupted()
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGINT, previous)  # serving, a Ctrl+C raises again: server_close(), then finish()
+            signal.signal(signal.SIGBREAK, previous)  # and so does a Ctrl+Break, never the console's ExitProcess
     Handler.app = app
     try:
         server = ThreadingHTTPServer((args.host, args.port), Handler)
-    except OSError as exc:
+    except (OSError, OverflowError, ValueError, TypeError) as exc:
+        # OverflowError: a port out of range; ValueError / TypeError: a host that cannot be encoded.
         log.error("Cannot listen on %s:%d (%s). Is another server already running?", args.host, args.port, exc)
-        sys.exit(2)
+        finish(2)
     server.daemon_threads = True
     log.info("Listening on http://%s:%d  (Ctrl+C to stop)", args.host, args.port)
     try:
@@ -4343,11 +5433,36 @@ def main() -> None:
         log.info("Shutting down")
     finally:
         server.server_close()
-    if app.exit_code is not None:
-        # POST /update: the launcher reads EXIT_UPDATE as "run update.py, then start again". Every
-        # worker is a daemon thread, so the interpreter does not wait for a window to finish.
-        sys.exit(app.exit_code)
+    # POST /update sets exit_code: the launcher reads EXIT_UPDATE as "run update.py, then start
+    # again". Every worker is a daemon thread, so the interpreter does not wait for a window to
+    # finish. Without one, main() simply returns (finish(None)).
+    finish(app.exit_code)
+
+
+def entry_point() -> None:
+    """main() as `python server.py` runs it: with the AMD engine on Windows nothing leaves it for the interpreter.
+
+    main() ends through finish() and hard_exit(), but an exception from serve_forever(), or a
+    Ctrl+C between start_app() and serve_forever(), would still end through the interpreter's own
+    exit, which frees the model and hangs with the ROCm runtime on Windows (CTranslate2 #2038,
+    #2085): run.cmd would wait for ever instead of starting the server again. Everywhere else it
+    is the interpreter's exit, as before.
+    """
+    try:
+        main()
+    except SystemExit:
+        raise  # argparse, before anything loads, or a finish() whose TerminateProcess failed
+    except KeyboardInterrupt:
+        if not rocm_on_windows():
+            raise
+        log.info("Shutting down")
+        finish(0)
+    except BaseException:  # noqa: BLE001
+        if not rocm_on_windows():
+            raise  # the traceback and exit code 1, as before
+        log.exception("The server stopped on an unexpected error")
+        finish(1)  # the interpreter's code for it: run.cmd says "stopped unexpectedly" and starts it again
 
 
 if __name__ == "__main__":
-    main()
+    entry_point()
