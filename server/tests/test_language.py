@@ -16,7 +16,11 @@ RATE = server.SAMPLE_RATE
 
 
 def session(**kwargs):
-    base = dict(video_id=VIDEO, url="u")
+    # declared_language=None on purpose: these are the rules for a video YouTube names no language
+    # for, where the audio is the only evidence there is. Transcriber.process skips the detector
+    # outright once YouTube's word agrees with --language (test_declared_language.py), so every
+    # rule below would silently stop being exercised if these sessions carried a declaration.
+    base = dict(video_id=VIDEO, url="u", declared_language=None)
     base.update(kwargs)
     return server.Session(**base)
 

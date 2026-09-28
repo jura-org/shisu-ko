@@ -423,6 +423,22 @@ def registered(home: Optional[Path] = None, environ=os.environ, browser: str = F
     return path if path.is_file() else None
 
 
+def same_file(a, b) -> bool:
+    """Whether two path strings name the same file.
+
+    macOS and Windows keep the case of a name but ignore it when looking one up, so the very same
+    wrapper can be registered under a spelling that does not compare equal to this checkout's.
+    """
+    if not a or not b:
+        return False  # nothing is the same file as nothing, however the caller spells it
+    if a == b:
+        return True
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
 def status_text(root: Path = ROOT, home: Optional[Path] = None, environ=os.environ) -> str:
     """One line, per browser: where the host is registered and whether for this checkout."""
     found: dict[str, Optional[Path]] = {}
@@ -451,9 +467,13 @@ def status_text(root: Path = ROOT, home: Optional[Path] = None, environ=os.envir
             target = data.get("path")
         except (OSError, ValueError, AttributeError):
             data = target = None
-        if target != str(wrapper):
+        # same_file(), not a string compare: macOS and Windows look a path up without its case, so
+        # the very same wrapper can be registered under a spelling this checkout does not spell back.
+        if not same_file(target, str(wrapper)):
             text += f" (points at {target}; run native_host.py --register for this checkout)"
-        elif data != manifest(wrapper, browser):
+        elif data != {**manifest(wrapper, browser), "path": target}:
+            # Every key but the path, which same_file() has already judged: comparing that as text
+            # a second time would call this very wrapper out of date under its other spelling.
             text += " (out of date; run native_host.py --register)"
         parts.append(text)
     return "; ".join(parts)

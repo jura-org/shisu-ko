@@ -4,8 +4,10 @@ and writes ~/.shisu-ko/config.json, which parse_args() reads as the --model defa
 faster_whisper and huggingface_hub are fakes in sys.modules (a snapshot_download() that records
 its keyword arguments and writes model.bin into the directory it returns), so nothing here
 downloads or loads a model, and run_check() sees stand-ins for ctranslate2, yt-dlp and the
-registry as well, so it never initialises a GPU driver. The launchers are checked as text, like
-run.cmd / run.sh in test_update_endpoint.py.
+registry as well, so it never initialises a GPU driver. The backend is faked too: the download
+follows resolve_device("auto"), so cuda_available() and mlx_available() are pinned rather than
+asked, and the machine the tests run on cannot change what they assert. The launchers are checked
+as text, like run.cmd / run.sh in test_update_endpoint.py.
 """
 from __future__ import annotations
 
@@ -13,7 +15,10 @@ import importlib.util
 import json
 import logging
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,17 +46,40 @@ def data_dir(monkeypatch, tmp_path):
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def on_the_cpu(monkeypatch):
+    """The backend is pinned, not read off the machine: everything below describes the CTranslate2 path.
+
+    run_download_model() asks resolve_device("auto") which conversion this computer would load,
+    so on an Apple Silicon Mac with mlx-whisper installed the same command fetches MLX weights
+    from mlx-community instead (the tests at the end of the --download-model section turn that
+    machine on again). Without this the file would pass or fail by where it runs.
+    """
+    monkeypatch.setattr(server, "cuda_available", lambda: False)
+    monkeypatch.setattr(server, "mlx_available", lambda: False)
+
+
+def on_the_apple_gpu(monkeypatch):
+    """Undo the fixture for one test: a Mac whose resolve_device("auto") answers "mlx".
+
+    Faking the machine is enough; mlx.core and mlx_whisper never have to exist, because the setup
+    download goes to the Hub and loads nothing (test_mlx.py fakes the libraries themselves).
+    """
+    monkeypatch.setattr(server, "mlx_available", lambda: True)
+    assert server.resolve_device("auto") == "mlx"
+
+
 class DisabledTqdm:
     """Stands for faster_whisper.utils.disabled_tqdm, the class the setup download must not pass on."""
 
 
-def fake_hub(monkeypatch, tmp_path, fail=None, bare=False, table=None, block=None):
+def fake_hub(monkeypatch, tmp_path, fail=None, bare=False, table=None, block=None, files=("model.bin",)):
     """faster_whisper (its size table and disabled tqdm) and huggingface_hub with a recording snapshot_download().
 
-    The download comes back with a directory under tmp_path holding model.bin (unless `bare`),
-    or raises `fail`; with `block`, a pair of Events, it sets the first and waits for the second
-    first, a download that is still streaming. Returns the list of (repo_id, kwargs) it was
-    called with.
+    The download comes back with a directory under tmp_path holding `files` (model.bin, or the
+    MLX weights an mlx-community repo ships), none of them with `bare`, or raises `fail`; with
+    `block`, a pair of Events, it sets the first and waits for the second first, a download that
+    is still streaming. Returns the list of (repo_id, kwargs) it was called with.
     """
     calls = []
 
@@ -66,7 +94,8 @@ def fake_hub(monkeypatch, tmp_path, fail=None, bare=False, table=None, block=Non
         directory = tmp_path / "snapshots" / repo_id.replace("/", "--")
         directory.mkdir(parents=True, exist_ok=True)
         if not bare:
-            (directory / "model.bin").write_bytes(b"\0")
+            for name in files:
+                (directory / name).write_bytes(b"\0")
         return str(directory)
 
     utils = SimpleNamespace(_MODELS=dict(FAKE_MODELS if table is None else table), disabled_tqdm=DisabledTqdm)
@@ -185,6 +214,164 @@ def test_the_window_default_is_one_whisper_chunk(tmp_path):
 def test_the_download_flag_takes_a_name_and_defaults_to_none():
     assert server.parse_args(["--download-model", "small"]).download_model == "small"
     assert server.parse_args([]).download_model is None
+
+
+# --- the built-in default model: the backend picks it ---------------------------------------------
+# large-v3 is 2.9 GB of weights. On CUDA they sit in the card's own memory; on the Apple GPU they
+# share unified memory with the browser the viewer is watching in, and once the two no longer fit,
+# every decoder step pages. Measured on an M1 Pro, one 38 s window took 13 s alone and 81 s with
+# Chrome playing a single video, which is 0.47x real time: slower than the playback it subtitles.
+# large-v3-turbo has four decoder layers instead of thirty-two and 1.5 GB of weights, so it fits and
+# stays at 7.9x real time. Hence one built-in default per backend rather than one for all.
+
+def test_the_apple_gpu_default_is_the_turbo_model(monkeypatch):
+    on_the_apple_gpu(monkeypatch)
+    assert server.MLX_DEFAULT_MODEL == "large-v3-turbo"
+    assert server.default_model_for() == "large-v3-turbo"
+
+
+def test_every_other_backend_keeps_large_v3(monkeypatch):
+    # The autouse fixture's machine has neither GPU; a CUDA card has memory of its own, so nothing
+    # there is gained by the smaller model. resolve_device() asks Apple's GPU first, which costs
+    # nothing: mlx_available() is false off darwin, and no Apple Silicon machine has a CUDA device,
+    # so the two can never both answer yes.
+    assert server.default_model_for() == server.DEFAULT_MODEL == "large-v3"
+    monkeypatch.setattr(server, "cuda_available", lambda: True)
+    assert server.resolve_device("auto") == "cuda"
+    assert server.default_model_for() == "large-v3"
+
+
+def test_the_default_model_never_probes_cuda(monkeypatch):
+    # parse_args() calls default_model_for(), and a CUDA probe there imports ctranslate2 before the
+    # AMD engine's crash guard has counted the start (count_rocm_start(), then check_rocm_import()) —
+    # the one import that guard exists to survive. cuda and cpu answer with the same model anyway.
+    monkeypatch.setattr(server, "cuda_available", lambda: pytest.fail("the CUDA probe ran at parse time"))
+    monkeypatch.setattr(server, "mlx_available", lambda: True)
+    assert server.default_model_for() == server.MLX_DEFAULT_MODEL == "large-v3-turbo"
+    assert server.resolve_device("auto") == "mlx"  # and the two agree without either asking CUDA
+    monkeypatch.setattr(server, "mlx_available", lambda: False)
+    assert server.default_model_for("cpu") == server.default_model_for("cuda") == "large-v3"
+
+
+def test_a_named_device_decides_the_default_model_in_both_directions(monkeypatch):
+    # The default follows the backend that will run the model, not the hardware that happens to be
+    # in the machine: --device cpu on a Mac loads CTranslate2, where large-v3 is the right answer,
+    # and --device mlx anywhere loads MLX, where it is not.
+    on_the_apple_gpu(monkeypatch)
+    assert server.default_model_for("cpu") == "large-v3"
+    assert server.default_model_for("cuda") == "large-v3"
+    monkeypatch.setattr(server, "mlx_available", lambda: False)
+    assert server.resolve_device("auto") == "cpu"
+    assert server.default_model_for("mlx") == "large-v3-turbo"
+
+
+def test_the_flagless_model_is_the_backends_default(monkeypatch, tmp_path):
+    assert server.parse_args([]).model == "large-v3"
+    on_the_apple_gpu(monkeypatch)
+    assert server.parse_args([]).model == "large-v3-turbo"
+    assert server.parse_args(["--device", "cpu"]).model == "large-v3", "the flag, not the Mac"
+    assert server.parse_args(["--model", "small"]).model == "small"
+    assert not (tmp_path / "config.json").exists(), "reading never creates the file"
+
+
+def test_the_model_chosen_at_setup_wins_over_the_backend_default(monkeypatch, tmp_path):
+    # The rule a later refactor is most likely to break, so it is named: a viewer on a Mac who
+    # picked large-v3 at setup gets large-v3, and watches it load in the popup. The backend's
+    # default only fills a blank; it never overrules a choice.
+    server.write_config({"model": "large-v3"})
+    on_the_apple_gpu(monkeypatch)
+    assert server.parse_args([]).model == "large-v3"
+    server.write_config({"model": "small"})
+    assert server.parse_args([]).model == "small"
+    assert server.parse_args(["--model", "tiny"]).model == "tiny", "the flag still wins over both"
+    server.write_config({"model": None})
+    assert server.parse_args([]).model == "large-v3-turbo", "with the choice gone the backend decides again"
+
+
+def test_resolve_default_model_without_a_device_attribute_asks_the_machine(monkeypatch):
+    # server/tools build their own namespace; one that carries no --device must still get an
+    # answer, and "auto" is the one the server itself would give.
+    on_the_apple_gpu(monkeypatch)
+    assert server.resolve_default_model(SimpleNamespace(model=None)).model == "large-v3-turbo"
+    assert server.resolve_default_model(SimpleNamespace(model="x")).model == "x"
+
+
+# --- --default-model ------------------------------------------------------------------------------
+# setup.sh asks the server which model to offer instead of keeping a second copy of the rule.
+
+def run_main_quietly(monkeypatch, *argv):
+    """main() with the lock, the model load and the listening socket forbidden.
+
+    Returns the exit code; main() falling off its end is 0, which is what the shell reads, and is
+    the only way an answering flag may leave (a sys.exit() here would look like a failure to
+    `BEST="$(... || echo large-v3)"` and quietly cost setup.sh the answer it just printed).
+    """
+    monkeypatch.setattr(sys, "argv", ["server.py", *argv])
+    monkeypatch.setattr(server, "hold_instance_lock", lambda port: pytest.fail("the instance lock was taken"))
+    monkeypatch.setattr(server, "load_model", lambda *a, **k: pytest.fail("a model was loaded"))
+    monkeypatch.setattr(server, "ThreadingHTTPServer", lambda *a, **k: pytest.fail("the server listened"))
+    try:
+        server.main()
+    except SystemExit as stop:
+        return stop.code
+    return 0
+
+
+def test_default_model_prints_the_one_name_and_nothing_else(monkeypatch, tmp_path, capsys):
+    # setup.sh reads this with $(...), so a second line, a banner or a log record would end up in
+    # the menu and then in --download-model.
+    assert run_main_quietly(monkeypatch, "--default-model") == 0
+    assert capsys.readouterr() == ("large-v3\n", "")
+    on_the_apple_gpu(monkeypatch)
+    assert run_main_quietly(monkeypatch, "--default-model") == 0
+    assert capsys.readouterr() == ("large-v3-turbo\n", "")
+
+
+def test_default_model_follows_the_device_it_was_given(monkeypatch, tmp_path, capsys):
+    assert run_main_quietly(monkeypatch, "--device", "mlx", "--default-model") == 0
+    assert capsys.readouterr().out == "large-v3-turbo\n"
+    on_the_apple_gpu(monkeypatch)
+    assert run_main_quietly(monkeypatch, "--device", "cpu", "--default-model") == 0
+    assert capsys.readouterr().out == "large-v3\n"
+
+
+def test_default_model_answers_the_built_in_rule_and_not_the_setup_choice(monkeypatch, tmp_path, capsys):
+    # What setup.sh labels its first menu entry with is the best model for this machine, not the
+    # one the last run of setup happened to pick; offering "small" as choice 1 because small was
+    # chosen once would make the menu meaningless. (The flag's own help calls this "the model a
+    # bare start would load", which a config.json naming another model makes untrue.)
+    server.write_config({"model": "small"})
+    assert server.parse_args([]).model == "small"
+    assert run_main_quietly(monkeypatch, "--default-model") == 0
+    assert capsys.readouterr().out == "large-v3\n"
+
+
+def test_default_model_loads_nothing_and_takes_no_lock(monkeypatch, tmp_path, capsys):
+    # setup.sh runs this while a server may already be running, so it must not fight for the
+    # instance lock; and it must answer on a machine where the heavy libraries are broken or
+    # missing, since the answer is what the menu is built from. run_main_quietly() fails the test
+    # from the lock, the load and the socket; Untouchable does it from the first import.
+    monkeypatch.setitem(sys.modules, "faster_whisper", Untouchable("faster_whisper"))
+    monkeypatch.setitem(sys.modules, "huggingface_hub", Untouchable("huggingface_hub"))
+    monkeypatch.setattr(server, "run_check", lambda *a: pytest.fail("the check ran"))
+    monkeypatch.setattr(server, "run_download_model", lambda *a, **k: pytest.fail("a download started"))
+    assert run_main_quietly(monkeypatch, "--default-model") == 0
+    assert capsys.readouterr().out == "large-v3\n"
+
+
+def test_default_model_is_answered_before_the_check_and_the_download(monkeypatch, tmp_path, capsys):
+    # main() looks at it first, so a caller that passes it beside anything else still gets one
+    # parsable line rather than the check's twenty or a three-gigabyte download.
+    monkeypatch.setattr(server, "run_check", lambda *a: pytest.fail("the check ran"))
+    monkeypatch.setattr(server, "run_download_model", lambda *a, **k: pytest.fail("a download started"))
+    assert run_main_quietly(monkeypatch, "--default-model", "--check", "--download-model", "small") == 0
+    assert capsys.readouterr().out == "large-v3\n"
+    assert not (tmp_path / "config.json").exists(), "the download never ran, so nothing was chosen"
+
+
+def test_the_default_model_flag_is_off_unless_it_is_given():
+    assert server.parse_args([]).default_model is False
+    assert server.parse_args(["--default-model"]).default_model is True
 
 
 # --- --download-model ---------------------------------------------------------------------------
@@ -416,18 +603,144 @@ def test_the_switch_and_the_setup_download_refuse_a_bare_repo_alike(tmp_path):
     server.require_model_bin(str(tmp_path), "x")
 
 
+# --- --download-model on an Apple GPU -------------------------------------------------------------
+# The machine that will run the model decides which conversion setup fetches, because the first
+# start loads that one: on a Mac where resolve_device("auto") answers "mlx" the CTranslate2 files
+# would be dead weight and the viewer would wait for three gigabytes twice.
+
+LARGE_MLX = "mlx-community/whisper-large-v3-mlx"
+MLX_WEIGHTS = ("config.json", "weights.safetensors")
+MLX_FILES = ["*.json", "*.safetensors", "*.npz"]
+
+
+def test_download_on_the_apple_gpu_fetches_the_mlx_conversion(monkeypatch, tmp_path, capsys):
+    on_the_apple_gpu(monkeypatch)
+    calls = fake_hub(monkeypatch, tmp_path, files=MLX_WEIGHTS)
+    assert run_main(monkeypatch, "--download-model", "large-v3") == 0
+    (repo_id, kwargs), = calls
+    assert repo_id == LARGE_MLX, "mlx-community's conversion, not Systran's CTranslate2 build"
+    assert kwargs["allow_patterns"] == MLX_FILES, "the MLX weights; a model.bin would never be loaded"
+    assert kwargs["cache_dir"] == str(tmp_path / "models"), "one models folder for both backends"
+    assert config(tmp_path) == {"model": "large-v3"}
+    out = capsys.readouterr().out
+    assert f"Model large-v3 is ready in {tmp_path / 'snapshots' / 'mlx-community--whisper-large-v3-mlx'}." in out
+
+
+def test_an_mlx_repo_id_is_stored_under_its_size(monkeypatch, tmp_path):
+    # The two names are the same weights, so the config, /health and the cue cache all say large-v3;
+    # a viewer who typed the mlx-community repo at setup must not split the cache in two.
+    on_the_apple_gpu(monkeypatch)
+    calls = fake_hub(monkeypatch, tmp_path, files=MLX_WEIGHTS)
+    assert run_main(monkeypatch, "--download-model", LARGE_MLX) == 0
+    assert [repo for repo, _ in calls] == [LARGE_MLX]
+    assert config(tmp_path) == {"model": "large-v3"}
+
+
+@pytest.mark.parametrize("files", [("config.json",), ("weights.safetensors",), ("model.bin",)])
+def test_an_mlx_download_without_weights_is_refused_and_the_choice_taken_back(monkeypatch, tmp_path, capsys, files):
+    # require_mlx_weights() judges the directory here, not require_model_bin(): a repo that holds
+    # only the CTranslate2 model.bin is no more loadable on the GPU than an empty one, and the size
+    # written before the download is given back so the next start does not exit 2 on it forever.
+    on_the_apple_gpu(monkeypatch)
+    fake_hub(monkeypatch, tmp_path, files=files)
+    assert run_main(monkeypatch, "--download-model", "small") == 2
+    out = capsys.readouterr().out
+    assert "Could not download small: small is not an MLX Whisper model (no config.json beside weights.safetensors)" in out
+    # Nothing was chosen, so the next start falls back to this machine's built-in default, which on
+    # the Apple GPU is the turbo build rather than large-v3.
+    assert "model" not in server.read_config() and server.parse_args([]).model == server.MLX_DEFAULT_MODEL
+
+
+def test_a_name_without_an_mlx_build_says_so_instead_of_downloading(monkeypatch, tmp_path, capsys):
+    # mlx_repo_for() raises for a bare name nobody converted; run_download_model() must turn that
+    # into setup's own exit 2 with the reason, not let it out as a traceback the viewer reads as a crash.
+    on_the_apple_gpu(monkeypatch)
+    calls = fake_hub(monkeypatch, tmp_path, files=MLX_WEIGHTS)
+    assert run_main(monkeypatch, "--download-model", "whisper-jp") == 2
+    assert calls == [], "the hub is never asked for a repo id that cannot be built"
+    assert "there is no MLX build of 'whisper-jp'" in capsys.readouterr().out
+    assert not (tmp_path / "config.json").exists()
+
+
+def test_the_named_device_decides_the_download_on_a_mac(monkeypatch, tmp_path, capsys):
+    # --device cpu on a Mac means the CPU, here as everywhere else: the operator who runs the
+    # server on CTranslate2 must get its files at setup, or the first start downloads the whole
+    # model a second time. The machine is only consulted for --device auto.
+    on_the_apple_gpu(monkeypatch)
+    calls = fake_hub(monkeypatch, tmp_path, files=MLX_WEIGHTS)
+    assert run_main(monkeypatch, "--device", "cpu", "--download-model", "large-v3") == 2
+    (repo_id, kwargs), = calls
+    assert repo_id == "Systran/faster-whisper-large-v3" and kwargs["allow_patterns"] == MODEL_FILES
+    assert "large-v3 is not a CTranslate2/faster-whisper model (no model.bin)" in capsys.readouterr().out
+    again = fake_hub(monkeypatch, tmp_path)  # the same repo with model.bin: those files are enough
+    assert run_main(monkeypatch, "--device", "cpu", "--download-model", "large-v3") == 0
+    assert [repo for repo, _ in again] == ["Systran/faster-whisper-large-v3"]
+    assert config(tmp_path) == {"model": "large-v3"}
+
+
+def test_the_named_device_decides_the_download_without_a_mac_too(monkeypatch, tmp_path, capsys):
+    # The other direction, so that the rule is the device's and not the machine's: --device mlx is
+    # refused by load_model() where MLX cannot run, and a download that quietly fetched something
+    # else would hide that behind a missing-weights error hours later.
+    calls = fake_hub(monkeypatch, tmp_path, files=MLX_WEIGHTS)
+    assert server.resolve_device("auto") == "cpu", "the fixture's machine has neither GPU"
+    assert run_main(monkeypatch, "--device", "mlx", "--download-model", "large-v3") == 0
+    (repo_id, kwargs), = calls
+    assert repo_id == LARGE_MLX and kwargs["allow_patterns"] == MLX_FILES
+    assert config(tmp_path) == {"model": "large-v3"}
+    assert f"Model large-v3 is ready in {tmp_path / 'snapshots' / 'mlx-community--whisper-large-v3-mlx'}." \
+        in capsys.readouterr().out
+
+
+def test_the_device_defaults_to_auto_so_a_bare_call_asks_the_machine(monkeypatch, tmp_path, capsys):
+    # Every test above that names no device relies on this default; the tools and any later caller
+    # get the machine's own backend without having to say so.
+    on_the_apple_gpu(monkeypatch)
+    mlx_calls = fake_hub(monkeypatch, tmp_path, files=MLX_WEIGHTS)
+    assert server.run_download_model("large-v3") == 0
+    monkeypatch.setattr(server, "mlx_available", lambda: False)
+    ct2_calls = fake_hub(monkeypatch, tmp_path)
+    assert server.run_download_model("large-v3") == 0
+    assert [repo for repo, _ in mlx_calls] == [LARGE_MLX]
+    assert [repo for repo, _ in ct2_calls] == ["Systran/faster-whisper-large-v3"]
+    capsys.readouterr()
+
+
+def test_main_hands_the_download_the_device_it_was_started_with(monkeypatch, tmp_path):
+    # The argument is only useful if main() passes it on; a refactor that drops it would leave
+    # every test above green except this one, since the fixture's machine and "auto" agree.
+    asked = []
+    monkeypatch.setattr(server, "run_download_model", lambda *a, **k: (asked.append((a, k)), 0)[1])
+    assert run_main(monkeypatch, "--device", "mlx", "--download-model", "small") == 0
+    assert run_main(monkeypatch, "--download-model", "small") == 0
+    assert asked == [(("small", "mlx"), {}), (("small", "auto"), {})]
+
+
+def test_without_an_apple_gpu_the_same_call_takes_the_ctranslate2_files(monkeypatch, tmp_path, capsys):
+    # The twin of the first test, same command and same files in the repo, on the machine the
+    # autouse fixture describes: faster-whisper's repo id, its five files, and model.bin required.
+    calls = fake_hub(monkeypatch, tmp_path, files=MLX_WEIGHTS)
+    assert run_main(monkeypatch, "--download-model", "large-v3") == 2
+    (repo_id, kwargs), = calls
+    assert repo_id == "Systran/faster-whisper-large-v3" and kwargs["allow_patterns"] == MODEL_FILES
+    assert "Could not download large-v3: large-v3 is not a CTranslate2/faster-whisper model (no model.bin)" \
+        in capsys.readouterr().out
+
+
 # --- run_check() --------------------------------------------------------------------------------
 
 def no_registry(*args):
     raise OSError("no such key")
 
 
-def test_run_check_names_the_default_model(monkeypatch, tmp_path, capsys):
-    # run_check() imports ctranslate2 (which would initialise the CUDA driver where the library is
-    # installed: the venv, nix run .#tests), faster_whisper and yt_dlp, and loads native_host.py to
-    # look the launcher up in the registry and in the browsers' folders (under the home, and on
-    # Linux under CHROME_CONFIG_HOME or XDG_CONFIG_HOME): every one of them is a stand-in here,
-    # and the output shows that they were what the check saw.
+def stand_in_libraries(monkeypatch, tmp_path):
+    """Everything run_check() imports or looks up, as a stand-in.
+
+    It imports ctranslate2 (which would initialise the CUDA driver where the library is installed:
+    the venv, nix run .#tests), faster_whisper and yt_dlp, and loads native_host.py to look the
+    launcher up in the registry and in the browsers' folders (under the home, and on Linux under
+    CHROME_CONFIG_HOME or XDG_CONFIG_HOME).
+    """
     fake_hub(monkeypatch, tmp_path)
     monkeypatch.setitem(sys.modules, "ctranslate2", SimpleNamespace(__version__="0", get_cuda_device_count=lambda: 0))
     version = SimpleNamespace(__version__="0")
@@ -437,6 +750,11 @@ def test_run_check_names_the_default_model(monkeypatch, tmp_path, capsys):
     for name in ("SHISUKO_HOME", "USERPROFILE", "HOME", "CHROME_CONFIG_HOME", "XDG_CONFIG_HOME"):
         monkeypatch.setenv(name, str(tmp_path))
     monkeypatch.delenv("SHISUKO_CONTAINER", raising=False)
+
+
+def test_run_check_names_the_default_model(monkeypatch, tmp_path, capsys):
+    # The output shows that the stand-ins were what the check saw.
+    stand_in_libraries(monkeypatch, tmp_path)
     server.run_check()
     out = capsys.readouterr().out
     assert "CTranslate2 0: 0 CUDA device(s)" in out and "faster-whisper 0" in out and "yt-dlp 0" in out
@@ -458,6 +776,22 @@ def test_run_check_names_the_default_model(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Default model: small (chosen at setup)" in out
     assert "YouTube sign-in: firefox's cookies go with every download (chosen at setup)" in out
+
+
+def test_run_check_names_the_backends_default_model(monkeypatch, tmp_path, capsys):
+    # setup.sh prints this check right above its menu, so the two must agree: a check that promised
+    # large-v3 over a menu offering large-v3-turbo would read as a bug in one of them. run_check()
+    # takes no device, so it always describes --device auto, which is what a bare start uses.
+    stand_in_libraries(monkeypatch, tmp_path)
+    on_the_apple_gpu(monkeypatch)
+    server.run_check()
+    out = capsys.readouterr().out
+    assert "Backend for --device auto: mlx" in out
+    assert "Default model: large-v3-turbo (built-in default)" in out
+    # A choice made at setup is still the choice, and is named as one.
+    server.write_config({"model": "large-v3"})
+    server.run_check()
+    assert "Default model: large-v3 (chosen at setup)" in capsys.readouterr().out
 
 
 # --- the launchers ------------------------------------------------------------------------------
@@ -540,9 +874,10 @@ def test_setup_sh_asks_then_downloads_then_says_it_is_done():
     text = sh_text()
     assert text.startswith("#!/usr/bin/env bash\n") and "set -euo pipefail" in text
     check = text.index('"${HERE}/server.py" --check')
+    best = text.index('BEST="$(')
     loop = text.index("while :; do")
     read = text.index('read -r -p "Type 1, 2, 3 or 4: " pick || pick=1')
-    large = text.index("1) MODEL=large-v3; break;;")
+    large = text.index('1) MODEL="$BEST"; break;;')
     small = text.index("2) MODEL=small; break;;")
     kit6 = text.index("3) MODEL=kitsune-0.6b; break;;")
     kit1 = text.index("4) MODEL=kitsune-0.1b; break;;")
@@ -566,14 +901,14 @@ def test_setup_sh_asks_then_downloads_then_says_it_is_done():
     assert calls == [amd_call.strip("\n")], "amd_setup.py is called once, with the venv's Python and no arguments"
     complete = text.index('echo "Setup is complete: the $MODEL model is downloaded and everything is ready."')
     last = text.index('echo "Close this window and start ./run.sh."')
-    assert check < loop < read < large < small < kit6 < kit1 < done_loop < kitsune < cookies < download < failed \
+    assert check < best < loop < read < large < small < kit6 < kit1 < done_loop < kitsune < cookies < download < failed \
         < exit_line < closed < amd < complete < last
     between = text[closed + len("\nfi\n"):amd].splitlines()
     assert all(l.startswith("#") or l == "echo" for l in between), "nothing but comments and a blank line before it"
     assert text[amd + len(amd_call):complete] == "echo\n"
     assert text.rstrip("\n").endswith('echo "Close this window and start ./run.sh."')
     assert "downloaded on the first start" not in text
-    assert "1  large-v3" in text and "2  small" in text
+    assert 'echo "  1  ${BEST_LINE}"' in text and "2  small" in text
     assert "also downloads it on its first start" not in text and not any("also downloads it" in l for l in cmd_lines())
 
 
@@ -588,14 +923,102 @@ def test_setup_scripts_offer_the_same_four_models():
     cmd = "\n".join(cmd_lines())
     sh = sh_text()
     for text in (cmd, sh):
-        assert "1  large-v3      Whisper: best quality, about 3 GB, wants a GPU with 4 GB or more free" in text
-        assert "2  small         Whisper: about 500 MB, fine on a CPU, less accurate" in text
-        assert "3  kitsune-0.6b  Kitsune-Transcribe: Japanese only, about 1.2 GB, plus PyTorch (about 3 GB)" in text
-        assert "4  kitsune-0.1b  Kitsune-Transcribe: Japanese only, about 200 MB, plus PyTorch, fine on a CPU" in text
+        # The descriptions without their column, which the two scripts pad differently.
         assert "Which model should the server use? (the popup can switch later)" in text
+        assert "Whisper: best quality, about 3 GB, wants a GPU with 4 GB or more free" in text
+        assert "Whisper: about 500 MB, fine on a CPU, less accurate" in text
+        assert "Kitsune-Transcribe: Japanese only, about 1.2 GB, plus PyTorch (about 3 GB)" in text
+        assert "Kitsune-Transcribe: Japanese only, about 200 MB, plus PyTorch, fine on a CPU" in text
+    # setup.cmd spells the first entry out; setup.sh builds it, and its column is two wider because
+    # large-v3-turbo is the longest name it may have to print there.
+    assert "1  large-v3      Whisper: best quality" in cmd and "2  small         Whisper: about 500 MB" in cmd
+    assert "3  kitsune-0.6b  Kitsune-Transcribe" in cmd and "4  kitsune-0.1b  Kitsune-Transcribe" in cmd
+    assert "2  small           Whisper: about 500 MB" in sh
+    assert "3  kitsune-0.6b    Kitsune-Transcribe" in sh and "4  kitsune-0.1b    Kitsune-Transcribe" in sh
     assert server.MODEL_SIZES["large-v3"] == "about 3 GB" and server.MODEL_SIZES["small"] == "about 500 MB"
     assert server.kitsune_size("kitsune-0.6b") == "about 1.2 GB" and server.kitsune_size("kitsune-0.1b") == "about 210 MB"
     assert (SERVER_DIR / "kitsune_setup.py").is_file() and (SERVER_DIR / "requirements-kitsune.txt").is_file()
+
+
+# --- setup.sh asks the server which model to offer --------------------------------------------
+# Windows has no MLX, so setup.cmd keeps naming large-v3 itself; setup.sh cannot, because the same
+# script runs on a Linux box with a CUDA card and on an Apple Silicon Mac.
+
+def test_setup_sh_asks_the_server_for_the_first_choice():
+    text = sh_text()
+    assert 'BEST="$("${VENV}/bin/python" "${HERE}/server.py" --default-model 2>/dev/null || true)"' in text
+    assert "1) MODEL=large-v3" not in text, "option 1 is the answer, not a second copy of the rule"
+    assert 'echo "  1  ${BEST_LINE}"' in text and '1) MODEL="$BEST"; break;;' in text
+    assert "2) MODEL=small; break;;" in text, "the second choice is the small CPU model, as before"
+
+
+def test_setup_sh_labels_both_answers_the_server_can_give():
+    # The case arms are the only place the two names appear in the script, so they must be the
+    # server's two constants: a third default, or a renamed one, would fall through to a line
+    # promising large-v3 while $BEST said something else.
+    text = sh_text()
+    assert f'{server.MLX_DEFAULT_MODEL}) BEST_LINE="{server.MLX_DEFAULT_MODEL}  ' in text
+    assert f'*)              BEST={server.DEFAULT_MODEL}\n' in text, "the fallback names the model it offers"
+    assert f'BEST_LINE="{server.DEFAULT_MODEL}' in text
+    assert "an Apple GPU beside a browser" in text, "why the smaller model is the one offered there"
+
+
+def test_setup_cmd_names_large_v3_itself_and_asks_nothing():
+    # There is no MLX on Windows: resolve_device() answers cuda or cpu there, so the answer is
+    # always large-v3 and a subprocess for it would only be one more thing to fail.
+    lines = cmd_lines()
+    assert not any("--default-model" in line for line in lines)
+    assert any("1  large-v3      Whisper: best quality" in line for line in lines)
+    assert any('set "MODEL=large-v3"' in line for line in lines)
+
+
+BASH = shutil.which("bash") if os.name != "nt" else None
+
+
+def best_block():
+    """The lines of setup.sh that turn the server's answer into the first menu entry, on their own."""
+    text = sh_text()
+    start = text.index('BEST="$(')
+    return text[start:text.index("esac\n", start) + len("esac\n")]
+
+
+def run_best_block(tmp_path, answer=None, code=0, python=True):
+    """Run that block against a stub server.py; returns (BEST, BEST_LINE).
+
+    The stub is a shell script in place of the venv's python: it prints `answer` on stdout, as
+    --default-model does, and exits with `code`. With python=False there is no such file at all,
+    which is what a half-finished venv looks like.
+    """
+    home = Path(tempfile.mkdtemp(dir=tmp_path))  # a fresh venv per call: two run in one test below
+    (home / "bin").mkdir()
+    if python:
+        stub = home / "bin" / "python"
+        stub.write_text("#!/bin/sh\n" + (f"echo {answer}\n" if answer else "") + f"exit {code}\n", encoding="utf-8")
+        stub.chmod(0o755)
+    script = f'set -euo pipefail\nVENV={home}\nHERE={home}\n{best_block()}\nprintf "%s|%s" "$BEST" "$BEST_LINE"\n'
+    done = subprocess.run([BASH, "-c", script], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    return done.stdout.split("|", 1)
+
+
+@pytest.mark.skipif(BASH is None, reason="the shell block needs bash; setup.sh never runs on Windows")
+def test_the_menus_first_entry_is_whatever_the_server_answered(tmp_path):
+    best, line = run_best_block(tmp_path, answer="large-v3-turbo")
+    assert best == "large-v3-turbo" and line.startswith("large-v3-turbo  ")
+    best, line = run_best_block(tmp_path, answer="large-v3")
+    assert best == "large-v3" and line.startswith("large-v3        Whisper: best quality")
+
+
+@pytest.mark.skipif(BASH is None, reason="the shell block needs bash; setup.sh never runs on Windows")
+@pytest.mark.parametrize("stub", [dict(code=1), dict(python=False), dict(answer=None, code=0)])
+def test_a_server_that_cannot_answer_leaves_setup_on_large_v3(tmp_path, stub):
+    # set -euo pipefail would end the whole script on a non-zero exit, and a missing venv python is
+    # a 127 of the same kind: a broken install must still offer a model rather than stop at a line
+    # nobody will read the reason for (stderr goes to /dev/null). The third stub answers nothing and
+    # exits 0, which is what a server.py from before --default-model does: `|| echo` never fires
+    # there, so the fallback has to name the model itself or choice 1 downloads the empty name.
+    best, line = run_best_block(tmp_path, **stub)
+    assert best == "large-v3" and line.startswith("large-v3        Whisper: best quality")
 
 
 # --- server/tools/retranscribe.py: its --model default is the server's ---------------------------
@@ -637,9 +1060,24 @@ def test_retranscribe_without_a_config_takes_large_v3_and_the_flag_wins(tmp_path
     assert tool.parse_args(["abc123def45", "--out", str(tmp_path / "out"), "--model", "x"]).model == "x"
 
 
+def test_retranscribe_follows_the_backend_default_too(monkeypatch, tmp_path):
+    # The tool resolves --model through the server's own rule, so measuring a cache on a Mac
+    # measures the model that machine would really run. (Its --help still says "else large-v3",
+    # which is only the answer off the Apple GPU.)
+    tool = load_retranscribe()
+    on_the_apple_gpu(monkeypatch)
+    assert tool.parse_args(["abc123def45", "--out", str(tmp_path / "out")]).model == server.MLX_DEFAULT_MODEL
+    server.write_config({"model": "large-v3"})
+    assert tool.parse_args(["abc123def45", "--out", str(tmp_path / "out")]).model == "large-v3"
+
+
 def test_retranscribe_help_names_the_setup_default(monkeypatch, capsys):
-    monkeypatch.setenv("COLUMNS", "200")
+    # The help has to name both defaults, since which one a bare run takes depends on the backend:
+    # a measurement is worth nothing if the reader cannot tell which model produced it.
+    monkeypatch.setenv("COLUMNS", "300")
     tool = load_retranscribe()
     with pytest.raises(SystemExit):
         tool.parse_args(["--help"])
-    assert "the model chosen at setup (config.json), else large-v3" in capsys.readouterr().out
+    text = " ".join(capsys.readouterr().out.split())
+    assert "the model chosen at setup (config.json)" in text
+    assert server.MLX_DEFAULT_MODEL in text and server.DEFAULT_MODEL in text

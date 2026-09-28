@@ -44,6 +44,18 @@ FAKE_MODELS = {"small": "Systran/faster-whisper-small", "large-v3": "Systran/fas
 GUARD_WORDS = "did not get a model onto the AMD GPU at its last start"
 
 
+@pytest.fixture(autouse=True)
+def not_an_apple_machine(monkeypatch):
+    """Every machine in this file is an NVIDIA, AMD or CPU one, never a Mac.
+
+    resolve_device("auto") asks mlx_available() first, so on an Apple Silicon machine with
+    mlx-whisper installed --device auto answers "mlx", no WhisperModel is built and the engine
+    these tests describe never runs. Pinning it keeps the file from passing or failing by where
+    it runs.
+    """
+    monkeypatch.setattr(server, "mlx_available", lambda: False)
+
+
 def forbidden_terminate(code):
     pytest.fail(f"the real TerminateProcess was reached (code {code})")
 
@@ -999,8 +1011,8 @@ def test_the_one_shot_commands_never_count_a_start(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "os", os_as("posix"))
     monkeypatch.setattr(server, "hold_instance_lock", lambda port: pytest.fail("the instance lock was taken"))
     monkeypatch.setattr(server, "load_model", lambda *a, **k: pytest.fail("a model was loaded"))
-    monkeypatch.setattr(server, "run_check", lambda: None)
-    monkeypatch.setattr(server, "run_download_model", lambda name: 0)
+    monkeypatch.setattr(server, "run_check", lambda *a: None)
+    monkeypatch.setattr(server, "run_download_model", lambda name, *a: 0)
     monkeypatch.setattr(server, "run_save_cookies", lambda name: 0)
     monkeypatch.setattr(server, "run_setup_cookies", lambda: 0)
     assert run_main(monkeypatch, "--check") is None
@@ -1351,8 +1363,8 @@ def test_the_import_asks_rocm_engine_whether_it_runs_as_the_script():
 def test_the_one_shot_commands_end_through_terminate_process_on_windows(monkeypatch, argv, code, result):
     calls = windows_end(monkeypatch)
     monkeypatch.setattr(server, "hold_instance_lock", lambda port: pytest.fail("the instance lock was taken"))
-    monkeypatch.setattr(server, "run_check", lambda: None)
-    monkeypatch.setattr(server, "run_download_model", lambda name: 2)
+    monkeypatch.setattr(server, "run_check", lambda *a: None)
+    monkeypatch.setattr(server, "run_download_model", lambda name, *a: 2)
     monkeypatch.setattr(server, "run_save_cookies", lambda name: 0)
     monkeypatch.setattr(server, "run_setup_cookies", lambda: 0)
     assert run_main(monkeypatch, *argv) == result  # the fake TerminateProcess returns, as only a failed one does
@@ -1746,7 +1758,7 @@ def windows_app(monkeypatch, tmp_path, name="nt", active=True):
         raise Exited(code)
 
     monkeypatch.setattr(server, "hard_exit", hard_exit)
-    monkeypatch.setattr(server, "download_model_files", lambda n: str(tmp_path / "files" / n))
+    monkeypatch.setattr(server, "download_model_files", lambda n, *a: str(tmp_path / "files" / n))
     monkeypatch.setattr(server, "Transcriber", InertTranscriber)
     loads = []
 
@@ -1783,7 +1795,7 @@ def test_without_run_cmd_a_switch_with_the_amd_engine_on_windows_is_refused_befo
     # A plain `python server\server.py`: the exit with code 3 would end the server for good.
     app, exits, loads = windows_app(monkeypatch, tmp_path)
     monkeypatch.delenv("SHISUKO_LAUNCHER")
-    monkeypatch.setattr(server, "download_model_files", lambda name: pytest.fail("the files were fetched"))
+    monkeypatch.setattr(server, "download_model_files", lambda name, *a: pytest.fail("the files were fetched"))
     old = app.model
     app.request_model("small")
     with caplog.at_level(logging.INFO, logger="shisu-ko"):
@@ -2135,6 +2147,7 @@ def check_stand_ins(monkeypatch, tmp_path, devices=1):
     for name in ("SHISUKO_HOME", "USERPROFILE", "HOME", "CHROME_CONFIG_HOME", "XDG_CONFIG_HOME"):
         monkeypatch.setenv(name, str(tmp_path))
     monkeypatch.delenv("SHISUKO_CONTAINER", raising=False)
+    monkeypatch.setattr(server, "mlx_available", lambda: False)
 
 
 def test_run_check_says_when_the_amd_engine_sees_no_gpu(monkeypatch, tmp_path, capsys):

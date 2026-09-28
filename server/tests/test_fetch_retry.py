@@ -64,7 +64,8 @@ def test_recent_failure_is_not_retried_yet(monkeypatch, tmp_path):
 
 def test_fetch_failure_records_the_time(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "CACHE_DIR", tmp_path)
-    fetcher = server.Fetcher(SimpleNamespace(cookies_from_browser="", cookies="", allow_remote_ejs=False, js_runtime="auto"))
+    fetcher = server.Fetcher(SimpleNamespace(cookies_from_browser="", cookies="", allow_remote_ejs=False,
+                                             js_runtime="auto", language="ja", language_patience=60.0))
     monkeypatch.setattr(fetcher, "download", lambda s: (_ for _ in ()).throw(RuntimeError("Video unavailable")))
     s = server.Session(video_id=VIDEO, url="u")
     before = time.time()

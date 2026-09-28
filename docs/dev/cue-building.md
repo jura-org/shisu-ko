@@ -235,7 +235,32 @@ casts no vote, and the head's verdict in `sung_in_target()` never reaches `langu
 a foreign song never pauses a video. Live streams take the same path (a 歌枠 gets its lyrics).
 Tests: `server/tests/test_lyrics.py` (a fake model and a patched `detect_speech`, like `test_language.py`).
 
-Language watch: when `--language-patience` is above 0 (default 60) every window's speech-only
+Language watch. YouTube goes first, the audio only where YouTube says nothing.
+
+`declared_language(info)` reads `info["language"]`, the default audio track the uploader declared,
+as a bare lowercase code (`en-US` -> `en`), else None. It was right on all four videos tested (`ja`,
+`ja`, `ja`, `en`), and it is the only field in the metadata worth reading: `automatic_captions`
+lists some 157 languages for every video, because YouTube offers to machine-translate its own
+transcript into all of them.
+
+A video YouTube names as something other than `--language`, with the patience above 0, is refused
+in `Fetcher.download_once()` before `process_ie_result`, so before one byte is downloaded.
+`Fetcher.fetch()` catches `ForeignLanguage` and writes the state the audio detector would have
+produced — `heard`, `language_paused`, `status: ready`, `duration` from `duration_hint` — so the
+overlay says what it always said and the extension needs no change. Verified on a running server: a
+TEDx talk refused one second after the sync, nothing written to the audio cache. It used to cost
+the whole download, the whole decode and 60 seconds of forced Japanese out of English speech before
+the patience ran out. A video whose audio is already cached never calls `download()` and so never
+meets this test; the detector below still covers it.
+
+A video YouTube names as `--language` never reaches the audio detector at all:
+`Transcriber.process()` asks `watch_language()` only while `s.declared_language != args.language`.
+That pass cost about 1.0 s a window, and turbo does not shrink it, because turbo shrinks the
+decoder and detection is an encoder pass. The cost of trusting the declaration is that an English
+stretch inside a video YouTube calls Japanese is now transcribed as Japanese for its whole length.
+
+The audio detector stays, unchanged, as the fallback for a video YouTube names nothing for: when
+`--language-patience` is above 0 (default 60) every window's speech-only
 samples (`speech_samples()`, capped at 30 s) go through `model.detect_language()` before
 transcription. `language_vote()` is the pure state machine over `Session.foreign_seconds`,
 `heard` and `language_paused`: a foreign vote below the patience still transcribes, so one
@@ -249,10 +274,12 @@ and go permanently blank. `planned_ranges()` is the union the planners walk; hea
 language again empties `probed` and offers that audio back. `lookahead_for()` keeps the probes
 within `LANGUAGE_PROBE_AHEAD` (90 s) of the playhead rather than `--lookahead`. A detector that
 raises is never what silences a video: the window is transcribed unjudged. `--language-patience 0`
-skips detection entirely and also refuses to restore a pause from the cache, so it really is the
+skips detection entirely, skips the metadata refusal with it and refuses to restore a pause from
+the cache, so it really is the
 cure the README offers. `/sync` and `/sessions` report `heard` and `language_paused`; the cache
 stores them under `language_state`, discarded when `--language` changes. `retranscribe.py` sets
-the patience to 0. `server/tests/test_language.py` covers the rules with a scripted model.
+the patience to 0. `server/tests/test_language.py` covers the rules with a scripted model, and
+`server/tests/test_declared_language.py` the metadata refusal.
 
 Before the whole track is decoded (seconds for a long video), `Fetcher.make_preview()` decodes a
 minute around the playhead into `Session.preview` (`(offset, samples)`) and marks the session

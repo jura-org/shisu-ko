@@ -585,7 +585,7 @@ def test_an_operator_folder_named_like_a_kitsune_model_stays_the_folder_under_it
     assert server.operator_folder(SimpleNamespace(model="kitsune-0.6b-int8-w8a8"), "kitsune-0.6b-int8-w8a8") \
         == "kitsune-0.6b-int8-w8a8"
     monkeypatch.setattr(server, "kitsune_runtime_missing", lambda: None)
-    monkeypatch.setattr(server, "download_model_files", lambda name: pytest.fail("the hub was asked for the operator's folder"))
+    monkeypatch.setattr(server, "download_model_files", lambda name, *a: pytest.fail("the hub was asked for the operator's folder"))
     loaded = []
     model = SimpleNamespace(device="cpu", compute_label="float32", transcribe=lambda *a, **k: ([], None))
     monkeypatch.setattr(server, "kitsune_engine", lambda: SimpleNamespace(

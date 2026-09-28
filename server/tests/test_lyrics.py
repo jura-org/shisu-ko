@@ -966,19 +966,30 @@ def test_dump_words_decides_the_lyrics_path_per_window_and_marks_the_record(monk
     monkeypatch.setattr(server, "detect_speech", lambda audio, offset=0.0: heard.get(offset, []))
     model = RigModel(SUNG, [("ja", 0.95), ("en", 0.9)])
     fake_faster_whisper(monkeypatch, model, tone(60.0))
+    # The tool builds its model through server.load_model(), so --device auto would answer with
+    # whatever backend this computer has: on an Apple Silicon Mac it would build a real
+    # MlxWhisperModel and fetch the weights from Hugging Face instead of using the fake below.
+    monkeypatch.setattr(server, "cuda_available", lambda: False)
+    monkeypatch.setattr(server, "mlx_available", lambda: False)
     argv = [VIDEO, "--cache", str(cache), "--out", str(out), "--to", "60", "--window", "20", "--model", "small"]
 
     assert tool.main(argv) == 0
-    assert [call["vad_filter"] for call in model.calls] == [False, True, True]
+    # load_model() decodes two seconds of silence before it returns, so the windows start at the
+    # second call; the rig sees the same warm-up the server's own start pays for, and that decode
+    # carries no prompt of its own.
+    warm_up, calls = model.calls[0], model.calls[1:]
+    assert warm_up["vad_filter"] is False and warm_up["beam_size"] == 1
+    assert "initial_prompt" not in warm_up
+    assert [call["vad_filter"] for call in calls] == [False, True, True]
     # The dump is only an A/B on the server's own decode if it resolves the prompt as parse_args()
     # does and withholds it from a lyrics window as process() does.
     assert tool.parse_args(argv).initial_prompt == server.DEFAULT_PROMPTS["ja"]
     assert tool.parse_args(argv + ["--initial-prompt", ""]).initial_prompt == ""
     assert tool.parse_args(argv + ["--language", "en"]).initial_prompt == ""
-    assert [call["initial_prompt"] for call in model.calls] == [None, server.DEFAULT_PROMPTS["ja"],
-                                                                server.DEFAULT_PROMPTS["ja"]]
-    assert "vad_parameters" not in model.calls[0]
-    assert model.calls[1]["vad_parameters"] == server.VAD_PARAMS and model.calls[1]["word_timestamps"] is True
+    assert [call["initial_prompt"] for call in calls] == [None, server.DEFAULT_PROMPTS["ja"],
+                                                          server.DEFAULT_PROMPTS["ja"]]
+    assert "vad_parameters" not in calls[0]
+    assert calls[1]["vad_parameters"] == server.VAD_PARAMS and calls[1]["word_timestamps"] is True
     assert model.detections == 2  # the talk window never reaches the head
     records = json.loads((out / f"{VIDEO}.words.json").read_text(encoding="utf-8"))
     assert [r["window"] for r in records] == [[0.0, 20.0], [20.0, 40.0], [40.0, 60.0]]
@@ -995,7 +1006,7 @@ def test_dump_words_decides_the_lyrics_path_per_window_and_marks_the_record(monk
     model = RigModel(SUNG, [("ja", 0.95), ("ja", 0.95)])
     fake_faster_whisper(monkeypatch, model, tone(60.0))
     assert tool.main(argv + ["--lyrics", "off"]) == 0
-    assert [call["vad_filter"] for call in model.calls] == [True, True, True]
+    assert [call["vad_filter"] for call in model.calls[1:]] == [True, True, True]  # past the warm-up again
     assert model.detections == 0
     records = json.loads((out / f"{VIDEO}.words.json").read_text(encoding="utf-8"))
     assert [r["lyrics"] for r in records] == [False, False, False]

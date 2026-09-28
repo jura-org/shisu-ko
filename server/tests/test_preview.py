@@ -127,7 +127,9 @@ def make_fetcher(monkeypatch, tmp_path, decode_audio, duration=90.0, duration_hi
     monkeypatch.setitem(sys.modules, "faster_whisper", package)
     monkeypatch.setitem(sys.modules, "faster_whisper.audio", module)
 
-    args = SimpleNamespace(first_window=20.0, window=40.0, lookahead=900.0,
+    # language / language_patience: download_once() weighs YouTube's declared language against them
+    # before it downloads anything, and these fakes declare none, so the download always goes ahead.
+    args = SimpleNamespace(first_window=20.0, window=40.0, lookahead=900.0, language="ja", language_patience=60.0,
                            cookies_from_browser="", cookies="", allow_remote_ejs=False, js_runtime="auto")
     s = server.Session(video_id=VIDEO, url="u", want_t=30.0, duration_hint=duration_hint)
     return server.Fetcher(args), s
@@ -280,7 +282,7 @@ def setup_download(monkeypatch, tmp_path, *, want_t, duration=90.0, abr=128.0,
     yt_dlp.YoutubeDL = lambda opts: FakeYoutubeDL(opts, plan)
     monkeypatch.setitem(sys.modules, "yt_dlp", yt_dlp)
 
-    args = SimpleNamespace(first_window=20.0, window=40.0, lookahead=900.0,
+    args = SimpleNamespace(first_window=20.0, window=40.0, lookahead=900.0, language="ja", language_patience=60.0,
                            cookies_from_browser="", cookies="", allow_remote_ejs=False, js_runtime="auto")
     return server.Fetcher(args), s, plan, decoded
 

@@ -56,6 +56,7 @@ def parse_args(argv=None):
     p.add_argument("--model", default="large-v3")
     p.add_argument("--device", default="auto")
     p.add_argument("--compute-type", default="auto")
+    p.add_argument("--cpu-threads", type=int, default=0)  # load_model() reads it, as retranscribe.py does
     p.add_argument("--language", default="ja")
     p.add_argument("--beam-size", type=int, default=5)
     p.add_argument("--initial-prompt", default=None, help="text prompt given to Whisper for every window, as the "
@@ -97,7 +98,6 @@ def main(argv=None) -> int:
         return 1
 
     import numpy as np
-    from faster_whisper import WhisperModel
     from faster_whisper.audio import decode_audio
 
     audio = np.ascontiguousarray(decode_audio(str(src), sampling_rate=server.SAMPLE_RATE), dtype=np.float32)
@@ -105,18 +105,15 @@ def main(argv=None) -> int:
     end = min(args.end or total, total)
     print(f"[{args.video_id}] {total:.0f}s decoded; dumping {args.start:.0f}-{end:.0f}s", flush=True)
 
-    if server.is_kitsune_model(args.model):
-        # A Kitsune model loads as the server loads it (kitsune_engine.py, on PyTorch).
-        load_args = SimpleNamespace(model=args.model, language=args.language, device=args.device,
-                                    compute_type=args.compute_type, cpu_threads=0)
-        model = server.load_kitsune_model(load_args, args.model)[0]
-    else:
-        model = WhisperModel(args.model, device=args.device, compute_type=args.compute_type,
-                             download_root=str(server.MODELS_DIR))
+    # Through load_model(), so the dump comes from the backend the server would have used here:
+    # CTranslate2, MLX on an Apple GPU, or Kitsune on PyTorch, which load_model() dispatches by
+    # name. A WhisperModel() of our own would decode on the CPU of a Mac instead, and the words
+    # would not be the ones the server writes.
+    model, device, compute = server.load_model(args)
     lyrics_args = worker_args(args)
     # sung_in_target() lives on the transcriber and asks the App's model; the App's own worker
     # thread idles, since no session is ever registered with it.
-    worker = server.Transcriber(server.App(lyrics_args, model, args.device, args.compute_type))
+    worker = server.Transcriber(server.App(lyrics_args, model, device, compute))
     stub = server.Session(video_id=args.video_id, url="")
     out = []
     start = args.start

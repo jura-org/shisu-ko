@@ -143,7 +143,10 @@ try {
   const commands = await worker.evaluate(() => new Promise((resolve) => chrome.commands.getAll(resolve)));
   for (const [name, shortcut] of [["toggle-subtitles", "Alt+Shift+S"], ["toggle-transcript", "Alt+Shift+L"], ["mine-current", "Alt+Shift+M"]]) {
     const command = commands.find((entry) => entry.name === name);
-    assert.equal(command?.shortcut, shortcut, `Chrome command ${name} should register ${shortcut}`);
+    // Chrome spells the same shortcut in the Mac's glyphs (⌥⇧S), so compare the key, not the text.
+    const mac = `⌥⇧${shortcut.slice(-1)}`;
+    assert.ok(command?.shortcut === shortcut || command?.shortcut === mac,
+      `Chrome command ${name} should register ${shortcut}, got ${command?.shortcut}`);
   }
   // A fresh update check with no release keeps every popup this test opens off api.github.com:
   // the popup's first question asks for the day's check, and the background answers it from a

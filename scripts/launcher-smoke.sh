@@ -86,6 +86,9 @@ import os, sys
 from pathlib import Path
 args = sys.argv[1:]
 line = f"server args={' '.join(args)}"
+if args == ["--default-model"]:
+    # setup.sh asks which model a bare start would load here and offers it as choice 1.
+    print("large-v3")
 if args == ["--setup-cookies"]:
     answers = 0
     while answers < 3:
@@ -125,6 +128,7 @@ echo "setup.sh exited with $code"
 cat "$SETUP_LOG"
 expected="register args=--register --verbose
 server args=--check
+server args=--default-model
 server args=--setup-cookies answers=0
 server args=--download-model large-v3
 amd_setup args= answers=0"

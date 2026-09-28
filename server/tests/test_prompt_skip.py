@@ -256,9 +256,18 @@ def test_dump_words_retries_as_process_does_and_marks_the_record(monkeypatch, tm
     # Window two hears its speech at 10-14 of the window, where the prompted decode puts LATE.
     model = PromptModel([LATE], OPENING + [LATE_TWIN])
     fake_faster_whisper(monkeypatch, model, np.zeros(40 * RATE, dtype=np.float32))
+    # The tool builds its model through server.load_model(), so --device auto would answer with
+    # whatever backend this computer has: on an Apple Silicon Mac it would build a real
+    # MlxWhisperModel and fetch the weights from Hugging Face instead of using the fake above.
+    monkeypatch.setattr(server, "cuda_available", lambda: False)
+    monkeypatch.setattr(server, "mlx_available", lambda: False)
     argv = [VIDEO, "--cache", str(cache), "--out", str(out), "--to", "40", "--window", "20", "--model", "small"]
     assert tool.main(argv) == 0
-    assert [c["initial_prompt"] for c in model.calls] == [PROMPT, None, PROMPT]
+    # load_model() decodes two seconds of silence before it returns, so the windows start at the
+    # second call, and that warm-up carries no prompt.
+    warm_up, calls = model.calls[0], model.calls[1:]
+    assert "initial_prompt" not in warm_up
+    assert [c["initial_prompt"] for c in calls] == [PROMPT, None, PROMPT]
     records = json.loads((out / f"{VIDEO}.words.json").read_text(encoding="utf-8"))
     assert [r["prompt_retry"] for r in records] == [True, False]
     assert [s["text"] for s in records[0]["segments"]] == [OPENING[0].text, OPENING[1].text, LATE.text]

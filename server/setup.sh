@@ -22,19 +22,29 @@ fi
 "${VENV}/bin/python" "${HERE}/server.py" --check
 
 # The model the server starts with, downloaded now so the first start is not the wait; the popup
-# can switch to another one later. The check above said whether there is a CUDA device. An EOF on
-# read (stdin closed or redirected from an empty file) takes large-v3 instead of asking forever;
-# `yes 1 | bash setup.sh` picks it the same way.
+# can switch to another one later. The check above said whether there is a CUDA device. The first
+# choice is whatever a bare start would load here, asked of server.py rather than spelled out
+# again: on the Apple GPU that is large-v3-turbo, which fits beside the browser, and elsewhere
+# large-v3. An EOF on read (stdin closed or redirected from an empty file) takes it instead of
+# asking forever; `yes 1 | bash setup.sh` picks it the same way.
+BEST="$("${VENV}/bin/python" "${HERE}/server.py" --default-model 2>/dev/null || true)"
+case "$BEST" in
+  large-v3-turbo) BEST_LINE="large-v3-turbo  Whisper: about 1.6 GB, the one that keeps up on an Apple GPU beside a browser";;
+  # Anything else, an answer of nothing included: a server.py too old for --default-model prints
+  # nothing and exits 0, so `|| echo` would never fire and choice 1 would download the empty name.
+  *)              BEST=large-v3
+                  BEST_LINE="large-v3        Whisper: best quality, about 3 GB, wants a GPU with 4 GB or more free";;
+esac
 echo
 echo "Which model should the server use? (the popup can switch later)"
-echo "  1  large-v3      Whisper: best quality, about 3 GB, wants a GPU with 4 GB or more free"
-echo "  2  small         Whisper: about 500 MB, fine on a CPU, less accurate"
-echo "  3  kitsune-0.6b  Kitsune-Transcribe: Japanese only, about 1.2 GB, plus PyTorch (about 3 GB)"
-echo "  4  kitsune-0.1b  Kitsune-Transcribe: Japanese only, about 200 MB, plus PyTorch, fine on a CPU"
+echo "  1  ${BEST_LINE}"
+echo "  2  small           Whisper: about 500 MB, fine on a CPU, less accurate"
+echo "  3  kitsune-0.6b    Kitsune-Transcribe: Japanese only, about 1.2 GB, plus PyTorch (about 3 GB)"
+echo "  4  kitsune-0.1b    Kitsune-Transcribe: Japanese only, about 200 MB, plus PyTorch, fine on a CPU"
 while :; do
   read -r -p "Type 1, 2, 3 or 4: " pick || pick=1
   case "$pick" in
-    1) MODEL=large-v3; break;;
+    1) MODEL="$BEST"; break;;
     2) MODEL=small; break;;
     3) MODEL=kitsune-0.6b; break;;
     4) MODEL=kitsune-0.1b; break;;

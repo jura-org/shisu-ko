@@ -48,8 +48,10 @@ def make_fetcher(monkeypatch, tmp_path):
     yt_dlp = types.ModuleType("yt_dlp")
     yt_dlp.YoutubeDL = FakeYoutubeDL
     monkeypatch.setitem(sys.modules, "yt_dlp", yt_dlp)
+    # language / language_patience: download_once() reads them to judge a video YouTube declares a
+    # language for. This one declares none, so the resume rules below are what is being tested.
     args = SimpleNamespace(cookies_from_browser="", cookies="", allow_remote_ejs=False, js_runtime="auto",
-                           first_window=20.0, window=40.0)
+                           first_window=20.0, window=40.0, language="ja", language_patience=60.0)
     return server.Fetcher(args)
 
 

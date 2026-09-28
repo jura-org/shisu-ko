@@ -7,8 +7,8 @@ The detail behind every section lives in `docs/dev/` (index: `docs/dev/README.md
 ## What this project is
 
 Shisu-ko shows live Japanese subtitles on YouTube in Firefox and Chrome. A local Python server transcribes
-the video's audio with Whisper (faster-whisper / CTranslate2), or with a Kitsune-Transcribe student
-(PyTorch, `server/kitsune_engine.py`), a little ahead of the playhead; the
+the video's audio with Whisper (faster-whisper / CTranslate2, or MLX on the Apple GPU), or with a
+Kitsune-Transcribe student (PyTorch, `server/kitsune_engine.py`), a little ahead of the playhead; the
 extension renders the cues as real DOM text so Yomitan can scan them, and can mine a screenshot
 plus sentence audio into the newest Anki card via AnkiConnect.
 
@@ -21,6 +21,8 @@ server/       server.py (single file) + setup/run scripts + update.py; runtime d
               (stdlib only); Firefox and Chrome run it through native-host.cmd / native-host.sh
               amd_setup.py: installs and tests the experimental AMD GPU engine (stdlib only;
               setup runs it after the model download)
+              mlx_beam.py: the beam search mlx-whisper lacks; server.py loads it by path on the
+              Apple GPU and nowhere else
               kitsune_engine.py: the Kitsune-Transcribe models on PyTorch (loaded by path, torch
               imported lazily); kitsune_setup.py installs PyTorch + requirements-kitsune.txt
               (stdlib only; setup runs it for a Kitsune pick, before the download)
@@ -83,9 +85,24 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   its first `await` and by nothing else.
 - A client's model name (`model` in `/sync`) must match `MODEL_NAME_RE` and contain no `..`, else it
   gets `MODEL_NAME_HINT` and is never stored. A valid name is reduced by `canonical_model_name()`
-  and resolved through `faster_whisper.download_model()`, or, for a Kitsune name, through
-  `KITSUNE_REPOS` and `kitsune_download_plan()`. A raw client string must never reach
-  `WhisperModel()` or `kitsune_engine.load()`; only the operator's `--model` may be a folder.
+  and resolved through `download_model_files()` — faster-whisper's own download, the MLX repo's on
+  the Apple GPU, or, for a Kitsune name, `KITSUNE_REPOS` and `kitsune_download_plan()` — before it
+  is loaded. A raw client string must never reach `WhisperModel()` or `kitsune_engine.load()`; only
+  the operator's `--model` may be a folder, and it skips the download.
+- A transcription backend is `transcribe()` and `detect_language()`, and nothing else in the server
+  may know which one is loaded. `--device` names it, `resolve_device()` is the single place `auto`
+  becomes one of `cuda`, `mlx` and `cpu`, and `canonical_model_name()` gives one set of weights one
+  name whatever backend holds them, so neither the cue cache nor the popup splits by backend. The
+  built-in `--model` is the backend's, not the machine's alone: `default_model_for()` answers
+  `MLX_DEFAULT_MODEL` (large-v3-turbo) on the Apple GPU and `DEFAULT_MODEL` (large-v3) elsewhere,
+  and a model chosen at setup outranks both. Detail: `docs/dev/server-runtime.md`, "How the Apple
+  GPU works".
+- A video's language is settled before its audio, not after. `declared_language(info)` reads
+  YouTube's own `language` field; a video it names as something other than `--language` is refused
+  in `Fetcher.download_once()` before a byte is downloaded, and one it names as `--language` never
+  reaches the audio detector. The detector is the fallback for a video YouTube names nothing for.
+  A refusal writes the same session state the detector writes and nothing to the cache.
+  `--language-patience 0` must switch all of it off, the metadata refusal included.
 - `server.py` imports without torch: PyTorch and transformers live in `server/kitsune_engine.py`,
   which `kitsune_engine()` loads by path and which imports torch only inside the functions that
   load and run a model (its pure helpers and `test_kitsune.py` need numpy alone). A Kitsune model
@@ -156,9 +173,12 @@ a lyrics window), `build_cues()` and `merge_segments()`. Rules that must not reg
 **Server runtime** (`docs/dev/server-runtime.md`). Live streams: `Fetcher.follow_live()`,
 `LiveFollower`, `DashLiveSource`, `Session.live_audio`; live sessions are never cached. Model
 switching: `App.request_model()` and `App.switch_model_if_wanted()`, run before every window,
-never during one. Kitsune models: `kitsune_name()`, `kitsune_download_plan()`,
-`load_kitsune_model()`, and in `kitsune_engine.py` `read_package()`, `dequantize()`,
-`ctc_spans()`, `attention_boundaries()`, `KitsuneModel.transcribe()`. The Start button: `startServer()` in `background.js`, the native host's
+never during one. Backends: `resolve_device()` decides `cuda` / `mlx` / `cpu` once and
+`load_model()` builds either a `WhisperModel` or an `MlxWhisperModel`, which presents the same two
+methods over mlx-whisper; `server/mlx_beam.py` gives that path the beam search the library lacks.
+Kitsune models: `kitsune_name()`, `kitsune_download_plan()`, `load_kitsune_model()`, and in
+`kitsune_engine.py` `read_package()`, `dequantize()`, `ctc_spans()`, `attention_boundaries()`,
+`KitsuneModel.transcribe()`. The Start button: `startServer()` in `background.js`, the native host's
 `handle()` and `launch()`, the instance lock `hold_instance_lock()` / `try_lock()`. The update
 step: `server/update.py`, `POST /update`, exit code 4. The AMD engine (experimental):
 `rocm_engine()` at import, the crash guard and `check_rocm_import()`, `hard_exit()` / `finish()`
@@ -202,9 +222,13 @@ because only the VAD uses it). `nix run .#check`, `nix run .#tests`, `nix build 
 `nix develop` for a shell with Python, web-ext, Node and Deno. `.#server-cpu` is the CUDA-free variant.
 Native server (Windows): `server\setup.cmd` once (it asks for large-v3 or small and downloads it),
 then `server\run.cmd [options]`.
-Native server (Linux/macOS): `bash server/setup.sh`, then `server/run.sh`.
-Diagnostics: `server\run.cmd --check` (also says whether the Start button's launcher is registered
-and which model a bare start runs).
+Native server (Linux/macOS): `bash server/setup.sh`, then `server/run.sh`. Its first menu choice is
+whatever `server.py --default-model` prints, so an Apple GPU is offered large-v3-turbo and every
+other machine large-v3.
+Diagnostics: `server\run.cmd --check` (also says which backend `--device auto` picks, whether the
+Start button's launcher is registered and which model a bare start runs).
+This machine's built-in default model: `server.py --default-model` prints it and exits, ignoring
+`config.json`, which is the choice it is about to be compared with.
 Music videos: `--lyrics auto` (default) or `--lyrics off`; see `docs/dev/cue-building.md`.
 Model download with a progress bar: `server.py --download-model NAME`; see
 `docs/dev/server-runtime.md`.
@@ -281,6 +305,22 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
   button passes no options, so the browser lives in `config.json` (`cookies_from_browser`), never
   taken in the Docker image (`SHISUKO_CONTAINER`; toolbox and distrobox do take it). Offer
   Firefox: Chrome and Edge on Windows lock their cookies away.
+- Reordering a beam's KV cache must skip the cross-attention half. Those keys and values come from
+  the audio, so every beam of one audio holds the same ones and permuting them changes nothing; on
+  large-v3 the copy is about 1.2 GB per decoded token (1.1x realtime with it, 4.1x without, both on
+  an idle machine). `rearrange_self_attention_only()` in `mlx_beam.py`.
+- A speed measurement taken on an idle Mac describes nothing. The Apple GPU's memory is the
+  browser's memory, and the browser is where the video plays: large-v3 ran a 38 s window in 13 s
+  alone and 81 s with Chrome playing one video, which is below playback speed. Every MLX figure in
+  these docs says whether a browser was running, and a new one must.
+- `mlx_whisper.audio.pad_or_trim()` pads with `mx.pad`, which refuses a numpy array, so anything
+  shorter than the 30 s encoder window has to be an `mx.array` first. Every language probe is
+  shorter, and this broke the whole language watch in silence: a detector that raises is never what
+  pauses a video, so the only sign was a line in the server log.
+- YouTube's `automatic_captions` says nothing about a video's language: it lists some 157 of them
+  for every video, because YouTube offers to machine-translate its own transcript into all of them.
+  The uploader's declared default audio track, `info["language"]`, is the field that means
+  something (`declared_language()`).
 - On Windows the CUDA libraries come from the `nvidia-cublas-cu12` / `nvidia-cudnn-cu12` wheels;
   `add_nvidia_dll_dirs()` must run before `ctranslate2` is imported.
 - GPU memory is often shared. `load_model()` picks `int8_float16` below 4.5 GB free VRAM. Exit codes:
