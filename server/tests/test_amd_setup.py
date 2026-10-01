@@ -1741,9 +1741,11 @@ YES_CASES = {
     "the test fails": (dict(probe_result=False), 1, True),
     "the test passes": (dict(), 0, True),
     "AMD next to NVIDIA, installed anyway": (dict(cards=[Card("AMD Radeon 890M")], nvidia=True), 0, True),
-    "unsupported, installed anyway": (dict(cards=[Card("AMD Radeon RX 6800 XT")]), 0, True),
-    "unsupported next to NVIDIA, installed anyway": (dict(cards=[Card("AMD Radeon(TM) 780M Graphics")], nvidia=True),
-                                                     0, True),
+    # A card the lists rule out needs --ignore-old-graphics as well (IGNORE_OLD_CASES): an unattended
+    # --yes alone is no say-so for it, and fails.
+    "unsupported, not ignored": (dict(cards=[Card("AMD Radeon RX 6800 XT")]), 1, False),
+    "unsupported next to NVIDIA, not ignored": (dict(cards=[Card("AMD Radeon(TM) 780M Graphics")], nvidia=True),
+                                                1, False),
     "detection breaks": (dict(detect_error=amd.DetectError("PowerShell could not be started")), 1, False),
     "an AMD card without its driver": (dict(cards=[Card("Microsoft Basic Display Adapter")]), 1, False),
     "an AMD card without its driver next to NVIDIA": (dict(cards=[Card("Microsoft Basic Display Adapter")],
@@ -1759,6 +1761,43 @@ def test_yes_never_asks_and_fails_unless_the_engine_works(flow, case):
     assert amd.main(["--yes"]) == code
     assert flow.questions == []
     assert bool(flow.installs) is installs
+
+
+IGNORE_OLD_CASES = {
+    "unsupported on Windows": dict(cards=[Card("AMD Radeon RX 6800 XT")]),
+    "unsupported on Linux": dict(platform=LINUX, cards=[Card("an AMD GPU (gfx1103)", "gfx1103")]),
+    "unsupported next to NVIDIA": dict(cards=[Card("AMD Radeon(TM) 780M Graphics")], nvidia=True),
+}
+
+
+@pytest.mark.parametrize("case", IGNORE_OLD_CASES)
+@pytest.mark.parametrize("spelling", ["--ignore-old-graphics", "--ignore_old_graphics"])
+def test_yes_with_ignore_old_graphics_installs_on_an_unsupported_card(flow, capsys, case, spelling):
+    for key, value in IGNORE_OLD_CASES[case].items():
+        setattr(flow, key, value)
+    assert amd.main(["--yes", spelling]) == 0
+    assert flow.questions == [] and flow.installs
+    assert "Installing it anyway (--ignore-old-graphics)" in say_lines(capsys)
+
+
+def test_ignore_old_graphics_alone_still_asks_and_exits_0(flow, capsys):
+    flow.cards = [Card("AMD Radeon RX 6800 XT")]
+    flow.answer = "n"
+    assert amd.main(["--ignore-old-graphics"]) == 0
+    assert len(flow.questions) == 1 and flow.installs == []
+
+
+def test_ignore_old_graphics_goes_with_an_install_only(flow, capsys):
+    for other in ("--probe", "--status", "--remove"):
+        with pytest.raises(SystemExit):
+            amd.main([other, "--ignore-old-graphics"])
+
+
+def test_an_unsupported_card_says_how_to_try_it_anyway(flow, capsys):
+    flow.cards = [Card("AMD Radeon RX 6800 XT")]
+    assert amd.main([]) == 0
+    out = say_lines(capsys)
+    assert "does not support" in out and "--ignore-old-graphics" in out and flow.installs == []
 
 
 def test_an_installed_engine_that_is_on_needs_nothing(flow, home, capsys):
@@ -1976,7 +2015,7 @@ def test_an_engine_that_is_on_for_a_card_with_its_driver_beside_one_without_is_s
 
 
 def test_an_engine_installed_anyway_is_not_called_unsupported(flow, home, capsys):
-    # An RX 6800 XT on Windows is not supported, but --yes installed it and its test passed.
+    # An RX 6800 XT on Windows is not supported, but --ignore-old-graphics installed it and its test passed.
     flow.cards = [Card("AMD Radeon RX 6800 XT")]
     switched_on(home)
     assert amd.main([]) == 0
@@ -1987,12 +2026,12 @@ def test_an_engine_installed_anyway_is_not_called_unsupported(flow, home, capsys
 @pytest.mark.parametrize("platform, card", [
     (WINDOWS, Card("AMD Radeon(TM) 780M Graphics")), (LINUX, Card("an AMD GPU (gfx1103)", "gfx1103")),
 ])
-def test_an_unsupported_card_next_to_nvidia_is_not_sent_to_yes(flow, capsys, platform, card):
+def test_an_unsupported_card_next_to_nvidia_needs_both_flags(flow, capsys, platform, card):
     flow.platform, flow.cards, flow.nvidia = platform, [card], True
     assert amd.main([]) == 0
     out = say_lines(capsys)
     assert "does not support" in out and "next to an NVIDIA GPU, which the server uses" in out
-    assert "--yes" not in out and "CPU" not in out
+    assert "--yes --ignore-old-graphics" in out and "CPU" not in out
     assert flow.questions == [] and flow.installs == []
 
 
@@ -2006,7 +2045,7 @@ def test_an_rx_6700_next_to_nvidia_gets_the_override_hint(flow, capsys):
     flow.platform, flow.cards, flow.nvidia = LINUX, [Card("an AMD GPU (gfx1031)", "gfx1031")], True
     assert amd.main([]) == 0
     out = say_lines(capsys)
-    assert "HSA_OVERRIDE_GFX_VERSION=10.3.0" in out and "--yes" in out
+    assert "HSA_OVERRIDE_GFX_VERSION=10.3.0" in out and "--yes --ignore-old-graphics" in out
     assert f"in {amd.login_profile()} (every server start" in out
 
 
@@ -2016,9 +2055,9 @@ def test_yes_next_to_nvidia_never_says_the_server_falls_back_to_the_cpu(flow, ca
     flow.cards, flow.nvidia = [Card("AMD Radeon(TM) 780M Graphics")], True
     for key, value in change.items():
         setattr(flow, key, value)
-    assert amd.main(["--yes"]) == 1
+    assert amd.main(["--yes", "--ignore-old-graphics"]) == 1
     out = say_lines(capsys)
-    assert "Installing it anyway (--yes)" in out and "keeps using the NVIDIA GPU" in out
+    assert "Installing it anyway (--ignore-old-graphics)" in out and "keeps using the NVIDIA GPU" in out
     assert "CPU" not in out and "can run Whisper on it" not in out
     assert flow.fallbacks == ([] if "install_error" in change else ["the NVIDIA GPU"])
 

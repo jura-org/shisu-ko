@@ -241,7 +241,9 @@ this themselves): `~/.shisu-ko/venv/Scripts/python server/native_host.py --regis
 AMD GPUs (experimental, not yet tested on AMD hardware by the maintainer): setup offers the engine
 where it finds an AMD card (next to an NVIDIA GPU only with `--yes`). By hand, with the venv's
 Python: `server/amd_setup.py` (look, ask, install, test), `--yes` (no question; exit 1 unless the
-engine ends up working), `--probe` (test again; exit 1 when it fails), `--status`, `--remove`
+engine ends up working), `--ignore-old-graphics` / `--ignore_old_graphics` (also a card the support
+lists `SUPPORTED_GFX` / `WINDOWS_SUPPORTED` / `WINDOWS_UNSUPPORTED` rule out; `--yes` alone never
+installs on one), `--probe` (test again; exit 1 when it fails), `--status`, `--remove`
 (back to the default engine); see `docs/dev/server-runtime.md`.
 Kitsune-Transcribe models (Japanese only, PyTorch): setup installs PyTorch for a Kitsune pick; by
 hand, with the venv's Python: `server/kitsune_setup.py` (`--cpu`, `--force`, `--status`). Names:

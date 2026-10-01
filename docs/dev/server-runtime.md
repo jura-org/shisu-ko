@@ -800,6 +800,8 @@ logs the same engine line. `--device` keeps its three choices.
 ```
 amd_setup.py            look for a card, ask, download, install, test (what setup runs)
 amd_setup.py --yes      the same without the question
+amd_setup.py --ignore-old-graphics
+                        also offer it for a card the support lists rule out (combines with --yes)
 amd_setup.py --probe    test the installed engine again
 amd_setup.py --status   what is detected, installed and switched on; no network
 amd_setup.py --remove   switch the engine off and delete the side folder
@@ -848,7 +850,13 @@ again), else "installed and switched on" (beside an NVIDIA GPU, with `--remove` 
 back to it) and, for one from older pins, that `--yes` updates it. An AMD card next to an NVIDIA
 GPU: not offered without `--yes`, since the server uses the NVIDIA GPU. An unsupported card: one
 line (for an RX 6600/6700 on Linux, how to try it with the override in the login shell's
-profile), unless `--yes` installs it anyway. On Linux without `/dev/kfd`, access to it, or ROCm
+profile), unless `--ignore-old-graphics` (also spelt `--ignore_old_graphics`; `IGNORE_OLD_FLAG`)
+offers it anyway: the lists `SUPPORTED_GFX` (Linux, by gfx target), `WINDOWS_SUPPORTED` and
+`WINDOWS_UNSUPPORTED` (Windows, by adapter name) are the only thing it overrides, and the probe
+still decides whether the engine is switched on. `--yes` alone never installs on such a card (an
+unattended run is no say-so for it) and exits 1; next to an NVIDIA GPU the hint names both flags
+(`BESIDE_NVIDIA`). The flag goes with an install only, never with `--probe`, `--status` or
+`--remove`. On Linux without `/dev/kfd`, access to it, or ROCm
 7.2's libraries: what is missing, AMD's install guide and `sudo usermod -aG render,video "$USER"`.
 The wrong Python: the command to run with the venv's. An engine from these pins that is switched
 off: without `--yes` a line naming `--probe`, with it the test. Otherwise the offer: the card,
