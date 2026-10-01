@@ -826,7 +826,7 @@ On Linux setup goes by the GPU target that the amdgpu driver reports (`gfx1100` 
 by the card's name. An RX 6600 or 6700 (gfx1032, gfx1031) is not one of the targets the build is
 compiled for, but is reported to run when told to pass for a gfx1030; that is at your own risk:
 put `export HSA_OVERRIDE_GFX_VERSION=10.3.0` in your login shell's profile (`~/.bash_profile`,
-`~/.zprofile` or `~/.profile`), log out and in again, and run `amd_setup.py --yes`. There is no
+`~/.zprofile` or `~/.profile`), log out and in again, and run `amd_setup.py --ignore-old-graphics`. There is no
 AMD engine in the Docker image, with Nix or on macOS; the first two keep their own engine even
 when they share `~/.shisu-ko` with a native setup that has one.
 
@@ -835,10 +835,13 @@ when they share `~/.shisu-ko` with a native setup that has one.
 on, it names the card, says that the engine is experimental, how much it downloads and, on
 Windows, how much room it takes, and asks `Download the AMD engine? [y/N]`; anything but `y` or
 `yes` is a no, and so is an unattended setup. A card it does not know gets the question with a
-warning; a card the engine cannot run gets one line saying why, and no question. Next to an
-NVIDIA GPU the server stays on the NVIDIA GPU and the engine is not offered; `amd_setup.py --yes`
-installs it anyway, and the server then uses the AMD card instead. Whatever happens in this step,
-the setup finishes.
+warning; a card the engine cannot run (an older Radeon, an RX 6000 on Windows, ...) gets one line
+saying why, and no question; `amd_setup.py --ignore-old-graphics` offers the engine for it anyway,
+at your own risk (it is switched on only if its test passes, which on such a card it likely does
+not). Next to an NVIDIA GPU the server stays on the NVIDIA GPU and the engine is not offered;
+`amd_setup.py --yes` installs it anyway, and the server then uses the AMD card instead (an
+unsupported card there needs `--yes --ignore-old-graphics`). Whatever happens in this step, the
+setup finishes.
 
 On Windows a yes downloads about 1.27 GB: CTranslate2 4.8.2's ROCm build from its GitHub release
 and AMD's ROCm 7.2.1 runtime from `repo.radeon.com`. Installed, the engine takes about 3.90 GB,
@@ -869,8 +872,12 @@ venv's Python, `~/.shisu-ko/venv/Scripts/python server/amd_setup.py --status` on
 
 ```
 amd_setup.py            look for an AMD card, ask, download, install and test
-amd_setup.py --yes      the same without the question, also next to an NVIDIA GPU or for a card
-                        it does not support; exits with 1 unless the engine ends up working
+amd_setup.py --yes      the same without the question, also next to an NVIDIA GPU; exits with 1
+                        unless the engine ends up working
+amd_setup.py --ignore-old-graphics
+                        also offer the engine for a card the support lists rule out (older
+                        Radeons, RX 6000 on Windows, ...); still asks, combines with --yes;
+                        --ignore_old_graphics works too
 amd_setup.py --probe    test the installed engine again, without a download; exits with 1 unless
                         the test passes
 amd_setup.py --status   what is found, installed and switched on; downloads and changes nothing

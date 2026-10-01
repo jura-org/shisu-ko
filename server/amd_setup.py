@@ -15,6 +15,9 @@ Experimental: not yet tested on AMD hardware by the maintainer.
 
   amd_setup.py            look for a card, ask, download, install, test
   amd_setup.py --yes      the same without the question; exit 1 unless the engine ends up working
+  amd_setup.py --ignore-old-graphics
+                          also install on a card the lists below call unsupported (an older Radeon,
+                          RX 6000 on Windows, ...); combines with --yes; --ignore_old_graphics too
   amd_setup.py --probe    test the installed engine again; exit 1 when the test fails
   amd_setup.py --status   what is detected, installed and switched on; nothing is downloaded
   amd_setup.py --remove   switch the engine off and delete the side folder
@@ -98,6 +101,10 @@ PINS = {
 
 WINDOWS, LINUX = "win_amd64", "linux_x86_64"  # the platform names of shisuko-rocm.json
 SUPPORTED, UNSUPPORTED, UNKNOWN = "supported", "unsupported", "unknown"
+# The flag that installs on a card the lists call unsupported (setup()'s `ignore_old`).
+IGNORE_OLD_FLAG = "--ignore-old-graphics"
+# Next to an NVIDIA GPU only --yes installs at all, so a card the lists rule out there needs both.
+BESIDE_NVIDIA = f"--yes {IGNORE_OLD_FLAG}"
 SCRIPT = Path(__file__).resolve()
 SERVER_PY = SCRIPT.parent / "server.py"
 ROCM_DIR_NAME = "rocm"                # APP_DIR / "rocm", the side folder server.py puts first on sys.path
@@ -1019,7 +1026,7 @@ def wrong_python(home: Path) -> Optional[Path]:
     return venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
-def override_hint(card: Card) -> str:
+def override_hint(card: Card, flags: str = IGNORE_OLD_FLAG) -> str:
     """For an RX 6600/6700 on Linux, how to try the engine anyway, as a sentence; "" for any other card.
 
     The variable has to be there at every server start, not only in the shell that runs the test:
@@ -1029,7 +1036,12 @@ def override_hint(card: Card) -> str:
         return ""
     return (f" To try it anyway, put the line 'export HSA_OVERRIDE_GFX_VERSION=10.3.0' in {login_profile()} (every "
             "server start needs it, the Start button's too), log out and in again, then run "
-            f"{command('--yes')}.")
+            f"{command(flags)}.")
+
+
+def unsupported_hint(flags: str) -> str:
+    """How to install the engine on an unsupported card anyway, as a sentence."""
+    return f" To try it anyway (it will likely fail its test), run {command(flags)}."
 
 
 def engine_label(platform: Optional[str], info: Optional[dict] = None) -> str:
@@ -1057,9 +1069,11 @@ def engine_in_use(home: Path, platform: str, tag: str) -> bool:
             and not (platform == LINUX and missing_libraries()))
 
 
-def setup(home: Path, assume_yes: bool = False) -> Optional[bool]:
+def setup(home: Path, assume_yes: bool = False, ignore_old: bool = False) -> Optional[bool]:
     """The default command. True: the engine works; False: something failed; None: nothing to do,
-    or the user said no."""
+    or the user said no. `assume_yes` (--yes) asks nothing and installs next to an NVIDIA GPU too;
+    `ignore_old` (--ignore-old-graphics) installs on a card the support lists call unsupported,
+    which nothing else does."""
     platform = platform_key()
     if platform is None:
         # macOS, ARM, 32-bit: there is no AMD build to offer, and nothing to say during setup.
@@ -1146,17 +1160,20 @@ def setup(home: Path, assume_yes: bool = False) -> Optional[bool]:
             return None
         if verdict == UNSUPPORTED:
             say(f"Found {card.name} next to an NVIDIA GPU, which the server uses; the AMD engine does not "
-                f"support it: {reason}.{override_hint(card)}")
+                f"support it: {reason}.{override_hint(card, BESIDE_NVIDIA) or unsupported_hint(BESIDE_NVIDIA)}")
         else:
             say(f"Found {card.name} next to an NVIDIA GPU, which the server uses, so the AMD engine is not "
                 f"offered (install it anyway with {command('--yes')}).")
         return None
     if verdict == UNSUPPORTED and not usable:  # one installed anyway before is handled as installed, below
-        if not assume_yes:
+        if not ignore_old:
+            # --yes alone does not do this: an unattended run is no say-so for a card the lists rule out.
+            flags = BESIDE_NVIDIA if nvidia else IGNORE_OLD_FLAG
             say(f"Found {card.name}, which the AMD engine does not support: {reason}. The server uses "
-                f"{fallback}.{override_hint(card)}")
-            return None
-        say(f"Found {card.name}, which the AMD engine does not support: {reason}. Installing it anyway (--yes).")
+                f"{fallback}.{override_hint(card, flags) or unsupported_hint(flags)}")
+            return False if assume_yes else None
+        say(f"Found {card.name}, which the AMD engine does not support: {reason}. Installing it anyway "
+            f"({IGNORE_OLD_FLAG}).")
     if platform == LINUX:
         missing = linux_missing()
         if missing:
@@ -1168,7 +1185,7 @@ def setup(home: Path, assume_yes: bool = False) -> Optional[bool]:
                     f"is compiled for ({', '.join(SUPPORTED_GFX)}). The experimental AMD engine would need:")
             elif usable:
                 say(f"Found {card.name}. The AMD engine installed in {folder} still needs:")
-            else:  # --yes for a card it does not support, which the line above said
+            else:  # --ignore-old-graphics for a card it does not support, which the line above said
                 say("The experimental AMD engine would also need:")
             for line in missing:
                 say(f"  - {line}")
@@ -1360,7 +1377,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                        help="say what is detected, installed and switched on (no download)")
     group.add_argument("--remove", action="store_true",
                        help="switch the engine off and delete the side folder")
+    parser.add_argument(IGNORE_OLD_FLAG, "--ignore_old_graphics", dest="ignore_old_graphics", action="store_true",
+                        help="install even on a card the support lists call unsupported (an older Radeon, RX 6000 "
+                             "on Windows, ...); the engine is still switched on only if its test passes. Combines "
+                             "with --yes")
     args = parser.parse_args(argv)
+    if args.ignore_old_graphics and (args.probe or args.status or args.remove):
+        parser.error(f"{IGNORE_OLD_FLAG} goes with an install (no flag, or --yes), not with --probe, --status or --remove")
     strict = args.yes or args.probe
     home = app_dir()
     ok: Optional[bool] = None
@@ -1372,7 +1395,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif args.probe:
             ok = probe(home)
         else:
-            ok = setup(home, assume_yes=args.yes)
+            ok = setup(home, assume_yes=args.yes, ignore_old=args.ignore_old_graphics)
     except KeyboardInterrupt:
         say("cancelled")
         ok = False
