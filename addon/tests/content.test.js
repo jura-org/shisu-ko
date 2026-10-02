@@ -3231,6 +3231,25 @@ test("a Short reached from a watch page is followed on the Shorts player, not th
   assert.equal(api.state.root.parentNode, movie.player);
 });
 
+test("a fresh instance removes the overlay a dead one left in the player", async () => {
+  const { api, sandbox, stubElement } = loadContent();
+  const { player, video } = playerWithVideo(stubElement, "movie_player", 12, false);
+  // Firefox unloads an updated extension's content script without running its shutdown(): its
+  // overlay stays in the player, frozen on the last cue it showed.
+  const stale = stubElement("div");
+  stale.className = "shisuko-root";
+  stale.textContent = "a frozen line";
+  player.appendChild(stale);
+  const byQuery = { "#movie_player": player, ".html5-video-player": player, "video.html5-main-video": video };
+  sandbox.document.querySelector = (sel) => byQuery[sel] || null;
+  sandbox.document.querySelectorAll = (sel) => (sel === ".shisuko-root" ? player.children.filter((el) => el.className === "shisuko-root") : []);
+  await settled(); // the boot's discover() attaches to the player
+  const roots = player.children.filter((el) => el.className === "shisuko-root");
+  assert.equal(roots.length, 1); // used to be two: the frozen line under the live one
+  assert.equal(roots[0], api.state.root);
+  assert.equal(stale.parentNode, null);
+});
+
 test("findPlayer falls back to the class on a Short without #shorts-player, and to #movie_player elsewhere", async () => {
   const { api, sandbox } = loadContent();
   await settled(); // the boot's discover() finds nothing; only the queries below see the fake page

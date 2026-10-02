@@ -341,6 +341,9 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
   GitHub allows sixty unauthenticated API requests an hour per address, hence one check a day.
   Never add a token.
 - Regular Firefox only keeps signed add-ons; unsigned builds are temporary installs only.
+- Firefox kills an updated or reloaded extension's content script without running its code; its
+  overlay stays in the page, so `ensureOverlay()` removes every `.shisuko-root` first. Chrome's
+  orphans keep running and shut themselves down (`runtimeAlive()`).
 - Screenshots fail on DRM-protected videos (tainted canvas); the audio clip still works.
 - The native server and the container both use port 8790; run one at a time.
 - Firefox and Chrome run a `.cmd` native host through `cmd.exe`: the wrapper must print nothing

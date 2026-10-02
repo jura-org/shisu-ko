@@ -18,8 +18,10 @@
 (() => {
   if (window.__shisukoLoaded) return;
   window.__shisukoLoaded = true;
-  // A reloaded or updated extension leaves this instance orphaned with a dead runtime; it must
-  // tear itself down so the fresh instance can take over the player (see runtimeAlive()).
+  // A reloaded or updated extension leaves this instance orphaned. Chrome keeps an orphan running
+  // with a dead runtime, and it tears itself down (see runtimeAlive()); Firefox kills it without
+  // running another line, so its overlay stays behind for the fresh instance to remove
+  // (ensureOverlay()).
   const timers = [];
 
   const DEFAULT_SETTINGS = SHISUKO_DEFAULT_SETTINGS; // from settings.js
@@ -641,6 +643,9 @@
   function ensureOverlay(player) {
     if (state.root && state.root.isConnected && state.root.parentElement === player) return;
     if (state.root) state.root.remove();
+    // A dead instance's overlay, frozen on its last cue: Firefox unloads an updated extension's
+    // content script without running its shutdown(), and its DOM stays in the page.
+    for (const stale of document.querySelectorAll(".shisuko-root")) stale.remove();
     buildOverlay(player);
   }
 

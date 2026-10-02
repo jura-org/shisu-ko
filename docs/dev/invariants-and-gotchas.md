@@ -271,6 +271,12 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   connection: hence one check a day, cached in `storage.local`, and the 403/429 text that asks
   to try again in an hour. Never add a token.
 - Regular Firefox only keeps signed add-ons; unsigned builds are temporary installs only.
+- An update or reload kills Firefox's content script without running another line of it, then
+  injects a fresh one into the open tabs. The dead instance's overlay stays in the player, frozen
+  on its last cue, under the fresh one's: `ensureOverlay()` removes every `.shisuko-root` before
+  it builds its own. Its `shisuko-hide-native` class needs nothing, since the boot's
+  `applySettings()` sets or clears it from the settings. Chrome's orphans keep running with a
+  dead runtime and tear themselves down (`runtimeAlive()`, `shutdown()`).
 - Screenshots fail on DRM-protected videos (tainted canvas); the audio clip still works.
 - The native server and the container both use port 8790; run one at a time.
 - Firefox runs a `.cmd` native host through `cmd.exe /s /c "<host> <manifest path> <extension id>"`,

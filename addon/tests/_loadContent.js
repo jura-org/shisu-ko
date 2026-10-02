@@ -166,6 +166,7 @@ function loadContent(overrides = {}) {
       documentElement: stubElement("html"),
       visibilityState: "visible",
       querySelector: () => null,
+      querySelectorAll: () => [],
       addEventListener: () => {},
       createElement: (tag) => stubElement(tag),
       createTextNode: (text) => textNode(text),
