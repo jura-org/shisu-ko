@@ -220,6 +220,8 @@ Nix (any Linux with flakes, NixOS): `nix run . -- [options]` starts the server w
 (`flake.nix`; CTranslate2 comes prebuilt from `cache.nixos-cuda.org`, onnxruntime is the CPU build
 because only the VAD uses it). `nix run .#check`, `nix run .#tests`, `nix build .#addon`,
 `nix develop` for a shell with Python, web-ext, Node and Deno. `.#server-cpu` is the CUDA-free variant.
+`nix run .#kitsune -- --model kitsune-0.6b` (`.#server-kitsune` without the restart loop) adds
+PyTorch, transformers, safetensors and librosa for the Kitsune models; the default has no torch.
 Native server (Windows): `server\setup.cmd` once (it asks for large-v3 or small and downloads it),
 then `server\run.cmd [options]`.
 Native server (Linux/macOS): `bash server/setup.sh`, then `server/run.sh`. Its first menu choice is
@@ -325,6 +327,9 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
   something (`declared_language()`).
 - On Windows the CUDA libraries come from the `nvidia-cublas-cu12` / `nvidia-cudnn-cu12` wheels;
   `add_nvidia_dll_dirs()` must run before `ctranslate2` is imported.
+- Nix: CTranslate2 links the ILP64 OpenBLAS, torch the LP64 one, same soname; loaded first,
+  CTranslate2's serves torch and a Kitsune model dies of SIGFPE. `serverKitsune` in `flake.nix`
+  preloads torch's `blasProvider`; never drop that `LD_PRELOAD`.
 - GPU memory is often shared. `load_model()` picks `int8_float16` below 4.5 GB free VRAM. Exit codes:
   2 is a startup error not to retry, 3 asks for a restart (broken GPU context, a failed switch
   with no model left, and with the AMD engine a switch on Windows or an engine that does not load

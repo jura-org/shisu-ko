@@ -76,7 +76,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.17.1"
+VERSION = "0.17.2"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -4231,10 +4231,11 @@ def require_kitsune_files(path: str, name: str, folder: str = "") -> None:
 
 
 def kitsune_runtime_missing() -> Optional[str]:
-    """KITSUNE_INSTALL_HINT while PyTorch, transformers or safetensors cannot be imported, else None."""
+    """KITSUNE_INSTALL_HINT while PyTorch, transformers, safetensors or librosa cannot be imported, else None.
+    librosa is what transformers' Parakeet feature extractor needs, so a CTC model fails at load without it."""
     import importlib.util
 
-    for module in ("torch", "transformers", "safetensors"):
+    for module in ("torch", "transformers", "safetensors", "librosa"):
         try:
             found = importlib.util.find_spec(module) is not None
         except (ImportError, ValueError):

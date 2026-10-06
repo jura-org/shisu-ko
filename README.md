@@ -206,8 +206,10 @@ server with CUDA support; `nix run .#check` prints diagnostics; `nix develop` op
 Python, web-ext, Node and Deno for development. The flake takes CTranslate2 with CUDA from the
 `cache.nixos-cuda.org` binary cache, so add it to your substituters or expect a long build. To
 keep the server running in the background: `systemd-run --user --unit=shisu-ko nix run /path/to/shisu-ko`.
-Options go after `--` (`nix run . -- --device cpu`). There is no setup to ask about YouTube's
-sign-in, so if YouTube asks for one, see [YouTube sign-in](#youtube-sign-in).
+Options go after `--` (`nix run . -- --device cpu`). The [Kitsune models](#kitsune-transcribe-models)
+need PyTorch, which the default leaves out: use `nix run .#kitsune -- --model kitsune-0.6b`. There
+is no setup to ask about YouTube's sign-in, so if YouTube asks for one, see
+[YouTube sign-in](#youtube-sign-in).
 
 **Docker:** copy `.env.example` to `.env`, set `DATA_DIR` to where models and caches should
 live, then run `docker\up.cmd` (Windows) or `docker compose up -d`. See [Docker](#docker) below.
@@ -787,7 +789,7 @@ What to know:
   `~/.shisu-ko/venv/Scripts/python server/kitsune_setup.py` (`venv/bin/python` on Linux/macOS);
   `--status` says what is installed. Without PyTorch the popup says so when you pick a Kitsune
   model, and nothing is downloaded. `run.cmd --check` reports it too. The Docker image includes
-  PyTorch; the Nix package does not.
+  PyTorch; on Nix, `nix run .#kitsune -- --model kitsune-0.6b` does (the default `nix run .` does not).
 - **Japanese only.** A Kitsune model refuses to start with another `--language`. It has no
   language detector, so the language watch (`--language-patience`) does not pause a video in
   another language, and it has no lyrics mode (`--lyrics`): music without detected speech stays

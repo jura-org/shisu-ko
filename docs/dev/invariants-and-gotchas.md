@@ -232,6 +232,16 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   and its Firefox profile, so `/.dockerenv` and `/run/.containerenv` must not count.
 - On Windows the CUDA libraries come from the `nvidia-cublas-cu12` / `nvidia-cudnn-cu12` wheels;
   `add_nvidia_dll_dirs()` must run before `ctranslate2` is imported.
+- Nix: nixpkgs' CTranslate2 links the ILP64 OpenBLAS (64-bit integers), torch and numpy the LP64
+  one (`openblasCompat`, 32-bit). Both are `libopenblas.so.0` with the same symbol names, so the
+  first one loaded serves every caller, and `server.py` loads CTranslate2 first. torch's CPU matmul
+  in a Kitsune feature extractor then has its 32-bit sizes read as 64-bit and the process dies of
+  SIGFPE in `sgemm_thread_nn`; `OPENBLAS_NUM_THREADS=1` does not help. The flake's
+  `shisu-ko-kitsune-server` wrapper preloads torch's library
+  (`LD_PRELOAD=${torch.blasProvider}/lib/libopenblas.so.0`); nothing may drop it. The other way
+  round is safe: CTranslate2's 64-bit sizes stay below 2^31, and on little-endian x86_64 their low
+  half is the 32-bit value. Rebuilding CTranslate2 against `openblasCompat` would fix it too, at
+  the price of an uncached CUDA build. The default package has no torch and needs none of this.
 - GPU memory is often shared with games or wallpaper apps. `load_model()` reads free VRAM with
   `nvidia-smi` (with the AMD engine, amdgpu's sysfs files on Linux and nothing on Windows, which
   means `float16`) and picks `int8_float16` below 4.5 GB; a driver reset shows up as a process

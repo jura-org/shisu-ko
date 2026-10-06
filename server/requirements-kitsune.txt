@@ -2,3 +2,5 @@
 # picks its CUDA or CPU build; Whisper models need none of this.
 transformers>=5.13
 safetensors>=0.6
+# transformers' Parakeet feature extractor (the CTC models) refuses to load without librosa.
+librosa>=0.10

@@ -358,6 +358,22 @@ def test_without_pytorch_nothing_is_downloaded(monkeypatch, tmp_path):
     assert server.friendly_model_error(err.value, "kitsune-0.6b") == server.KITSUNE_INSTALL_HINT
 
 
+@pytest.mark.parametrize("absent", ["torch", "transformers", "safetensors", "librosa"])
+def test_each_kitsune_package_missing_asks_for_the_install(monkeypatch, absent):
+    import importlib.util
+
+    # librosa too: transformers' Parakeet feature extractor refuses to load a CTC model without it.
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: None if name == absent else object())
+    assert server.kitsune_runtime_missing() == server.KITSUNE_INSTALL_HINT
+
+
+def test_all_kitsune_packages_present_need_no_install(monkeypatch):
+    import importlib.util
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: object())
+    assert server.kitsune_runtime_missing() is None
+
+
 def test_download_model_keeps_a_kitsune_choice_and_fetches_its_folder(monkeypatch, tmp_path, capsys):
     calls = fake_hub(monkeypatch, tmp_path)
     monkeypatch.setattr(server, "CONFIG_PATH", tmp_path / "config.json")
