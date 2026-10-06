@@ -32,7 +32,7 @@ REQUIREMENTS = HERE / "requirements-kitsune.txt"
 # it runs on every NVIDIA driver from 570 on.
 TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu128"
 TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
-IMPORT_CHECK = "import torch, transformers, safetensors; print(torch.__version__, transformers.__version__)"
+IMPORT_CHECK = "import torch, transformers, safetensors, librosa; print(torch.__version__, transformers.__version__)"
 
 
 def say(message: str) -> None:

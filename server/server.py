@@ -4231,10 +4231,11 @@ def require_kitsune_files(path: str, name: str, folder: str = "") -> None:
 
 
 def kitsune_runtime_missing() -> Optional[str]:
-    """KITSUNE_INSTALL_HINT while PyTorch, transformers or safetensors cannot be imported, else None."""
+    """KITSUNE_INSTALL_HINT while PyTorch, transformers, safetensors or librosa cannot be imported, else None.
+    librosa is what transformers' Parakeet feature extractor needs, so a CTC model fails at load without it."""
     import importlib.util
 
-    for module in ("torch", "transformers", "safetensors"):
+    for module in ("torch", "transformers", "safetensors", "librosa"):
         try:
             found = importlib.util.find_spec(module) is not None
         except (ImportError, ValueError):

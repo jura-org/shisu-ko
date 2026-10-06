@@ -381,9 +381,10 @@ its options and its lyrics decision from the same helpers and loads a Kitsune mo
 
 **Installing.** `server/kitsune_setup.py` (stdlib only, never imports `server.py`) installs
 PyTorch from its own index (`cu128` where `nvidia-smi -L` lists a GPU, `cpu` elsewhere, PyPI on
-macOS) and `server/requirements-kitsune.txt` into the interpreter running it; exit 1 when they do
-not import afterwards. `setup.cmd` / `setup.sh` run it only for a Kitsune pick, before the
-download, and a failure ends setup. `update.py` installs a changed `requirements-kitsune.txt`
+macOS) and `server/requirements-kitsune.txt` (transformers, safetensors, and librosa, without which
+transformers' Parakeet feature extractor refuses a CTC model) into the interpreter running it; exit
+1 when they do not import afterwards. `setup.cmd` / `setup.sh` run it only for a Kitsune pick,
+before the download, and a failure ends setup. `update.py` installs a changed `requirements-kitsune.txt`
 only where torch is importable. The Docker image installs torch (`TORCH_INDEX` build argument,
 cu128 by default) and copies `kitsune_engine.py`; the Nix package has no torch.
 
