@@ -28,13 +28,23 @@
         };
 
       mkOutputs = pkgs: rec {
-        python = pkgs.python3.withPackages (ps: with ps; [
+        basePackages = ps: with ps; [
           faster-whisper
           yt-dlp
           av
           numpy
           pytest
-        ]);
+        ];
+        python = pkgs.python3.withPackages basePackages;
+
+        # Kitsune-Transcribe models run on PyTorch; librosa is what transformers' Parakeet feature
+        # extractor needs. Kept out of the default package: torch alone is gigabytes.
+        pythonKitsune = pkgs.python3.withPackages (ps: basePackages ps ++ (with ps; [
+          torch
+          transformers
+          safetensors
+          librosa
+        ]));
 
         # yt-dlp needs a JS runtime for YouTube; nvidia-smi picks the compute type from free VRAM.
         runtimeTools = [ pkgs.deno pkgs.nodejs ];
@@ -47,12 +57,25 @@
           '';
         };
 
+        # ctranslate2 links nixpkgs' ILP64 OpenBLAS (64-bit ints), torch and numpy the LP64 one; both are
+        # libopenblas.so.0 with the same symbols, so whichever loads first serves all. server.py loads
+        # ctranslate2 first, and torch's sgemm then reads its 32-bit sizes as 64-bit and dies of SIGFPE.
+        # Preloading the LP64 library is safe for ctranslate2 too: its sizes stay below 2^31.
+        serverKitsune = pkgs.writeShellApplication {
+          name = "shisu-ko-kitsune-server";
+          runtimeInputs = runtimeTools;
+          text = ''
+            export LD_PRELOAD="${pythonKitsune.pkgs.torch.blasProvider}/lib/libopenblas.so.0''${LD_PRELOAD:+:$LD_PRELOAD}"
+            exec ${pythonKitsune}/bin/python ${self}/server/server.py "$@"
+          '';
+        };
+
         # Restarts after a crash (driver reset, OOM); exit code 2 is a startup error, do not retry.
-        serverLoop = pkgs.writeShellApplication {
-          name = "shisu-ko";
+        mkLoop = name: drv: bin: pkgs.writeShellApplication {
+          inherit name;
           text = ''
             while true; do
-              ${server}/bin/shisu-ko-server "$@" && exit 0
+              ${drv}/bin/${bin} "$@" && exit 0
               code=$?
               [ "$code" -eq 2 ] && exit 2
               echo "The server stopped unexpectedly (exit code $code). Restarting in 5 seconds... press Ctrl+C to quit."
@@ -60,6 +83,8 @@
             done
           '';
         };
+        serverLoop = mkLoop "shisu-ko" server "shisu-ko-server";
+        kitsuneLoop = mkLoop "shisu-ko-kitsune" serverKitsune "shisu-ko-kitsune-server";
 
         addon = pkgs.stdenvNoCC.mkDerivation {
           pname = "shisu-ko-addon";
@@ -99,6 +124,8 @@
           default = cuda.serverLoop;
           server = cuda.server;
           server-cpu = cpu.server;
+          kitsune = cuda.kitsuneLoop;
+          server-kitsune = cuda.serverKitsune;
           python = cuda.python;
           addon = cuda.addon;
           addon-chrome = cuda.addon-chrome;
@@ -113,6 +140,8 @@
         in {
           default = app cuda.serverLoop "shisu-ko";
           server = app cuda.server "shisu-ko-server";
+          kitsune = app cuda.kitsuneLoop "shisu-ko-kitsune";
+          server-kitsune = app cuda.serverKitsune "shisu-ko-kitsune-server";
           check = script "shisu-ko-check" ''
             ${cuda.server}/bin/shisu-ko-server --check
           '';

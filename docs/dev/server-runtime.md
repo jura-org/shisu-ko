@@ -386,7 +386,9 @@ transformers' Parakeet feature extractor refuses a CTC model) into the interpret
 1 when they do not import afterwards. `setup.cmd` / `setup.sh` run it only for a Kitsune pick,
 before the download, and a failure ends setup. `update.py` installs a changed `requirements-kitsune.txt`
 only where torch is importable. The Docker image installs torch (`TORCH_INDEX` build argument,
-cu128 by default) and copies `kitsune_engine.py`; the Nix package has no torch.
+cu128 by default) and copies `kitsune_engine.py`. The default Nix package has no torch;
+`.#kitsune` and `.#server-kitsune` add torch, transformers, safetensors and librosa from the
+CUDA cache, and preload torch's OpenBLAS (`docs/dev/invariants-and-gotchas.md`).
 
 **Measured on real weights** (a scratch venv, CPU, a 49 s clip of five eval utterances): the
 Cohere teacher through the AED path wrote every Japanese line correctly with plausible word
