@@ -76,6 +76,8 @@
     focusId: null,
     reanchor: false,
     glideUntil: 0,
+    resumeTarget: null,
+    resumeLanded: true,
     cardSetup: null,
     syncFailures: 0,
     syncRetryAt: 0,
@@ -308,6 +310,7 @@
     if (!state.videoId || !state.playerReady || !state.everPlayed) return; // never overwrite with an unplayed 0
     const t = state.player.getCurrentTime();
     if (!Number.isFinite(t)) return;
+    if (!L.saveAllowed(t, state.resumeTarget, state.resumeLanded)) return; // the resume has not landed yet
     state.t = t;
     remember();
     fetch("/api/position", {
@@ -356,6 +359,8 @@
     // Only now does the server hear of the video: a /sync before this would name time 0, and the
     // server would transcribe the start of a video being resumed in the middle.
     state.t = state.clock.t = state.startAt;
+    state.resumeTarget = state.startAt > 1 ? state.startAt : null;
+    state.resumeLanded = state.resumeTarget === null;
     state.startKnown = true;
     sync();
     if (media.kind === "hls" && document.createElement("video").canPlayType("application/vnd.apple.mpegurl")) {
@@ -396,7 +401,26 @@
       if (pendingSeek !== null) video.currentTime = pendingSeek;
       pendingSeek = null;
     });
-    video.addEventListener("playing", () => emit(YT_PLAYING));
+    // iOS's native HLS may drop a seek made before the first play (and the playlist's EXT-X-START
+    // may be ignored too): once playing, put the video where the resume meant it to be, once.
+    let firstPlaying = true;
+    video.addEventListener("playing", () => {
+      if (firstPlaying) {
+        firstPlaying = false;
+        const target = state.resumeLanded ? null : state.resumeTarget;
+        if (target !== null && Math.abs(video.currentTime - target) > 1.5) {
+          console.log(`resume: at ${video.currentTime.toFixed(1)} s instead of ${target.toFixed(1)} s, seeking`);
+          shown = null;
+          video.currentTime = target;
+        } else {
+          state.resumeLanded = true;
+        }
+      }
+      emit(YT_PLAYING);
+    });
+    video.addEventListener("seeked", () => {
+      if (!state.resumeLanded && state.resumeTarget !== null && Math.abs(video.currentTime - state.resumeTarget) <= 1.5) state.resumeLanded = true;
+    });
     video.addEventListener("pause", () => emit(YT_PAUSED));
     video.addEventListener("waiting", () => { if (!video.paused) emit(YT_BUFFERING); });
     video.addEventListener("ended", () => emit(YT_ENDED));
@@ -419,6 +443,8 @@
       },
       getCurrentTime() {
         if (pendingSeek !== null) return pendingSeek;
+        // Before the resume lands the element may still say 0: the page shows where it will be.
+        if (!state.resumeLanded && state.resumeTarget !== null && video.currentTime < 0.5) return state.resumeTarget;
         if (shown && !video.paused) return shown.mediaTime + ((performance.now() - shown.at) / 1000) * video.playbackRate;
         return video.currentTime;
       },
@@ -496,6 +522,11 @@
   function onPlayerState(s) {
     state.ytState = s;
     state.playing = s === YT_PLAYING || s === YT_BUFFERING;
+    if (s === YT_PLAYING && state.player.kind === "youtube" && !state.resumeLanded && state.resumeTarget !== null) {
+      // YouTube's start= takes whole seconds and may be ignored: check once it plays.
+      if (Math.abs(state.player.getCurrentTime() - state.resumeTarget) > 1.5) state.player.seekTo(state.resumeTarget, true);
+      state.resumeLanded = true;
+    }
     if (s === YT_PLAYING) {
       state.pauseCause = null;
       state.everPlayed = true;
@@ -533,6 +564,7 @@
 
   function seek(t, andPlay) {
     if (!state.playerReady) return;
+    state.resumeLanded = true; // the viewer chose a place: no resume correction, no saver guard
     state.autoPausedFor = null;
     state.player.seekTo(Math.max(0, t), true);
     state.t = Math.max(0, t);

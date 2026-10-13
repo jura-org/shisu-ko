@@ -851,7 +851,8 @@ class Services:
         except Exception as exc:  # noqa: BLE001 - yt-dlp raises its own types; any failure means fallback
             log.warning("[%s] HLS resolve failed: %s", video_id, exc)
             return {"ok": True, "kind": "youtube", "reason": "the stream could not be resolved"}
-        return {"ok": True, "kind": "hls", "url": f"{self.hls.prefix(video)}master.m3u8",
+        start = f"?start={t:.1f}" if t > 0 else ""  # a resume: the playlists name where to start
+        return {"ok": True, "kind": "hls", "url": f"{self.hls.prefix(video)}master.m3u8{start}",
                 "duration": video.duration, "title": video.title, "height": max(video.heights.values())}
 
     def frame(self, video_id: str, t: float) -> bytes:
@@ -1240,6 +1241,30 @@ def byte_range(header, size: int):
     else:
         a, b = max(0, size - int(m.group(2))), size - 1
     return (a, b) if a <= b and a < size else False
+
+
+def with_start(playlist: str, t) -> str:
+    """A playlist that starts playback at t seconds: EXT-X-START, which iOS honours for a VOD
+    stream even where it drops a seek made before the first play. In a master playlist the URIs of
+    the media playlists carry the same start, so they say it too."""
+    try:
+        t = float(t)
+    except (TypeError, ValueError):
+        return playlist
+    if not 0 < t < 1e6:
+        return playlist
+    out = []
+    for line in playlist.split("\n"):
+        if line.startswith("#EXT-X-START"):
+            continue
+        if line.startswith("/api/hls/") and line.endswith(".m3u8"):
+            line += f"?start={t:.1f}"
+        elif line.startswith("#EXT-X-MEDIA:") and '.m3u8"' in line:
+            line = line.replace('.m3u8"', f'.m3u8?start={t:.1f}"')
+        out.append(line)
+        if line == "#EXTM3U":
+            out.append(f"#EXT-X-START:TIME-OFFSET={t:.1f},PRECISE=YES")
+    return "\n".join(out)
 
 
 def segment_at(durations: list[float], t: float) -> tuple[int, float]:
@@ -1769,7 +1794,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200, {"ok": True, "mode": self.services.args.mode, "devices": [
                     {**d, "current": bool(current and current["id"] == d["id"])} for d in self.services.state.devices()]})
             if path.startswith("/api/hls/"):
-                return self.hls(path)
+                return self.hls(path, query)
             if path == "/api/media":
                 video_id = (query.get("video_id") or [""])[0]
                 if not valid_video_id(video_id):
@@ -1812,7 +1837,7 @@ class Handler(BaseHTTPRequestHandler):
         except (KeyError, ValueError) as exc:
             return self.json(400, {"ok": False, "error": f"bad request: {exc}"})
 
-    def hls(self, path: str):
+    def hls(self, path: str, query: dict):
         """/api/hls/<token>/master.m3u8, /<key>.m3u8 and /<key>/<n>.ts: our playlists and the
         segments behind them, streamed from googlevideo as they arrive."""
         parts = path.split("/")[3:]
@@ -1821,11 +1846,12 @@ class Handler(BaseHTTPRequestHandler):
         hls = self.services.hls
         video = hls.token_video(parts[0])
         playlist = {"Content-Type": "application/vnd.apple.mpegurl"}
+        start = (query.get("start") or [None])[0]  # not part of any cache key: only this response
         if len(parts) == 2 and parts[1] == "master.m3u8":
-            return self.answer(200, video.master.encode(), "application/vnd.apple.mpegurl")
+            return self.answer(200, with_start(video.master, start).encode(), "application/vnd.apple.mpegurl")
         if len(parts) == 2 and parts[1].endswith(".m3u8") and HLS_KEY_RE.match(parts[1][:-5]):
             text = hls.media_playlist(video, parts[1][:-5])[0]
-            return self.answer(200, text.encode(), playlist["Content-Type"])
+            return self.answer(200, with_start(text, start).encode(), playlist["Content-Type"])
         segment = re.fullmatch(r"([0-9]{1,5})\.(ts|aac)", parts[2]) if len(parts) == 3 else None
         if segment and HLS_KEY_RE.match(parts[1]) and (segment.group(2) == "aac") == parts[1].startswith("a"):
             ctype = "audio/aac" if segment.group(2) == "aac" else "video/mp2t"

@@ -276,3 +276,11 @@ test("active cue is stable in gaps and at boundaries", () => {
   assert.equal(L.focusIdentity(cues, 0.5), "1+");
   assert.equal(L.focusIdentity(cues, -1), "start");
 });
+
+test("the position saver waits for a resume to land", () => {
+  // Resuming at 600 s: the player still at 0-5 s (its early seek dropped) must not be saved.
+  for (const t of [0, 0.4, 5.4]) assert.equal(L.saveAllowed(t, 600, false), false);
+  assert.equal(L.saveAllowed(599, 600, false), true); // there: saving is fine
+  assert.equal(L.saveAllowed(5.4, 600, true), true); // landed (or the viewer seeked): anything goes
+  assert.equal(L.saveAllowed(5.4, null, false), true); // no resume at all
+});

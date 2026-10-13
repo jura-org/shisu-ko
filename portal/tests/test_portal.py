@@ -561,3 +561,19 @@ def test_frame_jpeg_from_a_segment():
         level = float(frame.to_ndarray(format="gray").mean())
     assert 90 <= level <= 115  # the frame at 1.0 s (n = 10, grey 100), not the first one
     assert portal.frame_jpeg(data, 99, relative=True).startswith(b"\xff\xd8")  # past the end: the last frame
+
+
+def test_with_start_marks_a_resume_in_master_and_media_playlists():
+    master, _, _ = portal.rewrite_master(MASTER, "/api/hls/TOKEN/")
+    started = portal.with_start(master, 482)
+    lines = started.split("\n")
+    assert lines[0] == "#EXTM3U" and lines[1] == "#EXT-X-START:TIME-OFFSET=482.0,PRECISE=YES"
+    assert "/api/hls/TOKEN/v232.m3u8?start=482.0" in lines
+    assert 'URI="/api/hls/TOKEN/a234.m3u8?start=482.0"' in started
+    media = portal.rewrite_media("#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:4.0,\nhttps://g.example/s0\n#EXT-X-ENDLIST\n", "/api/hls/T/v232/")[0]
+    assert portal.with_start(media, 482).split("\n")[1].startswith("#EXT-X-START:TIME-OFFSET=482.0")
+    assert "/api/hls/T/v232/0.ts" in portal.with_start(media, 482)  # segment URIs untouched
+    # No start, or nonsense: the playlist as it was (the cached one is never changed).
+    for t in (None, "", "0", "-5", "abc", "1e9"):
+        assert portal.with_start(master, t) == master
+    assert portal.with_start(started, 90).count("#EXT-X-START") == 1

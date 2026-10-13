@@ -400,6 +400,14 @@
     return Math.max(0, saved.t - 2);
   }
 
+  // Whether the position saver may write t. Until a resume has landed (or the viewer seeks), a time
+  // far from the resume target is the player still at 0 before its seek took: saving it would
+  // overwrite the saved spot with 0 for good.
+  function saveAllowed(t, resumeTarget, landed) {
+    if (landed || resumeTarget === null || resumeTarget === undefined) return true;
+    return Math.abs(t - resumeTarget) <= 2;
+  }
+
   // How far in, 0..1, for the progress bar under a thumbnail; a finished video reads as 1.
   function watchedFraction(entry) {
     const d = Number(entry && entry.duration) || 0;
@@ -531,7 +539,7 @@
   const api = {
     parseVideoInput, parseStart, activeCueIndex, formatTime, coveredUntil, statusText, tokenOffsets,
     morae, pitchPattern, splitFurigana, hasKanji, VIDEO_ID_RE, watchStatus, freqLabel,
-    STRINGS, resumeTime, watchedFraction, formatClock, spokenTime,
+    STRINGS, resumeTime, saveAllowed, watchedFraction, formatClock, spokenTime,
     SCHEDULES, backoffDelay, isTransient, withRetry, retryLeft,
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
