@@ -78,6 +78,7 @@
     reanchor: false,
     glideUntil: 0,
     tornDown: false,
+    sheetClosedAt: 0,
     resumeTarget: null,
     resumeLanded: true,
     cardSetup: null,
@@ -1195,6 +1196,10 @@
     // A vertical drag browses the list; a horizontal swipe steps a line.
     let touch = null;
     lyrics.addEventListener("touchstart", (ev) => {
+      if (state.sheet.open || Date.now() - state.sheetClosedAt < L.GHOST_CLICK_MS) {
+        touch = null; // the sheet's own dismissal, not a swipe or a browse
+        return;
+      }
       const p = ev.touches[0];
       touch = { x: p.clientX, y: p.clientY, axis: null, offset: state.browse.offset };
     }, { passive: true });
@@ -1269,6 +1274,7 @@
     if (!s.open) {
       s.pausedIt = settings.pauseOnLookup && state.playing;
       if (s.pausedIt) pause("sheet");
+      s.openedAt = state.player ? state.player.getCurrentTime() : state.t; // where the close resumes
     }
     s.open = true;
     s.cue = cue;
@@ -1465,10 +1471,16 @@
     sheet.setAttribute("aria-hidden", "true");
     markPicked(null);
     state.focusKey = null;
+    state.sheetClosedAt = Date.now(); // the ghost-click guard counts from here
     if (s.pausedIt) {
       s.pausedIt = false;
+      // Resume the line the sheet was opened on, never further: if anything moved the playhead
+      // while the sheet was open, put it back first.
+      if (state.player && Number.isFinite(s.openedAt) && Math.abs(state.player.getCurrentTime() - s.openedAt) > 0.5) {
+        state.player.seekTo(s.openedAt, true);
+      }
       // The line looked up may have ended while the sheet was open; auto-pause must not fire for it again.
-      const cue = state.cues[state.activeIdx];
+      const cue = state.cues[L.activeCueIndex(state.cues, s.openedAt)];
       state.autoPausedFor = cue ? cue.id : null;
       if (resume) play(); // still inside the gesture that closed the sheet
     }
@@ -1555,16 +1567,23 @@
       if (!was) pick.classList.add("chosen");
     });
 
-    // A tap outside closes the sheet (and resumes, inside this tap); a tap on another word in the
-    // subtitle list opens that word instead.
+    // A tap outside closes the sheet (and resumes, inside this tap) and does nothing else; a tap on
+    // another word of the same sentence looks that word up instead. Just after a close, a stray
+    // click (iOS's late synthetic one) is swallowed wherever it lands (lib.js dismissAction()).
     document.addEventListener("click", (ev) => {
-      if (!state.sheet.open) return;
-      if (ev.target.closest("#sheet, #toasts")) return;
       const word = ev.target.closest(".word");
-      if (word && word.closest("#lyrics")) return;
+      const row = word && word.closest("#lyrics .cue");
+      const action = L.dismissAction({
+        sheetOpen: state.sheet.open,
+        inSheet: !!ev.target.closest("#sheet, #toasts, #settings, #anki-sheet"),
+        wordCue: row ? row.dataset.cue : null,
+        sheetCue: state.sheet.cue ? state.sheet.cue.id : null,
+        sinceCloseMs: Date.now() - state.sheetClosedAt,
+      });
+      if (action === "pass") return;
       ev.preventDefault();
       ev.stopPropagation();
-      closeSheet();
+      if (action === "dismiss") closeSheet();
     }, true);
 
     makeDraggable($("sheet"), $("sheet-scroll"), () => closeSheet());

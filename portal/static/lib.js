@@ -400,6 +400,22 @@
     return Math.max(0, saved.t - 2);
   }
 
+  // What a click does while the dictionary sheet is open, or just after it closed. The gesture
+  // that closes the sheet does nothing else, and neither does a late synthetic click (iOS sends one
+  // after the touch) landing on whatever slid under the finger as the sheet went away.
+  //   inSheet: the click is inside the sheet (or a toast); wordCue: the cue id of a word tapped in
+  //   the subtitle list, or null; sheetCue: the cue the sheet was opened from.
+  function dismissAction({ sheetOpen, inSheet, wordCue, sheetCue, sinceCloseMs }) {
+    if (inSheet) return "pass";
+    if (sheetOpen) {
+      // Another word of the same sentence: look that one up instead (the sentence stays put).
+      if (wordCue !== null && wordCue !== undefined && String(wordCue) === String(sheetCue)) return "pass";
+      return "dismiss";
+    }
+    return sinceCloseMs < GHOST_CLICK_MS ? "swallow" : "pass";
+  }
+  const GHOST_CLICK_MS = 400;
+
   // Whether the position saver may write t. Until a resume has landed (or the viewer seeks), a time
   // far from the resume target is the player still at 0 before its seek took: saving it would
   // overwrite the saved spot with 0 for good.
@@ -539,7 +555,7 @@
   const api = {
     parseVideoInput, parseStart, activeCueIndex, formatTime, coveredUntil, statusText, tokenOffsets,
     morae, pitchPattern, splitFurigana, hasKanji, VIDEO_ID_RE, watchStatus, freqLabel,
-    STRINGS, resumeTime, saveAllowed, watchedFraction, formatClock, spokenTime,
+    STRINGS, resumeTime, saveAllowed, dismissAction, GHOST_CLICK_MS, watchedFraction, formatClock, spokenTime,
     SCHEDULES, backoffDelay, isTransient, withRetry, retryLeft,
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,

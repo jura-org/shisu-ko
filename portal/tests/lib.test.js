@@ -284,3 +284,17 @@ test("the position saver waits for a resume to land", () => {
   assert.equal(L.saveAllowed(5.4, 600, true), true); // landed (or the viewer seeked): anything goes
   assert.equal(L.saveAllowed(5.4, null, false), true); // no resume at all
 });
+
+test("closing the dictionary sheet never does anything else", () => {
+  const open = { sheetOpen: true, inSheet: false, sheetCue: 7, sinceCloseMs: 99999 };
+  assert.equal(L.dismissAction({ ...open, wordCue: 8 }), "dismiss"); // (a) the next cue's text
+  assert.equal(L.dismissAction({ ...open, wordCue: 6 }), "dismiss"); // (b) the previous cue
+  assert.equal(L.dismissAction({ ...open, wordCue: null }), "dismiss"); // (c) empty space, (d) the video
+  assert.equal(L.dismissAction({ ...open, wordCue: 7 }), "pass"); // another word of the same sentence: look it up
+  assert.equal(L.dismissAction({ ...open, wordCue: null, inSheet: true }), "pass"); // inside the sheet
+  // Closed a moment ago (a tap outside, a swipe down, Mine): the late synthetic click is swallowed.
+  const closed = { sheetOpen: false, inSheet: false, sheetCue: null };
+  assert.equal(L.dismissAction({ ...closed, wordCue: 8, sinceCloseMs: 120 }), "swallow");
+  assert.equal(L.dismissAction({ ...closed, wordCue: null, sinceCloseMs: 350 }), "swallow");
+  assert.equal(L.dismissAction({ ...closed, wordCue: 8, sinceCloseMs: 600 }), "pass"); // later: an ordinary tap
+});
