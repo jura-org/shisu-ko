@@ -231,3 +231,48 @@ test("scrubber clock and spoken time", () => {
   assert.equal(L.spokenTime(0), "0 seconds");
   assert.equal(L.spokenTime(61), "1 minute 1 second");
 });
+
+test("anchoring: cues inserted above the active one do not move it, and do not glide", () => {
+  // A list laid out like the page: each row's height, 22 px apart; the track is placed so the
+  // active row's centre sits at the centre point.
+  const layout = (cues, heightOf) => {
+    let y = 0;
+    return cues.map((c) => { const top = y; y += heightOf(c) + 22; return { id: c.id, top, centre: top + heightOf(c) / 2 }; });
+  };
+  const centre = 260;
+  const height = (c) => (c.id % 3 === 0 ? 78 : 39);
+  let cues = Array.from({ length: 10 }, (_, i) => ({ id: 100 + i, start: 480 + i * 3, end: 482 + i * 3 }));
+  const t = 492;
+  let idx = L.activeCueIndex(cues, t);
+  let id = L.focusIdentity(cues, idx);
+  const screenBefore = (centre - layout(cues, height)[idx].centre) + layout(cues, height)[idx].centre;
+  // The server fills in 20 earlier cues; the list is sorted again.
+  cues = [...Array.from({ length: 20 }, (_, i) => ({ id: 200 + i, start: i * 3, end: i * 3 + 2 })), ...cues].sort((a, b) => a.start - b.start);
+  idx = L.activeCueIndex(cues, t);
+  const next = L.focusIdentity(cues, idx);
+  assert.equal(next, id); // the same cue is active
+  assert.equal(L.focusMotion(id, next), "instant"); // so the list re-anchors, it does not glide
+  const rows = layout(cues, height);
+  const trackBase = centre - rows[idx].centre; // placeTrack(): centre - anchor
+  assert.equal(trackBase + rows[idx].centre, screenBefore); // and the active row has not moved on screen
+  assert.equal(L.focusMotion(id, L.focusIdentity(cues, idx + 1)), "glide"); // a real transition still glides
+});
+
+test("active cue is stable in gaps and at boundaries", () => {
+  const cues = [{ id: 1, start: 0, end: 4 }, { id: 2, start: 10, end: 14 }];
+  // In the gap the last started cue stays active.
+  for (const t of [4.5, 6, 9.9]) assert.equal(L.activeCueIndex(cues, t), 0);
+  // A clock that wobbles a few ms backwards at the boundary (cue 2 counts from 9.95) does not flip back.
+  let clock = 9.9;
+  const seen = [];
+  for (const raw of [9.9, 9.93, 9.96, 9.94, 9.95, 9.98]) {
+    clock = L.steadyTime(clock, raw, true);
+    seen.push(L.activeCueIndex(cues, clock));
+  }
+  assert.deepEqual(seen, [0, 0, 1, 1, 1, 1]);
+  // A seek back (more than 0.3 s) is taken as it is, and so is any time while paused.
+  assert.equal(L.steadyTime(30, 12, true), 12);
+  assert.equal(L.steadyTime(10.02, 10.0, false), 10.0);
+  assert.equal(L.focusIdentity(cues, 0.5), "1+");
+  assert.equal(L.focusIdentity(cues, -1), "start");
+});

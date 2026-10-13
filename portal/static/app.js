@@ -14,6 +14,7 @@
   const BROWSE_IDLE_MS = 3000;
   const TOKENIZE_BATCH = 10;
   const LINE_HOLD_S = 2.5; // a line stays up this long after it ends, then the space is empty
+  const GLIDE_MS = 400; // the list's transition (app.css .lyrics-track)
   const DOUBLE_TAP_MS = 300;
   const TOAST_MS = 2000;
   // YT.PlayerState values, usable before the API has loaded.
@@ -71,6 +72,10 @@
     lang: null,
     info: null,
     previewT: null,
+    startKnown: false,
+    focusId: null,
+    reanchor: false,
+    glideUntil: 0,
     cardSetup: null,
     syncFailures: 0,
     syncRetryAt: 0,
@@ -335,7 +340,6 @@
     bindSettings();
     setInterval(tick, 250);
     requestAnimationFrame(frame);
-    sync();
     document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") savePosition(); });
     window.addEventListener("pagehide", savePosition);
 
@@ -349,6 +353,11 @@
     state.mediaDuration = media.duration || null;
     // The near-end rule needs the duration, which only the stream knew.
     state.startAt = L.resumeTime({ saved, duration: media.duration, urlT: state.urlT });
+    // Only now does the server hear of the video: a /sync before this would name time 0, and the
+    // server would transcribe the start of a video being resumed in the middle.
+    state.t = state.clock.t = state.startAt;
+    state.startKnown = true;
+    sync();
     if (media.kind === "hls" && document.createElement("video").canPlayType("application/vnd.apple.mpegurl")) {
       state.player = createNativePlayer(media.url);
       state.playerReady = true;
@@ -527,7 +536,7 @@
     state.autoPausedFor = null;
     state.player.seekTo(Math.max(0, t), true);
     state.t = Math.max(0, t);
-    state.clock.t = state.t;
+    state.clock.t = state.t; // steadyTime then takes the new, earlier time as it is
     state.clock.raw = null;
     state.sweep.count = -1;
     if (andPlay) play();
@@ -564,7 +573,7 @@
   // ------------------------------------------------------------ /sync
 
   async function sync() {
-    if (state.syncInFlight || !state.videoId) return;
+    if (state.syncInFlight || !state.videoId || !state.startKnown) return;
     state.syncInFlight = true;
     state.lastSyncAt = Date.now();
     let res;
@@ -652,17 +661,19 @@
       added = true;
     }
     if (!added) return;
-    if (!inOrder) {
-      state.cues.sort((a, b) => a.start - b.start || a.end - b.end);
-      state.renderedCount = 0;
-      state.rowById.clear();
-      state.focusPos = null; // every row is new: restyle them all
-      $("lyrics-track").replaceChildren();
-    }
+    if (!inOrder) state.cues.sort((a, b) => a.start - b.start || a.end - b.end);
     state.cueIndex.clear();
     state.cues.forEach((c, i) => state.cueIndex.set(c.id, i));
     state.activeIdx = L.activeCueIndex(state.cues, state.t);
-    renderRows();
+    if (inOrder) {
+      renderRows();
+    } else {
+      // Earlier lines arrived (the server fills in windows before the playhead): slot their rows in
+      // among the existing ones, which keep their elements and styles, so the line being said does
+      // not start over; the frame loop then re-anchors the list without motion.
+      placeRows();
+      state.focusPos = null; // indices shifted: restyle every row (unchanged rows do not animate)
+    }
     state.focusKey = null; // re-place and restyle on the next frame
     pumpTokens();
   }
@@ -718,8 +729,9 @@
             refocus = true;
           }
         });
-        // Furigana can change a row's height; place the list again (one layout read per batch).
-        if (refocus && settings.furigana) state.focusKey = null;
+        // Tokens change how a row wraps, so rows above the line being said may change height:
+        // re-anchor without motion (one layout read per batch).
+        if (refocus) state.reanchor = true;
       }
     } finally {
       state.tokenizing = false;
@@ -728,17 +740,35 @@
 
   // ------------------------------------------------------------ the subtitle list
 
+  function newRow(cue) {
+    const row = document.createElement("div");
+    row.className = "cue future";
+    row.dataset.cue = String(cue.id);
+    fillCue(row, cue);
+    state.rowById.set(cue.id, row);
+    return row;
+  }
+
+  // Every cue's row in sorted order, creating only the missing ones and moving nothing that is
+  // already in place.
+  function placeRows() {
+    const track = $("lyrics-track");
+    let prev = null;
+    for (const cue of state.cues) {
+      const row = state.rowById.get(cue.id) || newRow(cue);
+      const inPlace = prev ? prev.nextElementSibling === row : track.firstElementChild === row;
+      if (!inPlace) {
+        if (prev) prev.after(row);
+        else track.prepend(row);
+      }
+      prev = row;
+    }
+    state.renderedCount = state.cues.length;
+  }
+
   function renderRows() {
     const track = $("lyrics-track");
-    for (let i = state.renderedCount; i < state.cues.length; i++) {
-      const cue = state.cues[i];
-      const row = document.createElement("div");
-      row.className = "cue future";
-      row.dataset.cue = String(cue.id);
-      fillCue(row, cue);
-      track.append(row);
-      state.rowById.set(cue.id, row);
-    }
+    for (let i = state.renderedCount; i < state.cues.length; i++) track.append(newRow(state.cues[i]));
     state.renderedCount = state.cues.length;
   }
 
@@ -790,7 +820,7 @@
 
   // Restyle the cues around the focus and glide the list so the focus sits at the centre point.
   // Runs only when the focus changes (or the sheet resizes): one layout read, then transforms.
-  function applyFocus(focus) {
+  function applyFocus(focus, animate) {
     const old = state.focusPos;
     state.focusPos = focus.pos;
     const lo = Math.max(0, Math.floor(Math.min(old ?? focus.pos, focus.pos)) - 3);
@@ -809,7 +839,7 @@
       }
       status.append(focus.status.text);
     }
-    placeTrack();
+    placeTrack(animate);
     updateVeil();
   }
 
@@ -836,7 +866,7 @@
     return Math.max(40, Math.min(box.clientHeight / 2, room / 2));
   }
 
-  function placeTrack() {
+  function placeTrack(animate = true) {
     const pos = state.focusPos;
     const centre = focusY();
     let anchor = 0;
@@ -847,10 +877,12 @@
     else anchor = -40; // nothing said yet: the first cue waits just below the centre
     state.trackBase = centre - anchor;
     $("lyrics-status").style.top = `${centre}px`;
-    setTrack();
+    setTrack(animate);
   }
 
-  function setTrack() {
+  // `animate` false re-anchors in the same frame: no transition, so content that changed above the
+  // line being said (cues filled in, tokens re-measured) never shows as the list moving.
+  function setTrack(animate = true) {
     const track = $("lyrics-track");
     if (state.browse.active) {
       // Browsing stops at the ends of the list.
@@ -858,7 +890,18 @@
       const max = focusY();
       state.browse.offset = Math.min(max - state.trackBase, Math.max(min - state.trackBase, state.browse.offset));
     }
-    track.style.transform = `translateY(${Math.round(state.trackBase + state.browse.offset)}px)`;
+    const value = `translateY(${Math.round(state.trackBase + state.browse.offset)}px)`;
+    if (track.style.transform === value) return;
+    // A re-anchor during a glide retargets the glide instead of cutting it short.
+    if (animate || performance.now() < state.glideUntil) {
+      if (animate) state.glideUntil = performance.now() + GLIDE_MS;
+      track.style.transform = value;
+      return;
+    }
+    track.style.transition = "none";
+    track.style.transform = value;
+    void track.offsetHeight; // commit the jump before the transition comes back
+    track.style.transition = "";
   }
 
   // The word sweep inside the cue being said: units turn white as their (estimated) time comes.
@@ -929,7 +972,7 @@
     if (!state.playerReady || !state.player) return state.startAt || 0;
     const raw = state.player.getCurrentTime();
     if (!Number.isFinite(raw)) return c.t;
-    if (state.player.kind === "native") return (c.t = raw); // exact already (frame callback + currentTime)
+    if (state.player.kind === "native") return (c.t = L.steadyTime(c.t, raw, state.playing)); // exact, kept monotonic
     if (raw !== c.raw) {
       c.raw = raw;
       c.rawAt = now;
@@ -958,7 +1001,15 @@
     const key = `${focus.pos}|${focus.status ? focus.status.text : ""}|${state.sheet.open}`;
     if (key !== state.focusKey) {
       state.focusKey = key;
-      applyFocus(focus);
+      const id = L.focusIdentity(state.cues, focus.pos);
+      // Only a different cue is movement; the same cue at another index is content shifting.
+      const animate = L.focusMotion(state.focusId, id) === "glide";
+      state.focusId = id;
+      applyFocus(focus, animate);
+      state.reanchor = false;
+    } else if (state.reanchor) {
+      state.reanchor = false;
+      placeTrack(false); // rows above changed height (tokens arrived): keep the line where it is
     }
     sweep(state.t);
     renderScrubber(state.t);

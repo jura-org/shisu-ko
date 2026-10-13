@@ -353,6 +353,28 @@
     return Array.isArray(tokens) && tokens.some((t) => t.term);
   }
 
+  // The playback clock never steps back while playing: a new frame report can land a few
+  // milliseconds behind the time already extrapolated, and near a cue boundary that would flip the
+  // active cue back and forth. A real jump back (a seek) is larger than this and goes through.
+  function steadyTime(prev, raw, playing) {
+    return playing && Number.isFinite(prev) && raw < prev && prev - raw < 0.3 ? prev : raw;
+  }
+
+  // What the subtitle list is centred on, by identity: a cue id (or the status slot after one), not
+  // an index, which an insertion above shifts without anything having been played.
+  function focusIdentity(cues, pos) {
+    if (pos === null || pos === undefined) return null;
+    const cue = cues[Math.floor(pos)];
+    const base = cue ? String(cue.id) : "start";
+    return Number.isInteger(pos) ? base : `${base}+`;
+  }
+
+  // Glide only when playback (or the viewer) moved the focus to another cue; content that changed
+  // above or below re-anchors at once, so the line being said stays where it is on screen.
+  function focusMotion(prevIdentity, nextIdentity) {
+    return prevIdentity !== nextIdentity ? "glide" : "instant";
+  }
+
   // How many units have started by time t (the sweep position), by binary search.
   function spokenCount(times, t) {
     let lo = 0;
@@ -511,7 +533,7 @@
     morae, pitchPattern, splitFurigana, hasKanji, VIDEO_ID_RE, watchStatus, freqLabel,
     STRINGS, resumeTime, watchedFraction, formatClock, spokenTime,
     SCHEDULES, backoffDelay, isTransient, withRetry, retryLeft,
-    evenUnitTimes, isJapanese, segmentWords, tokensUseful,
+    evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
