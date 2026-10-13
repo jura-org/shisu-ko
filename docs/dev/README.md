@@ -8,4 +8,5 @@ The detail behind `AGENTS.md`. Read the file for a subsystem before changing it.
 - `word-colours.md`: `addon/words.js`, the deck index in the background, the drawing in the content script, the popup controls.
 - `updates-and-release.md`: the add-on's update check and the popup's Update button, tags, signing, the AMO listing workflow, the Chrome Web Store workflows (`cws-listing.yml`, `cws-schedule.yml`) and `scripts/cws.mjs`.
 - `build-and-test.md`: the Chrome build, the test loaders that run the add-on scripts in Node, and the server tests (kept away from the real data folder, the AMD engine's tests, running them through WSL).
+- `portal.md`: the phone portal: its access modes, pairing and threat model, the card setup, the HLS proxy, timing sources and language, retries, positions.
 - `invariants-and-gotchas.md`: the full text of every invariant and gotcha `AGENTS.md` states in short.

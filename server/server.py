@@ -77,7 +77,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.18.0"
+VERSION = "0.19.0"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -871,7 +871,7 @@ def word_anomaly_score(word: Word, short_term: bool = True) -> float:
     `short_term` is the (0.133 - duration) * 15 penalty, and it measures the tokenizer rather than
     the audio in Japanese: Whisper's Japanese words are sub-tokens, usually one kana, so they are
     under 133 ms by construction and every ordinary segment scores on them. Over the two 15-minute
-    dumps of 5csq1MlSspA the whole first-8-words score reaches the threshold for 37 of 279 segments
+    dumps of video A (a long-form Japanese podcast episode) the whole first-8-words score reaches the threshold for 37 of 279 segments
     and 34 of 202 with the term, and for 0 and 2 without it (both of those real speech, both saved
     by their VAD overlap). The talk path therefore scores without it; see is_segment_anomaly().
     """
