@@ -22,7 +22,7 @@ HOMEPAGE = "https://github.com/Multysquid/shisu-ko"
 SUPPORT_URL = "https://github.com/Multysquid/shisu-ko/issues"
 CATEGORIES = ["language-support", "photos-music-videos"]  # at most two, slugs from /api/v5/addons/categories/
 TAGS = ["youtube", "streaming"]  # AMO's fixed tag vocabulary; unknown tags are rejected
-LICENSE = "MIT"  # SPDX-style slug of a built-in AMO license; must match LICENSE in the repo
+LICENSE = "Apache-2.0"  # SPDX-style slug of a built-in AMO license; must match LICENSE in the repo
 NOTES_LIMIT = 3000  # release notes and approval notes, each (AMO's version serializer)
 
 

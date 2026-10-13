@@ -4,7 +4,7 @@ version (reviewer-notes.md, AMO takes at most 3,000 characters) are a summary th
 WHAT THE ADD-ON IS
 
 Shisu-ko shows live Japanese subtitles on YouTube. It is one half of a two-part program: a
-companion server (server/server.py in the same repository, Python, MIT) runs on the user's own
+companion server (server/server.py in the same repository, Python, Apache-2.0) runs on the user's own
 computer, listens on http://127.0.0.1:8790, downloads the audio track of the video the user is
 watching with yt-dlp and transcribes it with Whisper (faster-whisper). The extension sends the
 video id, the current playback position and the name of the Whisper model chosen in the popup
