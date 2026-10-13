@@ -12,7 +12,7 @@ target language heard in it) is decoded without the detector, and its record car
 A talk window whose prompted decode skipped speech is decoded again without the prompt and the
 two spliced (retry_prompt_skips()), as process() does; its record carries "prompt_retry": true.
 
-    python server/tools/dump_words.py DhcrgdOzgic --from 80 --to 1120 --out /tmp/words
+    python server/tools/dump_words.py VIDEO_ID --from 80 --to 1120 --out /tmp/words
 """
 from __future__ import annotations
 

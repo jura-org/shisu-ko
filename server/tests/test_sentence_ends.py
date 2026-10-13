@@ -245,7 +245,7 @@ def test_carry_trailing_mark_leaves_an_already_finished_cue_alone():
 
 
 def measured_case(silence: float):
-    """5csq1MlSspA at 18:06: one Whisper segment, no mark after よね, then a pause.
+    """Video A (a long-form Japanese podcast episode) at 18:06: one Whisper segment, no mark after よね, then a pause.
 
     Words of about 0.2 s each, as the dump has them, and the detector heard the two halves as
     two intervals.

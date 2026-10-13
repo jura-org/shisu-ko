@@ -126,7 +126,7 @@ Apply per segment, before `split_segment()`:
 
    **Measured, and the risk was the whole gate.** The talk path now scores with `short_term=False`.
    Whisper's Japanese words are sub-tokens, usually a single kana, so they are under 133 ms by
-   construction: over 15 minutes of 5csq1MlSspA dumped twice (279 segments at a 40 s window, 202 at
+   construction: over 15 minutes of video A (a long-form Japanese podcast episode) dumped twice (279 segments at a 40 s window, 202 at
    30 s with an initial prompt) the first-8-words score reaches the threshold for 37 and 34 segments
    with the term, and for 0 and 2 without it — and those two survive on their VAD overlap and are
    real speech. Of the segments the gate deleted, all five were real utterances and none a
@@ -387,7 +387,7 @@ different segments. The anti-flicker rule was dead code, and this is the largest
 
 ### Before and after
 
-`DhcrgdOzgic`, 17 minutes of a fast two-person collab, the worst cache on disk:
+Video D (a fast two-person collab), 17 minutes, the worst cache on disk:
 
 | metric | `main` | this branch |
 |---|---|---|
@@ -407,9 +407,9 @@ different segments. The anti-flicker rule was dead code, and this is the largest
 
 | video | cues ≤ 4 chars | kinsoku / okuri | stubs | speech with text | swaps/min |
 |---|---|---|---|---|---|
-| `DhcrgdOzgic` | 28.7% → 1.9% | 4 → 0 / 13 → 4 | 93 → 0 | 79.9% → 90.5% | 26.6 → 12.1 |
-| `5oiVvJB3x9Q` | 23.9% → 3.6% | 2 → 0 / 8 → 1 | 40 → 1 | 81.9% → 88.3% | 20.5 → 10.4 |
-| `IdYM3nWCWVk` | 6.9% → 0.6% | 0 → 0 / 2 → 0 | 7 → 0 | 60.6% → 64.3% | 16.3 → 14.7 |
+| video D | 28.7% → 1.9% | 4 → 0 / 13 → 4 | 93 → 0 | 79.9% → 90.5% | 26.6 → 12.1 |
+| video B | 23.9% → 3.6% | 2 → 0 / 8 → 1 | 40 → 1 | 81.9% → 88.3% | 20.5 → 10.4 |
+| video C | 6.9% → 0.6% | 0 → 0 / 2 → 0 | 7 → 0 | 60.6% → 64.3% | 16.3 → 14.7 |
 
 `kinsoku` is exact and reaches zero on all three. Every surviving `okuri` is the heuristic's own
 false positive — `…らしいえ?対象 || あどう?と`, `…から全然 || こういうピンクとか…`,
@@ -440,7 +440,7 @@ That matters beyond the flicker, because the cue is also the mined sentence (see
 then reversed"), and these two cues came from different Whisper segments, so nothing downstream
 could have put the line back together.
 
-| `--max-cue-seconds` | `5oiVvJB3x9Q` stubs | ≤ 4 chars | swaps/min | duration p95 |
+| `--max-cue-seconds` | video B stubs | ≤ 4 chars | swaps/min | duration p95 |
 |---|---|---|---|---|
 | 6.0 | 5 | 4.8% | 11.9 | 5.48 s |
 | **7.0** | **1** | **3.5%** | **10.6** | **6.01 s** |

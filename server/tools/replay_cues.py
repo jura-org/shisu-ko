@@ -5,7 +5,7 @@ The other half of the A/B rig of docs/subtitle-quality.md (e). No GPU, no networ
 Whisper output is fixed, so any difference in the numbers below is the cue builder's doing and
 nothing else. Check out the old code, run this, check out the new code, run it again.
 
-    python server/tools/dump_words.py DhcrgdOzgic --out /tmp/words   # once, on a GPU
+    python server/tools/dump_words.py VIDEO_ID --out /tmp/words   # once, on a GPU
     python server/tools/replay_cues.py /tmp/words/*.words.json       # as often as you like
 
 Metrics, in the order they print:

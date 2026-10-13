@@ -6,8 +6,7 @@ end does not exist.” Chrome did not run the Firefox background scripts.
 
 ![Firefox package failing in Chrome](chrome-before.png)
 
-Verified 2026-09-18 in a private Xvfb display with headed Chromium 152 on the real YouTube
-video [miM_yxQ2P20](https://www.youtube.com/watch?v=miM_yxQ2P20). The test used the generated
+Verified 2026-09-18 in a private Xvfb display with headed Chromium 152 on a real public Japanese video on YouTube. The test used the generated
 0.5.0 `dist/chrome` package. The running local server was 0.4.0, using large-v3 on CUDA with
 float16; this release changes only its version number, not the server protocol.
 

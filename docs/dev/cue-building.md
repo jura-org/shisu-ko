@@ -23,7 +23,7 @@ Whisper is asked for punctuation rather than left to guess at it: `--initial-pro
 language gets nothing, and an explicit `--initial-prompt ""` turns it off), a short punctuated
 sentence in the style the subtitles should read. Each window is decoded with nothing in front of
 it, so without the prompt the decoder has no reason to write a 。 at all: measured over 15 minutes
-of 5csq1MlSspA, marks land on 88% of the hand-labelled sentence ends with the prompt and 53%
+of video A (a long-form Japanese podcast episode), marks land on 88% of the hand-labelled sentence ends with the prompt and 53%
 without, and not one line of the prompt reached the transcript. A lyrics window is decoded with
 `initial_prompt=None`: its gates were measured on unprompted decodes and the blocklist holds no
 sentence of the prompt, so a noisy window the language head lets through could echo the prompt
@@ -164,7 +164,7 @@ well as `merge_segments()`: what the speaker finished and what follows it never 
 merge that cannot give them a row each is refused instead of flattened. A short row is no reason
 to flatten one: `rows_fit(text, limits, at_mark=True)` only refuses a third row, because うん。 is a
 whole turn and not a stub we left by breaking badly, which is what `MIN_PIECE_CHARS` judges elsewhere. Measured on 15 minutes of
-5csq1MlSspA decoded with `--initial-prompt`, 22% of all cues held a mark mid-row and read as two
+video A decoded with `--initial-prompt`, 22% of all cues held a mark mid-row and read as two
 people on one line (`マジで?それいいね。`, `出そう、出そう、出そう。だって、集合に行くの誰?`), which
 also put the other speaker's clause on every card mined from one. Hard boundary in both merges took
 the share of hand-labelled sentence ends the viewer actually sees from 66% to 90% on that decode, and

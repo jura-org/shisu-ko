@@ -5,7 +5,7 @@ Loads the model once and drives server.py's own plan_window/Transcriber.process,
 is what the live server would produce for the same video. Writes <video_id>.new.cues.json and
 <video_id>.speech.json into the output directory, and prints how many segments each gate dropped.
 
-    python server/tools/retranscribe.py 2q3XN2rYEGE --out /tmp/new
+    python server/tools/retranscribe.py VIDEO_ID --out /tmp/new
 
 --model follows the server's own default: the model chosen at setup (~/.shisu-ko/config.json),
 else this machine's built-in default, so a measurement without the flag runs the model the
