@@ -20,7 +20,7 @@ only when it is published there by hand (*Publishing a release on the listing*).
 | `make_metadata.py` | Builds `amo-metadata.json` from the files above for `amo-listing.yml` and `publish-addon.cmd` |
 
 Listing values that are not in a file: categories **Language Support** and **Photos, Music &
-Videos**; tags **youtube**, **streaming** (AMO's tag list is fixed); license **MIT License**;
+Videos**; tags **youtube**, **streaming** (AMO's tag list is fixed); license **Apache License 2.0**;
 homepage `https://github.com/Multysquid/shisu-ko`; support site
 `https://github.com/Multysquid/shisu-ko/issues`; not experimental, no payment; compatible with
 **Firefox** only (the server has to run on the same computer, so untick Firefox for Android).
