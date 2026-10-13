@@ -13,6 +13,7 @@
   const SYNC_PAUSED_MS = 5000;
   const BROWSE_IDLE_MS = 3000;
   const TOKENIZE_BATCH = 10;
+  const FROM_HOME = "portal.fromHome"; // sessionStorage: this video was opened from the home page
   const LINE_HOLD_S = 2.5; // a line stays up this long after it ends, then the space is empty
   const GLIDE_MS = 400; // the list's transition (app.css .lyrics-track)
   const DOUBLE_TAP_MS = 300;
@@ -76,6 +77,7 @@
     focusId: null,
     reanchor: false,
     glideUntil: 0,
+    tornDown: false,
     resumeTarget: null,
     resumeLanded: true,
     cardSetup: null,
@@ -107,17 +109,26 @@
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   }
 
+  // A request that hangs (a dead connection after the phone slept, or after a back-forward
+  // restore) must not leave the page waiting for ever: every fetch has a deadline.
+  function timedFetch(path, init = {}, ms = 10000) {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), ms);
+    return fetch(path, { ...init, signal: abort.signal }).finally(() => clearTimeout(timer));
+  }
+
   async function api(path, body) {
-    const res = await fetch(path, {
+    // A mine can take a while (the sentence audio waits for the server): a longer deadline.
+    const res = await timedFetch(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    });
+    }, path === "/api/mine" ? 90000 : 20000);
     return answerOf(res);
   }
 
   async function getJSON(path) {
-    return answerOf(await fetch(path));
+    return answerOf(await timedFetch(path));
   }
 
   async function answerOf(res) {
@@ -141,10 +152,12 @@
 
   // ------------------------------------------------------------ routing and home
 
-  async function route() {
+  // The view comes from the address alone and is drawn before any request: whatever the network
+  // does, the page is never blank.
+  function route() {
     applyStrings();
-    await loadInfo();
-    renderAnkiRow();
+    window.addEventListener("pageshow", (ev) => onShow(ev.persisted));
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") onShow(false); });
     const params = new URLSearchParams(location.search);
     const hash = new URLSearchParams(location.hash.slice(1));
     const id = params.get("v") || hash.get("v");
@@ -165,6 +178,7 @@
       $("open-error").hidden = false;
       return false;
     }
+    sessionStorage.setItem(FROM_HOME, "1");
     location.href = `?v=${encodeURIComponent(parsed.id)}${parsed.t ? `&t=${Math.floor(parsed.t)}` : ""}`;
     return true;
   }
@@ -201,11 +215,28 @@
       $("edit-btn").textContent = editing ? "Done" : "Edit";
     });
     bindAnkiSetup();
-    renderSetupHints();
     renderRecent(recentList()); // the local copy at once; the server's list replaces it
+    // Opening a video from here: its back button may return here with history.back().
+    $("recent").addEventListener("click", (ev) => { if (ev.target.closest("a")) sessionStorage.setItem(FROM_HOME, "1"); });
+    renderSetupHints();
+    loadInfo().then(renderAnkiRow);
     migrateLocal().then(loadRecent);
-    // Back from a video restores this page from the back-forward cache: refresh the positions.
-    window.addEventListener("pageshow", (ev) => { if (ev.persisted) loadRecent(); });
+  }
+
+  // Every time the page is shown (a load, a back-forward restore, a return from another app):
+  // the home view is drawn and its list fetched again; a watch page whose video was released on the
+  // way out starts over.
+  function onShow(persisted) {
+    if (!state.videoId) {
+      sessionStorage.removeItem(FROM_HOME);
+      $("home").hidden = false;
+      $("watch").hidden = true;
+      renderRecent(recentList());
+      loadRecent();
+      renderSetupHints();
+    } else if (persisted && state.tornDown) {
+      location.reload();
+    }
   }
 
   // The device's old local list, moved into the shared server list once.
@@ -323,10 +354,30 @@
 
   function goHome() {
     savePosition();
+    teardownWatch();
+    // Opened from the home page: going back pops that entry (and swipe-back keeps working). Opened
+    // any other way (a link, the home-screen app's start, a reload), there is no such entry: load home.
     const ref = document.referrer ? new URL(document.referrer) : null;
-    // Came from the home page: going back pops that entry (and swipe-back keeps working).
-    if (ref && ref.origin === location.origin && !ref.searchParams.get("v") && history.length > 1) history.back();
-    else location.href = "./";
+    const fromHome = sessionStorage.getItem(FROM_HOME) === "1" || (ref && ref.origin === location.origin && !ref.searchParams.get("v"));
+    if (fromHome && history.length > 1) {
+      history.back();
+      setTimeout(() => location.assign("./"), 1500); // back did nothing: load home after all
+    } else {
+      location.assign("./");
+    }
+  }
+
+  // Leaving the video: stop it and let go of its stream, so a page kept in the back-forward cache
+  // neither plays nor downloads.
+  function teardownWatch() {
+    if (!state.player || state.tornDown) return;
+    state.tornDown = true;
+    try {
+      state.player.pauseVideo();
+      if (state.player.kind === "native") state.player.destroy();
+    } catch {
+      // a player that is already gone
+    }
   }
 
   // ------------------------------------------------------------ player
@@ -334,6 +385,7 @@
   async function startWatch() {
     $("home").hidden = true;
     $("watch").hidden = false;
+    loadInfo().then(renderAnkiRow); // the language matters only once cues arrive, after the start below
     $("shield").style.setProperty("--poster", `url("/api/thumb/${state.videoId}")`);
     renderPlayState();
     applySettings();
@@ -344,7 +396,10 @@
     setInterval(tick, 250);
     requestAnimationFrame(frame);
     document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") savePosition(); });
-    window.addEventListener("pagehide", savePosition);
+    window.addEventListener("pagehide", () => {
+      savePosition();
+      teardownWatch();
+    });
 
     // Where to start first (a local file on the PC: milliseconds), then the stream, which the PC
     // resolves and pre-fetches at exactly that point.
