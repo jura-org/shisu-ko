@@ -1,0 +1,1947 @@
+// SPDX-License-Identifier: Apache-2.0
+"use strict";
+
+(() => {
+  const L = window.PortalLib;
+  const $ = (id) => document.getElementById(id);
+
+  const SETTINGS_KEY = "portal.settings";
+  const RECENT_KEY = "portal.recent";
+  const DEFAULTS = { pauseOnLookup: true, autoPause: false, speed: 1, listening: false, furigana: false, sweep: true };
+  const SPEEDS = [0.75, 1, 1.25, 1.5];
+  const SYNC_PLAYING_MS = 1000;
+  const SYNC_PAUSED_MS = 5000;
+  const BROWSE_IDLE_MS = 3000;
+  const TOKENIZE_BATCH = 10;
+  const LINE_HOLD_S = 2.5; // a line stays up this long after it ends, then the space is empty
+  const DOUBLE_TAP_MS = 300;
+  const TOAST_MS = 2000;
+  // YT.PlayerState values, usable before the API has loaded.
+  const YT_ENDED = 0;
+  const YT_PLAYING = 1;
+  const YT_PAUSED = 2;
+  const YT_BUFFERING = 3;
+  const YT_CUED = 5;
+
+  const settings = { ...DEFAULTS, ...readJson(SETTINGS_KEY, {}) };
+  const S = L.STRINGS;
+  // With ?debug in the address: read-only numbers for checking the sweep from a console (which
+  // timing source each swept cue used, the clock it runs on). Nothing is exposed otherwise.
+  const debug = { sources: { words: 0, estimate: 0 }, lastSource: null };
+  if (new URLSearchParams(location.search).has("debug")) {
+    Object.defineProperty(debug, "t", { get: () => state.t });
+    window.portalDebug = debug;
+  }
+  if (!SPEEDS.includes(settings.speed)) settings.speed = 1;
+
+  const state = {
+    videoId: null,
+    startAt: 0,
+    player: null,
+    playerReady: false,
+    ytState: -1,
+    everPlayed: false,
+    pauseCause: null, // why we paused: "user" | "auto" | "sheet"; decides the scrim over the video
+    playing: false,
+    t: 0,
+    cues: [],
+    cueById: new Map(),
+    cueIndex: new Map(),
+    since: 0,
+    session: null,
+    syncData: null,
+    offline: false,
+    syncError: null,
+    syncInFlight: false,
+    lastSyncAt: 0,
+    tokens: new Map(),
+    tokenWanted: new Set(),
+    tokenizing: false,
+    activeIdx: -1,
+    focusKey: null,
+    focusPos: null,
+    trackBase: 0,
+    browse: { active: false, offset: 0, timer: null },
+    sweep: { cueId: null, spans: [], times: [], count: -1 },
+    clock: { raw: null, rawAt: 0, t: 0 },
+    gestureAt: 0,
+    backUntil: 0,
+    mediaDuration: null,
+    urlT: null,
+    lang: null,
+    info: null,
+    previewT: null,
+    cardSetup: null,
+    syncFailures: 0,
+    syncRetryAt: 0,
+    syncReceivedAt: 0,
+    tokenFailed: new Set(), // cues Yomitan could not tokenise: tappable per character meanwhile
+    wheelTimer: null,
+    autoPausedFor: null,
+    rowById: new Map(),
+    renderedCount: 0,
+    title: null,
+    lastSavedAt: 0,
+    lastShieldTap: null,
+    inDeck: new Map(), // term -> boolean, from /api/canadd
+    sheet: { open: false, pausedIt: false, cue: null, span: null, entries: [], pick: 0, def: null, seq: 0 },
+  };
+
+  function readJson(key, fallback) {
+    try {
+      const value = JSON.parse(localStorage.getItem(key));
+      return value ?? fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function saveSettings() {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  }
+
+  async function api(path, body) {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return answerOf(res);
+  }
+
+  async function getJSON(path) {
+    return answerOf(await fetch(path));
+  }
+
+  async function answerOf(res) {
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      data = null;
+    }
+    // This device was forgotten (lan mode): the page itself now asks to pair again.
+    if (res.status === 401 && data && data.pair) {
+      toast(S.notPaired);
+      setTimeout(() => location.reload(), 1500);
+    }
+    return { status: res.status, data };
+  }
+
+  function isJa() {
+    return L.isJapanese(state.lang);
+  }
+
+  // ------------------------------------------------------------ routing and home
+
+  async function route() {
+    applyStrings();
+    await loadInfo();
+    renderAnkiRow();
+    const params = new URLSearchParams(location.search);
+    const hash = new URLSearchParams(location.hash.slice(1));
+    const id = params.get("v") || hash.get("v");
+    if (id && L.VIDEO_ID_RE.test(id)) {
+      state.videoId = id;
+      const urlT = params.get("t") ?? hash.get("t");
+      state.urlT = urlT === null ? null : L.parseStart(urlT);
+      startWatch();
+    } else {
+      showHome();
+    }
+  }
+
+  function openVideo(text) {
+    const parsed = L.parseVideoInput(text);
+    if (!parsed) {
+      $("open-error").textContent = S.notALink;
+      $("open-error").hidden = false;
+      return false;
+    }
+    location.href = `?v=${encodeURIComponent(parsed.id)}${parsed.t ? `&t=${Math.floor(parsed.t)}` : ""}`;
+    return true;
+  }
+
+  function showHome() {
+    $("home").hidden = false;
+    $("watch").hidden = true;
+    const input = $("open-input");
+    $("open-form").addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      openVideo(input.value);
+    });
+    // Pasting a link is the whole task, so a paste opens it at once.
+    input.addEventListener("paste", () => setTimeout(() => {
+      if (L.parseVideoInput(input.value)) openVideo(input.value);
+    }, 0));
+    input.addEventListener("input", () => { $("open-error").hidden = true; });
+    // The clipboard API exists only in a secure context; over plain HTTP the field's own paste remains.
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      const paste = $("paste-btn");
+      paste.hidden = false;
+      paste.addEventListener("click", async () => {
+        try {
+          input.value = (await navigator.clipboard.readText()).trim();
+          openVideo(input.value);
+        } catch {
+          input.focus();
+        }
+      });
+    }
+    $("edit-btn").addEventListener("click", () => {
+      const editing = !$("home").classList.contains("editing");
+      $("home").classList.toggle("editing", editing);
+      $("edit-btn").textContent = editing ? "Done" : "Edit";
+    });
+    bindAnkiSetup();
+    renderSetupHints();
+    renderRecent(recentList()); // the local copy at once; the server's list replaces it
+    migrateLocal().then(loadRecent);
+    // Back from a video restores this page from the back-forward cache: refresh the positions.
+    window.addEventListener("pageshow", (ev) => { if (ev.persisted) loadRecent(); });
+  }
+
+  // The device's old local list, moved into the shared server list once.
+  async function migrateLocal() {
+    if (localStorage.getItem("portal.migrated")) return;
+    const items = recentList();
+    try {
+      const res = await api("/api/positions/import", { items });
+      if (res.status === 200) localStorage.setItem("portal.migrated", "1");
+    } catch {
+      // offline: try again next time
+    }
+  }
+
+  async function loadRecent() {
+    try {
+      const res = await fetch("/api/positions");
+      const data = await res.json();
+      if (!data.ok) return;
+      // Kept locally as the offline fallback.
+      localStorage.setItem(RECENT_KEY, JSON.stringify(data.videos.slice(0, 30).map((v) => ({ id: v.id, title: v.title || "", t: v.t, duration: v.duration, at: v.updated }))));
+      renderRecent(data.videos);
+    } catch {
+      // offline: the local list stays
+    }
+  }
+
+  function recentList() {
+    const list = readJson(RECENT_KEY, []);
+    return Array.isArray(list) ? list.filter((r) => r && L.VIDEO_ID_RE.test(r.id)) : [];
+  }
+
+  function remember() {
+    const list = recentList().filter((r) => r.id !== state.videoId);
+    list.unshift({ id: state.videoId, title: state.title || "", t: Math.floor(state.t), duration: playerDuration(), at: Date.now() });
+    localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, 30)));
+  }
+
+  // Thumbnails come through the portal (cached on the PC); i.ytimg.com is the fallback chain.
+  function thumbImage(id) {
+    const img = document.createElement("img");
+    img.alt = "";
+    const chain = [`/api/thumb/${id}`, `https://i.ytimg.com/vi/${id}/mqdefault.jpg`, `https://i.ytimg.com/vi/${id}/hqdefault.jpg`, `https://i.ytimg.com/vi/${id}/default.jpg`];
+    let at = 0;
+    img.addEventListener("error", () => { if (++at < chain.length) img.src = chain[at]; });
+    img.src = chain[0];
+    return img;
+  }
+
+  function renderRecent(list) {
+    const ul = $("recent");
+    ul.replaceChildren();
+    $("recent-empty").hidden = list.length > 0;
+    $("edit-btn").hidden = !list.length;
+    for (const r of list) {
+      const li = document.createElement("li");
+      const a = document.createElement("a");
+      a.href = `?v=${encodeURIComponent(r.id)}`;
+      const thumb = document.createElement("div");
+      thumb.className = "thumb";
+      thumb.append(thumbImage(r.id));
+      const fraction = L.watchedFraction(r);
+      if (fraction > 0) {
+        const bar = document.createElement("div");
+        bar.className = "progress";
+        const fill = document.createElement("span");
+        fill.style.width = `${(fraction * 100).toFixed(1)}%`;
+        bar.append(fill);
+        thumb.append(bar);
+      }
+      const title = document.createElement("div");
+      title.className = "title";
+      title.textContent = r.title || r.id;
+      a.append(thumb, title);
+      const remove = document.createElement("button");
+      remove.className = "remove";
+      remove.setAttribute("aria-label", S.removeVideo(r.title || r.id));
+      remove.addEventListener("click", async () => {
+        li.remove();
+        localStorage.setItem(RECENT_KEY, JSON.stringify(recentList().filter((x) => x.id !== r.id)));
+        try {
+          await api("/api/position/delete", { video_id: r.id });
+        } catch {
+          // gone locally; the server copy goes next time
+        }
+      });
+      li.append(remove, a);
+      ul.append(li);
+    }
+  }
+
+  // ------------------------------------------------------------ positions
+
+  function playerDuration() {
+    const d = state.player && state.player.getDuration ? state.player.getDuration() : 0;
+    return Number.isFinite(d) && d > 0 ? d : state.mediaDuration || null;
+  }
+
+  // Saved on the PC (shared by every device) and locally. keepalive lets it outlive a page that is
+  // being hidden or left.
+  function savePosition() {
+    if (!state.videoId || !state.playerReady || !state.everPlayed) return; // never overwrite with an unplayed 0
+    const t = state.player.getCurrentTime();
+    if (!Number.isFinite(t)) return;
+    state.t = t;
+    remember();
+    fetch("/api/position", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ video_id: state.videoId, t, duration: playerDuration(), title: state.title || null }),
+      keepalive: true,
+    }).catch(() => {});
+  }
+
+  function goHome() {
+    savePosition();
+    const ref = document.referrer ? new URL(document.referrer) : null;
+    // Came from the home page: going back pops that entry (and swipe-back keeps working).
+    if (ref && ref.origin === location.origin && !ref.searchParams.get("v") && history.length > 1) history.back();
+    else location.href = "./";
+  }
+
+  // ------------------------------------------------------------ player
+
+  async function startWatch() {
+    $("home").hidden = true;
+    $("watch").hidden = false;
+    $("shield").style.setProperty("--poster", `url("/api/thumb/${state.videoId}")`);
+    renderPlayState();
+    applySettings();
+    bindWatch();
+    bindScrubber();
+    bindSheet();
+    bindSettings();
+    setInterval(tick, 250);
+    requestAnimationFrame(frame);
+    sync();
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") savePosition(); });
+    window.addEventListener("pagehide", savePosition);
+
+    // Where to start first (a local file on the PC: milliseconds), then the stream, which the PC
+    // resolves and pre-fetches at exactly that point.
+    const saved = await fetch(`/api/position?video_id=${state.videoId}`).then((r) => r.json()).then((d) => d.position)
+      .catch(() => recentList().find((r) => r.id === state.videoId) || null);
+    state.startAt = L.resumeTime({ saved, duration: null, urlT: state.urlT });
+    const media = await fetch(`/api/media?video_id=${state.videoId}&t=${Math.floor(state.startAt)}`).then((r) => r.json())
+      .catch(() => ({ kind: "youtube", reason: "media endpoint unreachable" }));
+    state.mediaDuration = media.duration || null;
+    // The near-end rule needs the duration, which only the stream knew.
+    state.startAt = L.resumeTime({ saved, duration: media.duration, urlT: state.urlT });
+    if (media.kind === "hls" && document.createElement("video").canPlayType("application/vnd.apple.mpegurl")) {
+      state.player = createNativePlayer(media.url);
+      state.playerReady = true;
+    } else {
+      useYouTube(media.reason || "this browser plays no HLS");
+    }
+  }
+
+  // The same handful of methods as YouTube's player (playVideo, pauseVideo, seekTo,
+  // getCurrentTime, getDuration, get/setPlaybackRate, getPlayerState) over our own <video>, so
+  // sync, the sweep, auto-pause, mining and gestures never ask which one is playing.
+  function createNativePlayer(src) {
+    const video = document.createElement("video");
+    video.id = "player";
+    for (const name of ["playsinline", "webkit-playsinline", "disablepictureinpicture", "disableremoteplayback"]) video.setAttribute(name, "");
+    video.setAttribute("x-webkit-airplay", "deny");
+    video.playsInline = true;
+    video.disablePictureInPicture = true;
+    if ("disableRemotePlayback" in video) video.disableRemotePlayback = true;
+    video.preload = "auto";
+    video.poster = `/api/thumb/${state.videoId}`;
+    let pendingSeek = state.startAt > 0 ? state.startAt : null;
+    let lastState = -1;
+    // The time of the frame on screen, from requestVideoFrameCallback where there is one.
+    let shown = null;
+    const onFrame = (now, meta) => {
+      shown = { mediaTime: meta.mediaTime, at: now };
+      video.requestVideoFrameCallback(onFrame);
+    };
+    if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(onFrame);
+    const emit = (s) => {
+      lastState = s;
+      onPlayerState(s);
+    };
+    video.addEventListener("loadedmetadata", () => {
+      if (pendingSeek !== null) video.currentTime = pendingSeek;
+      pendingSeek = null;
+    });
+    video.addEventListener("playing", () => emit(YT_PLAYING));
+    video.addEventListener("pause", () => emit(YT_PAUSED));
+    video.addEventListener("waiting", () => { if (!video.paused) emit(YT_BUFFERING); });
+    video.addEventListener("ended", () => emit(YT_ENDED));
+    video.addEventListener("seeked", () => { shown = null; });
+    video.addEventListener("error", () => useYouTube(`stream error ${video.error ? video.error.code : "?"}`));
+    video.src = src;
+    $("player").replaceWith(video);
+    return {
+      kind: "native",
+      video,
+      playVideo() {
+        const p = video.play();
+        if (p && p.catch) p.catch((err) => console.log("video.play() refused:", err.name));
+      },
+      pauseVideo() { video.pause(); },
+      seekTo(t) {
+        shown = null;
+        if (video.readyState >= 1) video.currentTime = t;
+        else pendingSeek = t;
+      },
+      getCurrentTime() {
+        if (pendingSeek !== null) return pendingSeek;
+        if (shown && !video.paused) return shown.mediaTime + ((performance.now() - shown.at) / 1000) * video.playbackRate;
+        return video.currentTime;
+      },
+      getDuration() { return Number.isFinite(video.duration) ? video.duration : state.mediaDuration || 0; },
+      setPlaybackRate(r) { video.playbackRate = r; },
+      getPlaybackRate() { return video.playbackRate; },
+      getPlayerState() {
+        if (video.ended) return YT_ENDED;
+        if (video.paused) return lastState === -1 ? -1 : YT_PAUSED;
+        return video.readyState < 3 ? YT_BUFFERING : YT_PLAYING;
+      },
+      destroy() {
+        video.removeAttribute("src");
+        video.load();
+      },
+    };
+  }
+
+  // YouTube's own player: live streams, a stream we cannot resolve, a browser without HLS.
+  function useYouTube(reason) {
+    if (state.player && state.player.kind === "youtube") return;
+    console.log("using YouTube's player:", reason);
+    if (state.player) {
+      state.startAt = state.everPlayed ? state.player.getCurrentTime() : state.startAt;
+      state.player.destroy();
+      const div = document.createElement("div");
+      div.id = "player";
+      $("player").replaceWith(div);
+    }
+    state.player = null;
+    state.playerReady = false;
+    state.everPlayed = false;
+    state.ytState = -1;
+    $("player-note").hidden = false;
+    renderPlayState();
+    window.onYouTubeIframeAPIReady = createYouTubePlayer;
+    if (window.YT && window.YT.Player) createYouTubePlayer();
+    else {
+      const script = document.createElement("script");
+      script.src = "https://www.youtube.com/iframe_api";
+      document.head.append(script);
+    }
+  }
+
+  function createYouTubePlayer() {
+    const yt = new YT.Player("player", {
+      videoId: state.videoId,
+      // Our toolbar replaces YouTube's controls; nothing of YouTube's UI should ever show.
+      playerVars: {
+        controls: 0,
+        rel: 0,
+        iv_load_policy: 3,
+        disablekb: 1,
+        fs: 0,
+        playsinline: 1,
+        modestbranding: 1,
+        cc_load_policy: 0,
+        start: Math.floor(state.startAt || 0),
+        origin: location.origin,
+      },
+      events: {
+        onReady: () => {
+          state.playerReady = true;
+          yt.setPlaybackRate(settings.speed);
+          if (state.startAt) yt.seekTo(state.startAt, true); // start= takes whole seconds only
+        },
+        onStateChange: (ev) => onPlayerState(ev.data),
+      },
+    });
+    yt.kind = "youtube";
+    yt.destroy = yt.destroy.bind(yt);
+    state.player = yt;
+  }
+
+  function onPlayerState(s) {
+    state.ytState = s;
+    state.playing = s === YT_PLAYING || s === YT_BUFFERING;
+    if (s === YT_PLAYING) {
+      state.pauseCause = null;
+      state.everPlayed = true;
+      state.player.setPlaybackRate(settings.speed);
+    }
+    if (s === YT_PAUSED || s === YT_ENDED) savePosition();
+    renderPlayState();
+    updateVeil();
+    sync();
+  }
+
+  // Must run synchronously inside the tap handler that wants playback: iOS allows an unmuted
+  // play only within a user gesture's call stack, so no await, timer or animation callback may
+  // come between the tap and this call.
+  function play() {
+    if (!state.playerReady) return;
+    state.player.playVideo();
+    setTimeout(() => {
+      const ytState = state.player.getPlayerState();
+      console.log("play() -> player state after 500 ms:", ytState);
+      // The glyph follows the player, never what was asked: re-read it in case an event was missed.
+      state.ytState = ytState;
+      state.playing = ytState === YT_PLAYING || ytState === YT_BUFFERING;
+      if (!state.playing) state.pauseCause = "user"; // refused or stalled: our scrim with a play glyph
+      renderPlayState();
+    }, 500);
+  }
+
+  function pause(cause) {
+    if (!state.playerReady) return;
+    state.pauseCause = cause;
+    state.player.pauseVideo();
+    renderPlayState();
+  }
+
+  function seek(t, andPlay) {
+    if (!state.playerReady) return;
+    state.autoPausedFor = null;
+    state.player.seekTo(Math.max(0, t), true);
+    state.t = Math.max(0, t);
+    state.clock.t = state.t;
+    state.clock.raw = null;
+    state.sweep.count = -1;
+    if (andPlay) play();
+    sync();
+    savePosition();
+  }
+
+  function renderPlayState() {
+    const button = $("btn-play");
+    button.classList.toggle("playing", state.playing);
+    button.setAttribute("aria-label", state.playing ? S.pause : S.play);
+    const shield = $("shield");
+    let look = "";
+    if (!state.everPlayed) {
+      // Before the first play: our poster. With YouTube's player it lets the tap through, since iOS
+      // may only start that playback from a tap on YouTube's own frame; our own <video> starts from
+      // the shield's tap (video.play() inside the gesture).
+      look = state.player && state.player.kind === "youtube" ? "ended poster passthrough" : "ended poster";
+    } else if (state.ytState === YT_ENDED || state.ytState === YT_CUED || state.ytState === -1) {
+      look = "ended";
+    } else if (state.ytState === YT_PAUSED) {
+      look = state.pauseCause === "auto" || state.pauseCause === "sheet" ? "dim" : "paused";
+    }
+    shield.className = `shield ${look}`.trim();
+    renderBack();
+  }
+
+  // The way home over the video: with the paused scrim, and for 3 s after any tap on the video.
+  function renderBack() {
+    const show = state.ytState === YT_PAUSED || state.ytState === YT_ENDED || Date.now() < state.backUntil;
+    document.querySelector(".player-box").classList.toggle("show-back", show);
+  }
+
+  // ------------------------------------------------------------ /sync
+
+  async function sync() {
+    if (state.syncInFlight || !state.videoId) return;
+    state.syncInFlight = true;
+    state.lastSyncAt = Date.now();
+    let res;
+    try {
+      res = await api("/api/sync", { video_id: state.videoId, t: state.t, since: state.since, paused: !state.playing });
+    } catch {
+      res = null;
+    } finally {
+      state.syncInFlight = false;
+    }
+    if (!res || res.status !== 200 || !res.data || !res.data.ok) {
+      // Network down, the portal or the server restarting, a 5xx: back off 1, 2, 4 … 15 s and keep
+      // trying. The heartbeat never stops; the next success resets it.
+      state.syncFailures += 1;
+      state.syncRetryAt = Date.now() + L.backoffDelay(state.syncFailures - 1, L.SCHEDULES.sync);
+      state.offline = true;
+      state.syncError = (res && res.data && res.data.error) || (res ? `HTTP ${res.status}` : "network");
+      renderServerStatus();
+      return;
+    }
+    state.syncFailures = 0;
+    state.offline = false;
+    state.syncError = null;
+    state.syncReceivedAt = Date.now();
+    const data = res.data;
+    if (typeof data.session === "string" && data.session !== state.session) {
+      const restarted = state.session !== null;
+      state.session = data.session;
+      if (restarted) {
+        // A fresh server session numbers its cues from 0 again: start the transcript over.
+        resetCues();
+        state.syncData = data;
+        sync();
+        return;
+      }
+    }
+    state.syncData = data;
+    if (data.title && data.title !== state.title) {
+      state.title = data.title;
+      document.title = data.title;
+      remember();
+    }
+    if (Array.isArray(data.cues) && data.cues.length) mergeCues(data.cues);
+    if (typeof data.next === "number") state.since = data.next;
+    renderServerStatus();
+  }
+
+  function renderServerStatus() {
+    const { text } = L.statusText({ offline: state.offline, error: state.syncError, data: state.syncData, t: state.t, cueCount: state.cues.length });
+    if ($("set-status").textContent !== text) $("set-status").textContent = text;
+  }
+
+  function resetCues() {
+    state.cues = [];
+    state.cueById.clear();
+    state.cueIndex.clear();
+    state.tokens.clear();
+    state.tokenWanted.clear();
+    state.since = 0;
+    state.activeIdx = -1;
+    state.rowById.clear();
+    state.renderedCount = 0;
+    state.focusKey = null;
+    state.focusPos = null;
+    state.sweep.cueId = null;
+    $("lyrics-track").replaceChildren();
+  }
+
+  function mergeCues(incoming) {
+    let added = false;
+    let inOrder = true;
+    let lastStart = state.cues.length ? state.cues[state.cues.length - 1].start : -Infinity;
+    for (const raw of incoming) {
+      if (!raw || typeof raw.text !== "string") continue;
+      const cue = { id: Number(raw.id), start: Number(raw.start), end: Number(raw.end), text: raw.text.trim() };
+      if (!cue.text || !Number.isFinite(cue.id) || state.cueById.has(cue.id)) continue;
+      if (!Number.isFinite(cue.start) || !Number.isFinite(cue.end) || cue.end < cue.start) continue;
+      // Real word times, should the server ever send them, replace the estimate (lib.js unitTimes).
+      if (Array.isArray(raw.words)) cue.words = raw.words.map((w) => ({ start: Number(w.start), end: Number(w.end), text: String(w.text || "") }));
+      if (cue.start <= lastStart) inOrder = false;
+      lastStart = cue.start;
+      state.cueById.set(cue.id, cue);
+      state.cues.push(cue);
+      state.tokenWanted.add(cue.id);
+      added = true;
+    }
+    if (!added) return;
+    if (!inOrder) {
+      state.cues.sort((a, b) => a.start - b.start || a.end - b.end);
+      state.renderedCount = 0;
+      state.rowById.clear();
+      state.focusPos = null; // every row is new: restyle them all
+      $("lyrics-track").replaceChildren();
+    }
+    state.cueIndex.clear();
+    state.cues.forEach((c, i) => state.cueIndex.set(c.id, i));
+    state.activeIdx = L.activeCueIndex(state.cues, state.t);
+    renderRows();
+    state.focusKey = null; // re-place and restyle on the next frame
+    pumpTokens();
+  }
+
+  // ------------------------------------------------------------ tokens
+
+  // Tokenise the cues nearest the playhead first, a batch at a time, one request in flight.
+  async function pumpTokens() {
+    if (state.tokenizing || !state.tokenWanted.size) return;
+    state.tokenizing = true;
+    try {
+      while (state.tokenWanted.size) {
+        const near = Math.max(0, state.activeIdx);
+        const batch = [...state.tokenWanted]
+          .map((id) => state.cueById.get(id))
+          .filter(Boolean)
+          .sort((a, b) => Math.abs(state.cueIndex.get(a.id) - near) - Math.abs(state.cueIndex.get(b.id) - near))
+          .slice(0, TOKENIZE_BATCH);
+        if (!batch.length) {
+          state.tokenWanted.clear();
+          break;
+        }
+        const res = await L.withRetry(() => api("/api/tokenize", { texts: batch.map((c) => c.text.slice(0, 300)) }), L.SCHEDULES.lookup);
+        if (res.status !== 200 || !res.data || !res.data.ok) {
+          // Yomitan unreachable (Firefox closed?) after the retries: these lines become tappable per
+          // character (a tap scans forward from there, as Yomitan does); tokenising resumes later.
+          for (const cue of batch) {
+            if (state.tokenFailed.has(cue.id)) continue;
+            state.tokenFailed.add(cue.id);
+            // Without Yomitan, a language with spaces between words still splits into words.
+            if (!isJa()) state.tokens.set(cue.id, L.tokenOffsets(L.segmentWords(cue.text, state.lang)));
+            const row = state.rowById.get(cue.id);
+            if (row) fillCue(row, cue);
+          }
+          setTimeout(pumpTokens, 10000);
+          break;
+        }
+        let refocus = false;
+        batch.forEach((cue, i) => {
+          state.tokenWanted.delete(cue.id);
+          let tokens = res.data.tokens[i];
+          if (!Array.isArray(tokens)) return;
+          // Yomitan answers a language it has no dictionaries for with no words: split it ourselves.
+          if (!L.tokensUseful(tokens)) tokens = L.segmentWords(cue.text.slice(0, 300), state.lang);
+          const withOffsets = L.tokenOffsets(tokens);
+          // Offsets index the cue text, so a reply that does not add up to it is not used.
+          if (withOffsets.map((t) => t.text).join("") !== cue.text.slice(0, 300)) return;
+          state.tokens.set(cue.id, withOffsets);
+          state.tokenFailed.delete(cue.id);
+          const row = state.rowById.get(cue.id);
+          if (row) {
+            fillCue(row, cue);
+            refocus = true;
+          }
+        });
+        // Furigana can change a row's height; place the list again (one layout read per batch).
+        if (refocus && settings.furigana) state.focusKey = null;
+      }
+    } finally {
+      state.tokenizing = false;
+    }
+  }
+
+  // ------------------------------------------------------------ the subtitle list
+
+  function renderRows() {
+    const track = $("lyrics-track");
+    for (let i = state.renderedCount; i < state.cues.length; i++) {
+      const cue = state.cues[i];
+      const row = document.createElement("div");
+      row.className = "cue future";
+      row.dataset.cue = String(cue.id);
+      fillCue(row, cue);
+      track.append(row);
+      state.rowById.set(cue.id, row);
+    }
+    state.renderedCount = state.cues.length;
+  }
+
+  // A cue's text as one span per unit (a Yomitan token, or a character until tokens arrive), so the
+  // sweep can light units one by one. Units with a headword are tappable words. Every piece goes in
+  // as a text node; no markup from the server is parsed here.
+  function fillCue(row, cue) {
+    row.replaceChildren();
+    const ruby = settings.furigana && isJa();
+    row.classList.toggle("furigana", ruby);
+    const scan = !state.tokens.has(cue.id) && state.tokenFailed.has(cue.id);
+    for (const unit of L.cueUnits(cue.text, state.tokens.get(cue.id))) {
+      if (scan && L.hasKanji(unit.text) || scan && /[ぁ-ゖァ-ヺ]/.test(unit.text)) unit.term = "?"; // a scan start
+      // A break opportunity before every unit but punctuation, which stays with the word before it.
+      if (row.childNodes.length && !/^[、。，．,.!?！？…‥」』）)]/.test(unit.text)) row.append(document.createElement("wbr"));
+      const span = document.createElement("span");
+      span.className = unit.term ? "tok word" : "tok";
+      if (unit.term === "?") span.dataset.scan = "1";
+      span.dataset.start = String(unit.start);
+      span.dataset.end = String(unit.end);
+      for (const [text, reading] of unit.segs) {
+        if (ruby && reading && L.hasKanji(text)) {
+          const ruby = document.createElement("ruby");
+          ruby.append(text);
+          const rt = document.createElement("rt");
+          rt.textContent = reading;
+          ruby.append(rt);
+          span.append(ruby);
+        } else {
+          span.append(text);
+        }
+      }
+      row.append(span);
+    }
+    if (state.sweep.cueId === cue.id) state.sweep.cueId = null; // its spans are new: set up again
+  }
+
+  // Where the list is centred, as a cue index: the cue being said, the looked-up cue while the sheet
+  // is open, or half a step after the last cue when the status takes the centre slot.
+  function currentFocus() {
+    if (state.sheet.open) return { pos: state.cueIndex.get(state.sheet.cue.id) ?? -1, status: null };
+    if (state.previewT !== null) return { pos: L.activeCueIndex(state.cues, state.previewT), status: null };
+    const idx = state.activeIdx;
+    const cue = state.cues[idx];
+    const live = cue && state.t <= cue.end + LINE_HOLD_S;
+    const status = live ? null : L.watchStatus({ offline: state.offline, error: state.syncError, data: state.syncData, t: state.t, receivedAt: state.syncReceivedAt, now: Date.now() });
+    return { pos: status ? idx + 0.5 : idx, status };
+  }
+
+  // Restyle the cues around the focus and glide the list so the focus sits at the centre point.
+  // Runs only when the focus changes (or the sheet resizes): one layout read, then transforms.
+  function applyFocus(focus) {
+    const old = state.focusPos;
+    state.focusPos = focus.pos;
+    const lo = Math.max(0, Math.floor(Math.min(old ?? focus.pos, focus.pos)) - 3);
+    const hi = Math.min(state.cues.length - 1, Math.ceil(Math.max(old ?? focus.pos, focus.pos)) + 3);
+    const touched = old === null ? [0, state.cues.length - 1] : [lo, hi];
+    for (let i = touched[0]; i <= touched[1]; i++) styleRow(i, focus.pos);
+
+    const status = $("lyrics-status");
+    status.hidden = !focus.status;
+    if (focus.status) {
+      status.replaceChildren();
+      if (focus.status.busy) {
+        const spin = document.createElement("span");
+        spin.className = "spinner";
+        status.append(spin);
+      }
+      status.append(focus.status.text);
+    }
+    placeTrack();
+    updateVeil();
+  }
+
+  function styleRow(i, pos) {
+    const cue = state.cues[i];
+    const row = cue && state.rowById.get(cue.id);
+    if (!row) return;
+    const dist = Math.ceil(Math.abs(i - pos) - 1e-6);
+    if (dist <= 2) row.dataset.d = String(dist);
+    else delete row.dataset.d;
+    row.classList.toggle("past", i < pos);
+    row.classList.toggle("active", i === pos);
+    row.classList.toggle("future", i > pos);
+    row.classList.toggle("nosweep", i === pos && !settings.sweep);
+  }
+
+  // The centre point: the middle of the list, or of the room left above the dictionary sheet.
+  function focusY() {
+    const box = $("lyrics");
+    // The scrubber covers the list's faded bottom edge: centre in what is left above it.
+    if (!state.sheet.open) return (box.clientHeight - $("scrubber").offsetHeight) / 2;
+    const sheetTop = window.innerHeight - $("sheet").offsetHeight;
+    const room = sheetTop - box.getBoundingClientRect().top;
+    return Math.max(40, Math.min(box.clientHeight / 2, room / 2));
+  }
+
+  function placeTrack() {
+    const pos = state.focusPos;
+    const centre = focusY();
+    let anchor = 0;
+    const whole = Number.isInteger(pos);
+    const row = pos >= 0 ? state.rowById.get(state.cues[Math.floor(pos)]?.id) : null;
+    if (row && whole) anchor = row.offsetTop + row.offsetHeight / 2;
+    else if (row) anchor = row.offsetTop + row.offsetHeight + 40; // the status slot after the last cue
+    else anchor = -40; // nothing said yet: the first cue waits just below the centre
+    state.trackBase = centre - anchor;
+    $("lyrics-status").style.top = `${centre}px`;
+    setTrack();
+  }
+
+  function setTrack() {
+    const track = $("lyrics-track");
+    if (state.browse.active) {
+      // Browsing stops at the ends of the list.
+      const min = focusY() - track.offsetHeight;
+      const max = focusY();
+      state.browse.offset = Math.min(max - state.trackBase, Math.max(min - state.trackBase, state.browse.offset));
+    }
+    track.style.transform = `translateY(${Math.round(state.trackBase + state.browse.offset)}px)`;
+  }
+
+  // The word sweep inside the cue being said: units turn white as their (estimated) time comes.
+  // Touches the DOM only when the count of spoken units changes.
+  function sweep(t) {
+    const pos = state.focusPos;
+    if (!settings.sweep || state.sheet.open || !Number.isInteger(pos) || pos < 0) return;
+    const cue = state.cues[pos];
+    const sw = state.sweep;
+    if (sw.cueId !== cue.id) {
+      const row = state.rowById.get(cue.id);
+      if (!row) return;
+      sw.cueId = cue.id;
+      sw.spans = [...row.querySelectorAll(".tok")];
+      sw.times = L.unitTimes(cue, L.cueUnits(cue.text, state.tokens.get(cue.id)), state.lang);
+      sw.count = -1;
+      debug.sources[cue.words && cue.words.length ? "words" : "estimate"] += 1;
+      debug.lastSource = cue.words && cue.words.length ? "words" : "estimate";
+    }
+    const n = L.spokenCount(sw.times, t);
+    if (n === sw.count) return;
+    const from = Math.max(0, Math.min(n, sw.count < 0 ? 0 : sw.count) - 1);
+    const to = sw.count < 0 ? sw.spans.length : Math.min(sw.spans.length, Math.max(n, sw.count) + 1);
+    for (let i = from; i < to; i++) {
+      sw.spans[i].classList.toggle("spoken", i < n);
+      sw.spans[i].classList.toggle("now", i === n - 1);
+    }
+    sw.count = n;
+  }
+
+  // Listening mode: the cue being said and the ones after it stay hidden while the video plays.
+  function updateVeil() {
+    $("lyrics").classList.toggle("veiled", settings.listening && state.playing && !state.sheet.open);
+    $("lyrics").classList.toggle("sheet-open", state.sheet.open);
+  }
+
+  // ---- browsing the list by hand
+
+  function enterBrowse() {
+    if (state.browse.active) return;
+    state.browse.active = true;
+    state.browse.offset = 0;
+    $("lyrics").classList.add("browsing");
+    $("back-to-now").hidden = false;
+  }
+
+  function exitBrowse() {
+    clearTimeout(state.browse.timer);
+    if (!state.browse.active) return;
+    state.browse.active = false;
+    state.browse.offset = 0;
+    $("lyrics").classList.remove("browsing", "dragging");
+    $("back-to-now").hidden = true;
+    setTrack();
+  }
+
+  function browseIdle() {
+    clearTimeout(state.browse.timer);
+    state.browse.timer = setTimeout(exitBrowse, BROWSE_IDLE_MS);
+  }
+
+  // ------------------------------------------------------------ the clock and the frame loop
+
+  // YouTube's API reports the time in steps of a few hundred milliseconds; between reports the clock
+  // runs on at the playback rate, so the sweep moves smoothly. A seek shows up as a jump and resets it.
+  function smoothTime(now) {
+    const c = state.clock;
+    if (!state.playerReady || !state.player) return state.startAt || 0;
+    const raw = state.player.getCurrentTime();
+    if (!Number.isFinite(raw)) return c.t;
+    if (state.player.kind === "native") return (c.t = raw); // exact already (frame callback + currentTime)
+    if (raw !== c.raw) {
+      c.raw = raw;
+      c.rawAt = now;
+    }
+    let t = raw;
+    if (state.playing) {
+      t = raw + Math.min(1, ((now - c.rawAt) / 1000) * (state.player.getPlaybackRate() || 1));
+      if (t < c.t && c.t - t < 0.3) t = c.t; // no small steps backwards between reports
+    }
+    c.t = t;
+    return t;
+  }
+
+  function frame(now) {
+    state.t = smoothTime(now);
+    const idx = L.activeCueIndex(state.cues, state.t);
+    const cue = idx >= 0 ? state.cues[idx] : null;
+    // Auto-pause: once at the end of each line, never again for the same line.
+    if (settings.autoPause && state.playing && cue && !state.sheet.open &&
+        state.t >= cue.end - 0.08 && state.t < cue.end + 0.6 && state.autoPausedFor !== cue.id) {
+      state.autoPausedFor = cue.id;
+      pause("auto");
+    }
+    state.activeIdx = idx;
+    const focus = currentFocus();
+    const key = `${focus.pos}|${focus.status ? focus.status.text : ""}|${state.sheet.open}`;
+    if (key !== state.focusKey) {
+      state.focusKey = key;
+      applyFocus(focus);
+    }
+    sweep(state.t);
+    renderScrubber(state.t);
+    requestAnimationFrame(frame);
+  }
+
+  // Server sync, the resume point: no need to run every frame.
+  function tick() {
+    renderBuffered();
+    if (state.syncFailures) {
+      if (Date.now() >= state.syncRetryAt) sync();
+    } else {
+      // An errored session keeps being heartbeated too: the server retries on a later sync.
+      const due = state.playing ? SYNC_PLAYING_MS : SYNC_PAUSED_MS;
+      if (Date.now() - state.lastSyncAt >= due) sync();
+    }
+    if (state.playing && Date.now() - state.lastSavedAt > 5000) {
+      state.lastSavedAt = Date.now();
+      savePosition();
+    }
+  }
+
+  // ------------------------------------------------------------ line navigation
+
+  function stepLine(delta) {
+    if (!state.cues.length) return;
+    // Back always means the line before, wherever the playhead sits in this one (as in the extension).
+    const target = state.cues[Math.min(state.cues.length - 1, Math.max(0, state.activeIdx + delta))];
+    if (target) seek(target.start, true);
+  }
+
+  function replayLine() {
+    const cue = state.cues[state.activeIdx];
+    if (cue) seek(cue.start, true);
+  }
+
+  function togglePlay() {
+    if (state.playing) {
+      pause("user");
+    } else {
+      state.autoPausedFor = state.cues[state.activeIdx] ? state.cues[state.activeIdx].id : null;
+      play();
+    }
+  }
+
+  // ------------------------------------------------------------ watch view input
+
+  function bindWatch() {
+    $("btn-prev").addEventListener("click", () => stepLine(-1));
+    $("btn-next").addEventListener("click", () => stepLine(1));
+    $("btn-replay").addEventListener("click", replayLine);
+    $("btn-play").addEventListener("click", togglePlay);
+    $("btn-settings").addEventListener("click", openSettings);
+    $("back-to-now").addEventListener("click", exitBrowse);
+    $("btn-home").addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      goHome();
+    });
+
+    // The shield over the video: a tap toggles play; a quick second tap on the left or right third
+    // steps a line back or forward (and plays). Both act inside the tap itself.
+    $("shield").addEventListener("click", (ev) => {
+      const box = ev.currentTarget.getBoundingClientRect();
+      const x = (ev.clientX - box.left) / box.width;
+      const zone = x < 1 / 3 ? "left" : x > 2 / 3 ? "right" : "middle";
+      const last = state.lastShieldTap;
+      const now = Date.now();
+      if (last && now - last.at < DOUBLE_TAP_MS && last.zone === zone && zone !== "middle") {
+        state.lastShieldTap = null;
+        stepLine(zone === "left" ? -1 : 1);
+        return;
+      }
+      state.lastShieldTap = { at: now, zone };
+      state.backUntil = now + 3000;
+      setTimeout(renderBack, 3050);
+      togglePlay();
+    });
+
+    const lyrics = $("lyrics");
+    // A word in any cue opens the sheet; a tap elsewhere on a cue that is not the focus seeks there.
+    lyrics.addEventListener("click", (ev) => {
+      if (Date.now() - state.gestureAt < 400) return; // the end of a drag or swipe, not a tap
+      const row = ev.target.closest(".cue");
+      if (!row) return;
+      const cue = state.cueById.get(Number(row.dataset.cue));
+      if (!cue) return;
+      const word = ev.target.closest(".word");
+      if (word) {
+        openSheet(cue, [Number(word.dataset.start), Number(word.dataset.end)], !!word.dataset.scan);
+      } else if (!row.classList.contains("active")) {
+        exitBrowse();
+        seek(cue.start, state.playing || state.pauseCause !== "user");
+      }
+    });
+
+    // A vertical drag browses the list; a horizontal swipe steps a line.
+    let touch = null;
+    lyrics.addEventListener("touchstart", (ev) => {
+      const p = ev.touches[0];
+      touch = { x: p.clientX, y: p.clientY, axis: null, offset: state.browse.offset };
+    }, { passive: true });
+    lyrics.addEventListener("touchmove", (ev) => {
+      if (!touch) return;
+      const p = ev.touches[0];
+      const dx = p.clientX - touch.x;
+      const dy = p.clientY - touch.y;
+      if (!touch.axis && Math.max(Math.abs(dx), Math.abs(dy)) > 8) touch.axis = Math.abs(dy) > Math.abs(dx) ? "y" : "x";
+      if (touch.axis === "y" && !state.sheet.open) {
+        if (!state.browse.active) {
+          enterBrowse();
+          touch.offset = 0;
+        }
+        lyrics.classList.add("dragging");
+        state.browse.offset = touch.offset + dy;
+        setTrack();
+        clearTimeout(state.browse.timer);
+      }
+      if (touch.axis) ev.preventDefault();
+    }, { passive: false });
+    lyrics.addEventListener("touchend", (ev) => {
+      if (!touch) return;
+      const p = ev.changedTouches[0];
+      const dx = p.clientX - touch.x;
+      const { axis } = touch;
+      touch = null;
+      lyrics.classList.remove("dragging");
+      if (axis) state.gestureAt = Date.now();
+      if (axis === "y" && state.browse.active) browseIdle();
+      if (axis === "x" && Math.abs(dx) > 60 && !state.sheet.open) stepLine(dx < 0 ? 1 : -1);
+    }, { passive: true });
+    lyrics.addEventListener("wheel", (ev) => {
+      if (state.sheet.open) return;
+      ev.preventDefault();
+      enterBrowse();
+      lyrics.classList.add("dragging");
+      state.browse.offset -= ev.deltaY;
+      setTrack();
+      clearTimeout(state.wheelTimer);
+      state.wheelTimer = setTimeout(() => lyrics.classList.remove("dragging"), 120);
+      browseIdle();
+    }, { passive: false });
+
+    window.addEventListener("resize", () => { state.focusKey = null; });
+  }
+
+  // ------------------------------------------------------------ the word sheet
+
+  // Content-sized, but always leaving room above it for the tapped cue.
+  function capSheet(cue) {
+    const row = state.rowById.get(cue.id);
+    const top = $("lyrics").getBoundingClientRect().top;
+    const room = window.innerHeight - top - (row ? row.offsetHeight : 80) - 40;
+    $("sheet").style.maxHeight = `${Math.max(240, room)}px`;
+  }
+
+  function markPicked(cue, span) {
+    document.querySelectorAll("#lyrics .picked").forEach((el) => el.classList.remove("picked"));
+    const row = cue && state.rowById.get(cue.id);
+    if (!row) return;
+    // Every unit inside the span: one token, or the characters a scan matched.
+    for (const tok of row.querySelectorAll(".tok")) {
+      const at = Number(tok.dataset.start);
+      if (at >= span[0] && at < span[1]) tok.classList.add("picked");
+    }
+  }
+
+  async function openSheet(cue, span, scan = false) {
+    const s = state.sheet;
+    const seq = ++s.seq;
+    if (!s.open) {
+      s.pausedIt = settings.pauseOnLookup && state.playing;
+      if (s.pausedIt) pause("sheet");
+    }
+    s.open = true;
+    s.cue = cue;
+    s.span = span;
+    s.entries = [];
+    s.pick = 0;
+    s.def = null;
+    exitBrowse();
+    markPicked(cue, span);
+    capSheet(cue);
+    state.focusKey = null; // the list centres the tapped cue in the room above the sheet
+    updateVeil();
+    const sheet = $("sheet");
+    sheet.style.transform = "";
+    sheet.classList.add("open");
+    sheet.setAttribute("aria-hidden", "false");
+    // A per-character tap (no tokens) looks up the text from there on, like Yomitan's scan; the
+    // longest match then becomes the span.
+    const surface = scan ? cue.text.slice(span[0], span[0] + 12) : cue.text.slice(span[0], span[1]);
+    $("sheet-headword").textContent = surface;
+    $("sheet-reading").replaceChildren();
+    $("sheet-freq").textContent = "";
+    $("sheet-audio").hidden = true;
+    $("sheet-candidates").replaceChildren();
+    $("sheet-scroll").scrollTop = 0;
+    setMineButton(null, true);
+    setSheetMessage(S.lookingUp);
+
+    const res = await L.withRetry(() => api("/api/lookup", { text: surface }), L.SCHEDULES.lookup);
+    if (seq !== s.seq) return; // another word was tapped meanwhile
+    if (res.status !== 200 || !res.data || !res.data.ok) {
+      setSheetMessage(res.status === 503 || !res.data ? S.yomitanDown : res.data.error || S.yomitanDown,
+        res.status === 503 || !res.data ? { href: "https://github.com/yomidevs/yomitan-api", text: S.yomitanDocs } : null);
+      return;
+    }
+    s.entries = res.data.entries || [];
+    if (!s.entries.length) {
+      setSheetMessage(S.noEntry);
+      return;
+    }
+    if (scan && s.entries[0].matched > 0) {
+      s.span = [span[0], Math.min(cue.text.length, span[0] + s.entries[0].matched)];
+      markPicked(cue, s.span);
+    }
+    renderCandidates();
+    showEntry(0);
+  }
+
+  function setSheetMessage(text, link = null) {
+    const p = document.createElement("p");
+    p.className = "sheet-state";
+    p.textContent = text;
+    if (link) {
+      const a = document.createElement("a");
+      a.href = link.href;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = link.text;
+      p.append(document.createElement("br"), a);
+    }
+    $("sheet-body").replaceChildren(p);
+  }
+
+  function setMineButton(inDeck, disabled) {
+    const b = $("sheet-mine");
+    b.disabled = !!disabled;
+    b.classList.toggle("again", inDeck === true);
+    b.textContent = inDeck === true ? S.inDeckAgain : S.mine;
+  }
+
+  // Asked when an entry is shown, so the button says the truth before it is tapped.
+  async function checkInDeck(term) {
+    if (state.inDeck.has(term)) return;
+    // Anki unreachable after the retries: the button stays "Mine" and the mine reports the problem.
+    const res = await L.withRetry(() => api("/api/canadd", { term }), L.SCHEDULES.lookup);
+    if (res.status === 200 && res.data && res.data.ok) state.inDeck.set(term, !!res.data.in_deck);
+  }
+
+  function renderCandidates() {
+    const box = $("sheet-candidates");
+    box.replaceChildren();
+    const entries = state.sheet.entries;
+    if (entries.length < 2) return;
+    const repeated = new Set(entries.map((e) => e.term).filter((t, i, all) => all.indexOf(t) !== i));
+    entries.forEach((entry, i) => {
+      const b = document.createElement("button");
+      b.className = "tab";
+      b.setAttribute("role", "tab");
+      b.append(entry.term);
+      if (repeated.has(entry.term) && entry.reading && entry.reading !== entry.term) {
+        const r = document.createElement("span");
+        r.className = "tab-reading";
+        r.textContent = entry.reading;
+        b.append(r);
+      }
+      b.addEventListener("click", () => showEntry(i));
+      box.append(b);
+    });
+  }
+
+  function showEntry(i) {
+    const s = state.sheet;
+    s.pick = i;
+    s.def = null;
+    const entry = s.entries[i];
+    [...$("sheet-candidates").children].forEach((b, j) => {
+      b.classList.toggle("on", j === i);
+      b.setAttribute("aria-selected", String(j === i));
+    });
+    $("sheet-headword").textContent = entry.term;
+
+    // One reading line; the pitch accent is drawn on it as an overline with a drop mark.
+    const reading = $("sheet-reading");
+    reading.replaceChildren();
+    const kana = entry.reading || entry.term;
+    const pos = entry.pitches[0];
+    reading.hidden = entry.reading === entry.term && pos === undefined;
+    if (!reading.hidden) {
+      if (pos === undefined) {
+        reading.textContent = kana;
+      } else {
+        reading.setAttribute("aria-label", `${kana}, pitch accent ${pos}`);
+        for (const m of L.pitchPattern(kana, pos)) {
+          const span = document.createElement("span");
+          span.className = `mora${m.high ? " high" : ""}${m.drop ? " drop" : ""}`;
+          span.textContent = m.mora;
+          reading.append(span);
+        }
+      }
+    }
+    $("sheet-audio").hidden = false;
+    $("sheet-freq").textContent = (entry.freqs[0] && L.freqLabel(entry.freqs[0].value)) || "";
+
+    const body = $("sheet-body");
+    body.replaceChildren();
+    // The dictionary that supplies the implied definition leads, so the first gloss on screen is
+    // the one a card gets when nothing is picked.
+    const dicts = [...entry.dicts].sort((a, b) => (b.name === entry.glossFrom) - (a.name === entry.glossFrom));
+    const [first, ...rest] = dicts;
+    if (first) for (const item of first.items) body.append(glossNode(item));
+    if (rest.length) {
+      const more = document.createElement("details");
+      more.className = "more";
+      const summary = document.createElement("summary");
+      summary.textContent = S.moreDictionaries;
+      more.append(summary);
+      for (const dict of rest) {
+        const name = document.createElement("div");
+        name.className = "dict-name";
+        name.textContent = dict.name;
+        more.append(name);
+        for (const item of dict.items) more.append(glossNode(item));
+      }
+      body.append(more);
+    }
+    $("sheet-scroll").scrollTop = 0;
+    setMineButton(state.inDeck.get(entry.term), false);
+    checkInDeck(entry.term).then(() => {
+      if (state.sheet.open && state.sheet.entries[state.sheet.pick] === entry) setMineButton(state.inDeck.get(entry.term), false);
+    });
+  }
+
+  function glossNode(item) {
+    const gloss = document.createElement("div");
+    gloss.className = "gloss";
+    // The one HTML insertion on the page: the server builds it from Yomitan's structured content
+    // with an allowlist of tags, every text escaped and no attributes but colspan/rowspan and an
+    // `sc-<marker>` class (portal.py sc_to_html), so nothing in it can run or load.
+    gloss.innerHTML = item;
+    // Part-of-speech badges shrink to one muted line above the glosses.
+    const labels = [...new Set([...gloss.querySelectorAll(".sc-label")].map((el) => el.textContent.trim()).filter(Boolean))];
+    if (labels.length) {
+      const pos = document.createElement("div");
+      pos.className = "pos";
+      pos.textContent = labels.join(" · ");
+      gloss.prepend(pos);
+    }
+    // The glosses one can choose as the card's definition: a dictionary's marked glossary items, else the
+    // innermost list items, else the whole definition.
+    let picks = [...gloss.querySelectorAll(".sc-glossary > li")];
+    if (!picks.length) picks = [...gloss.querySelectorAll("li")].filter((li) => !li.querySelector("li"));
+    for (const el of picks.length ? picks : [gloss]) el.classList.add("pick");
+    return gloss;
+  }
+
+  function closeSheet(resume = true) {
+    const s = state.sheet;
+    if (!s.open) return;
+    s.open = false;
+    s.seq++;
+    const sheet = $("sheet");
+    sheet.classList.remove("open");
+    sheet.style.transform = "";
+    sheet.setAttribute("aria-hidden", "true");
+    markPicked(null);
+    state.focusKey = null;
+    if (s.pausedIt) {
+      s.pausedIt = false;
+      // The line looked up may have ended while the sheet was open; auto-pause must not fire for it again.
+      const cue = state.cues[state.activeIdx];
+      state.autoPausedFor = cue ? cue.id : null;
+      if (resume) play(); // still inside the gesture that closed the sheet
+    }
+    updateVeil();
+  }
+
+  // Everything a mine needs is copied at tap time, so later playback cannot change it.
+  function mineFromSheet() {
+    if (state.info && !state.info.card) {
+      // No deck or note type yet: the setup screen first; the word stays where it was.
+      toast(S.setupFirst);
+      openAnkiSetup();
+      return;
+    }
+    const s = state.sheet;
+    const entry = s.entries[s.pick];
+    if (!entry || !s.cue) return;
+    const job = {
+      video_id: state.videoId,
+      cue: { start: s.cue.start, end: s.cue.end, text: s.cue.text },
+      span: [...s.span],
+      term: entry.term,
+      reading: entry.reading,
+      definition: s.def || entry.gloss || "",
+      force: state.inDeck.get(entry.term) === true,
+      extra_tags: readJson("portal.extraTags", []),
+      // One id per mine: the server answers a retry of a job it already finished with that result,
+      // so a lost answer never becomes a second note.
+      job_id: newJobId(),
+    };
+    closeSheet(); // resumes playback synchronously, before the request below
+    runMine(job);
+  }
+
+  function newJobId() {
+    const bytes = new Uint8Array(12);
+    crypto.getRandomValues(bytes); // crypto.randomUUID needs a secure context; plain HTTP has none
+    return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  // Transient failures (network, 5xx: audio not ready, Anki or Yomitan timing out) retry by
+  // themselves, 4 attempts over about 30 s; only then does the pill offer Retry.
+  async function runMine(job) {
+    const res = await L.withRetry(() => api("/api/mine", job), L.SCHEDULES.mine, {
+      onRetry: (n, delay, r) => console.log(`mine ${job.term}: attempt ${n + 1} in ${delay} ms after`, r.status, r.data && r.data.error),
+    });
+    const data = res.data;
+    if (data && data.ok) {
+      state.inDeck.set(job.term, true);
+      if (data.warnings && data.warnings.length) console.log("mined with warnings:", data.warnings);
+      toast(S.added(data.word || job.term));
+    } else if (data && data.duplicate) {
+      state.inDeck.set(job.term, true);
+      toast(S.alreadyInDeck(job.term), () => runMine({ ...job, force: true }));
+    } else if (res.status === 428) {
+      // No card set up yet: the setup screen, then Mine again.
+      toast(S.setupFirst);
+      openAnkiSetup();
+    } else {
+      console.log("mine failed:", data && data.error);
+      const ankiDown = res.status === 503 && /AnkiConnect/.test((data && data.error) || "");
+      toast(ankiDown ? S.ankiDown(job.term) : S.couldNotAdd(job.term), () => runMine(job));
+    }
+  }
+
+  function bindSheet() {
+    $("sheet-mine").addEventListener("click", mineFromSheet);
+    $("sheet-audio").addEventListener("click", async () => {
+      const entry = state.sheet.entries[state.sheet.pick];
+      if (!entry) return;
+      const audio = new Audio(`/api/audio?term=${encodeURIComponent(entry.term)}&reading=${encodeURIComponent(entry.reading || "")}`);
+      try {
+        await audio.play();
+      } catch {
+        toast(S.noAudio(entry.term));
+      }
+    });
+    $("sheet-body").addEventListener("click", (ev) => {
+      const pick = ev.target.closest(".pick");
+      if (!pick || ev.target.closest("summary")) return;
+      const was = pick.classList.contains("chosen");
+      $("sheet-body").querySelectorAll(".pick.chosen").forEach((el) => el.classList.remove("chosen"));
+      state.sheet.def = was ? null : pickText(pick);
+      if (!was) pick.classList.add("chosen");
+    });
+
+    // A tap outside closes the sheet (and resumes, inside this tap); a tap on another word in the
+    // subtitle list opens that word instead.
+    document.addEventListener("click", (ev) => {
+      if (!state.sheet.open) return;
+      if (ev.target.closest("#sheet, #toasts")) return;
+      const word = ev.target.closest(".word");
+      if (word && word.closest("#lyrics")) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      closeSheet();
+    }, true);
+
+    makeDraggable($("sheet"), $("sheet-scroll"), () => closeSheet());
+    window.addEventListener("resize", () => { if (state.sheet.open) capSheet(state.sheet.cue); });
+    // The sheet grows when its entry arrives: centre the tapped cue in the room that is left.
+    new ResizeObserver(() => { if (state.sheet.open) placeTrack(); }).observe($("sheet"));
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") {
+        closeAnkiSetup();
+        closeSheet();
+        closeSettings();
+      }
+    });
+  }
+
+  function pickText(el) {
+    const copy = el.cloneNode(true);
+    copy.querySelectorAll(".pos, rt, .sc-label").forEach((n) => n.remove());
+    return copy.textContent.replace(/\s+/g, " ").trim().slice(0, 500);
+  }
+
+  // Drag a sheet down to dismiss: from the grabber anywhere, from the content once it is scrolled
+  // to the top. The dismissal runs in touchend, so a resume inside it is still a gesture.
+  function makeDraggable(sheet, scroller, onDismiss) {
+    let drag = null;
+    sheet.addEventListener("touchstart", (ev) => {
+      if (!sheet.classList.contains("open") || ev.target.closest("button, input, summary")) return;
+      const fromGrabber = !!ev.target.closest(".grabber");
+      drag = { y: ev.touches[0].clientY, dy: 0, active: false, fromGrabber };
+    }, { passive: true });
+    sheet.addEventListener("touchmove", (ev) => {
+      if (!drag) return;
+      const dy = ev.touches[0].clientY - drag.y;
+      if (!drag.active) {
+        if (dy > 8 && (drag.fromGrabber || scroller.scrollTop <= 0)) {
+          drag.active = true;
+          sheet.classList.add("dragging");
+        } else if (Math.abs(dy) > 8) {
+          drag = null;
+          return;
+        } else {
+          return;
+        }
+      }
+      drag.dy = Math.max(0, dy);
+      sheet.style.transform = `translateY(${drag.dy}px)`;
+      ev.preventDefault();
+    }, { passive: false });
+    sheet.addEventListener("touchend", () => {
+      if (!drag) return;
+      const { active, dy } = drag;
+      drag = null;
+      if (!active) return;
+      sheet.classList.remove("dragging");
+      sheet.style.transform = "";
+      if (dy > 80) onDismiss();
+    });
+  }
+
+  // ------------------------------------------------------------ settings sheet
+
+  function applySettings() {
+    $("set-autopause").checked = settings.autoPause;
+    $("set-lookup-pause").checked = settings.pauseOnLookup;
+    $("set-furigana").checked = settings.furigana;
+    $("set-listening").checked = settings.listening;
+    $("set-sweep").checked = settings.sweep;
+    for (const b of $("set-speed").children) b.classList.toggle("on", Number(b.dataset.speed) === settings.speed);
+    // Furigana changes every cue's markup and height; redraw the list once when it flips.
+    if (state.furiganaShown !== undefined && state.furiganaShown !== settings.furigana) {
+      for (const cue of state.cues) {
+        const row = state.rowById.get(cue.id);
+        if (row) fillCue(row, cue);
+      }
+    }
+    state.furiganaShown = settings.furigana;
+    state.focusKey = null;
+    updateVeil();
+  }
+
+  function bindSettings() {
+    const seg = $("set-speed");
+    for (const speed of SPEEDS) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.dataset.speed = String(speed);
+      b.setAttribute("role", "radio");
+      b.textContent = String(speed);
+      b.addEventListener("click", () => {
+        settings.speed = speed;
+        if (state.playerReady) state.player.setPlaybackRate(speed);
+        saveSettings();
+        applySettings();
+      });
+      seg.append(b);
+    }
+    const bindSwitch = (id, key) => $(id).addEventListener("change", (ev) => {
+      settings[key] = ev.target.checked;
+      saveSettings();
+      applySettings();
+    });
+    bindSwitch("set-autopause", "autoPause");
+    bindSwitch("set-lookup-pause", "pauseOnLookup");
+    bindSwitch("set-furigana", "furigana");
+    bindSwitch("set-listening", "listening");
+    bindSwitch("set-sweep", "sweep");
+    $("settings-backdrop").addEventListener("click", closeSettings);
+    $("set-anki").addEventListener("click", openAnkiSetup);
+    bindAnkiSetup();
+    makeDraggable($("settings"), $("settings").querySelector(".sheet-scroll"), closeSettings);
+    applySettings();
+  }
+
+  function openSettings() {
+    renderDevices();
+    renderAnkiRow();
+    closeSheet();
+    renderServerStatus();
+    $("settings").classList.add("open");
+    $("settings").setAttribute("aria-hidden", "false");
+    $("settings-backdrop").classList.add("open");
+  }
+
+  function closeSettings() {
+    $("settings").classList.remove("open");
+    $("settings").style.transform = "";
+    $("settings").setAttribute("aria-hidden", "true");
+    $("settings-backdrop").classList.remove("open");
+  }
+
+  // ------------------------------------------------------------ the scrubber
+
+  const scrub = { dragging: false, target: 0, width: 0, left: 0, f: -1, shownSec: -1, duration: -1 };
+
+  function scrubDuration() {
+    return playerDuration() || (state.syncData && state.syncData.duration) || 0;
+  }
+
+  function measureScrubber() {
+    const rect = $("scrub-track").getBoundingClientRect();
+    scrub.width = rect.width;
+    scrub.left = rect.left;
+    scrub.f = -1; // place the thumb again at the new width
+  }
+
+  // Called every frame: transforms only, and the labels only when the shown second changes.
+  function renderScrubber(t) {
+    const live = !!(state.syncData && state.syncData.live);
+    $("scrubber").classList.toggle("live", live);
+    $("scrub-live").hidden = !live;
+    if (live) return;
+    const d = scrubDuration();
+    if (!d) return;
+    const at = scrub.dragging ? scrub.target : Math.min(t, d);
+    const f = Math.max(0, Math.min(1, at / d));
+    if (Math.abs(f - scrub.f) > 0.0002) {
+      scrub.f = f;
+      $("scrub-fill").style.transform = `scaleX(${f})`;
+      $("scrub-thumb").style.transform = `translateX(${(f * scrub.width).toFixed(1)}px)`;
+    }
+    const sec = Math.floor(at);
+    if (sec === scrub.shownSec && d === scrub.duration) return;
+    scrub.shownSec = sec;
+    scrub.duration = d;
+    $("scrub-elapsed").textContent = L.formatClock(at, d);
+    $("scrub-remaining").textContent = `-${L.formatClock(Math.max(0, d - at), d)}`;
+    const track = $("scrub-track");
+    track.setAttribute("aria-valuemax", String(Math.floor(d)));
+    track.setAttribute("aria-valuenow", String(sec));
+    track.setAttribute("aria-valuetext", S.positionOf(L.spokenTime(at), L.spokenTime(d)));
+  }
+
+  // How much is loaded, as a lighter fill: cheap, so a few times a second from tick().
+  function renderBuffered() {
+    const d = scrubDuration();
+    const p = state.player;
+    if (!d || !p) return;
+    let end = 0;
+    if (p.kind === "native") {
+      const b = p.video.buffered;
+      for (let i = 0; i < b.length; i++) if (b.start(i) <= state.t + 0.5) end = Math.max(end, b.end(i));
+    } else if (p.getVideoLoadedFraction) {
+      end = p.getVideoLoadedFraction() * d;
+    }
+    $("scrub-buffer").style.transform = `scaleX(${Math.max(0, Math.min(1, end / d)).toFixed(4)})`;
+  }
+
+  function scrubTo(clientX) {
+    const d = scrubDuration();
+    if (!d || !scrub.width) return;
+    scrub.target = Math.max(0, Math.min(d, ((clientX - scrub.left) / scrub.width) * d));
+    state.previewT = scrub.target; // the subtitle list shows the cue at the target meanwhile
+  }
+
+  function bindScrubber() {
+    const track = $("scrub-track");
+    measureScrubber();
+    new ResizeObserver(measureScrubber).observe(track);
+    // Pointer capture keeps the whole drag on the track: no page scroll, no lyrics swipe.
+    track.addEventListener("pointerdown", (ev) => {
+      if (!scrubDuration()) return;
+      ev.preventDefault();
+      track.setPointerCapture(ev.pointerId);
+      measureScrubber();
+      scrub.dragging = true;
+      $("scrubber").classList.add("dragging");
+      scrubTo(ev.clientX);
+    });
+    track.addEventListener("pointermove", (ev) => { if (scrub.dragging) scrubTo(ev.clientX); });
+    const end = (commit) => {
+      if (!scrub.dragging) return;
+      scrub.dragging = false;
+      $("scrubber").classList.remove("dragging");
+      state.previewT = null;
+      if (commit) seek(scrub.target, false); // one seek, one saved position, on release
+      scrub.shownSec = -1;
+    };
+    track.addEventListener("pointerup", () => end(true));
+    track.addEventListener("pointercancel", () => end(false));
+    track.addEventListener("keydown", (ev) => {
+      const d = scrubDuration();
+      if (!d) return;
+      const step = { ArrowLeft: -5, ArrowDown: -5, ArrowRight: 5, ArrowUp: 5 }[ev.key];
+      const to = step !== undefined ? state.t + step : ev.key === "Home" ? 0 : ev.key === "End" ? d - 1 : null;
+      if (to === null) return;
+      ev.preventDefault();
+      seek(Math.max(0, Math.min(d, to)), false);
+    });
+  }
+
+  // ------------------------------------------------------------ the server's view: language, setup
+
+  async function loadInfo() {
+    try {
+      const res = await getJSON("/api/info");
+      if (res.status === 200 && res.data) {
+        state.info = res.data;
+        state.lang = res.data.language || null;
+      }
+    } catch {
+      // the portal itself is unreachable: the page says so where it matters
+    }
+    // Japanese fonts and furigana only for Japanese subtitles.
+    for (const id of ["lyrics", "sheet"]) $(id).lang = state.lang || "ja";
+    $("set-furigana").closest(".row-item").hidden = !isJa();
+  }
+
+  function applyStrings() {
+    for (const el of document.querySelectorAll("[data-s]")) {
+      if (typeof S[el.dataset.s] === "string") el.textContent = S[el.dataset.s];
+    }
+  }
+
+  // What still stands between this setup and a first card, from /api/health.
+  async function renderSetupHints() {
+    let health = null;
+    try {
+      const res = await getJSON("/api/health");
+      health = res.status === 200 ? res.data : null;
+    } catch {
+      health = null;
+    }
+    const list = $("setup-list");
+    list.replaceChildren();
+    const add = (text, action) => {
+      const li = document.createElement("li");
+      // A URL in a hint becomes a link; the rest stays text.
+      const m = /(https?:\/\/\S+)$/.exec(text);
+      li.append(m ? text.slice(0, m.index) : text);
+      if (m) {
+        const a = document.createElement("a");
+        a.href = m[1];
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.textContent = m[1].replace(/^https?:\/\//, "");
+        li.append(a);
+      }
+      if (action) li.append(action);
+      list.append(li);
+    };
+    if (!health) {
+      add(S.reconnecting);
+    } else {
+      for (const name of ["shisuko", "yomitan", "anki", "ytdlp", "pyav"]) {
+        const svc = health.services[name];
+        if (svc && !svc.ok && svc.hint) add(svc.hint);
+      }
+      if (!health.card) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "paste";
+        button.textContent = S.setupAnkiButton;
+        button.addEventListener("click", openAnkiSetup);
+        add(`${S.setupAnki}. `, button);
+      }
+    }
+    $("setup-hints").hidden = !list.children.length;
+  }
+
+  // ---- Settings > Anki: deck, note type, and what each field holds
+
+  let ankiBound = false;
+  function bindAnkiSetup() {
+    if (ankiBound) return;
+    ankiBound = true;
+    $("anki-backdrop").addEventListener("click", closeAnkiSetup);
+    makeDraggable($("anki-sheet"), $("anki-sheet").querySelector(".sheet-scroll"), closeAnkiSetup);
+    $("anki-model").addEventListener("change", () => renderFieldRows($("anki-model").value, null));
+    $("anki-save").addEventListener("click", saveAnkiSetup);
+  }
+
+  function ankiMessage(text) {
+    $("anki-message").textContent = text || "";
+    $("anki-message").hidden = !text;
+  }
+
+  function fillSelect(select, values, chosen) {
+    select.replaceChildren(...values.map((v) => {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = v;
+      o.selected = v === chosen;
+      return o;
+    }));
+  }
+
+  async function openAnkiSetup() {
+    bindAnkiSetup();
+    closeSettings();
+    if (state.sheet.open) closeSheet(false);
+    $("anki-sheet").classList.add("open");
+    $("anki-sheet").setAttribute("aria-hidden", "false");
+    $("anki-backdrop").classList.add("open");
+    ankiMessage(S.lookingUp);
+    $("anki-save").disabled = true;
+    $("anki-fields").replaceChildren();
+    const [cardRes, optRes] = await Promise.all([getJSON("/api/card"), getJSON("/api/anki/options")]).catch(() => [null, null]);
+    if (!optRes || optRes.status !== 200 || !optRes.data || !cardRes || !cardRes.data) {
+      ankiMessage(S.ankiLoadFailed);
+      return;
+    }
+    const info = cardRes.data;
+    const card = info.card || info.saved || {};
+    state.cardSetup = info;
+    if (!optRes.data.decks.length) {
+      ankiMessage(S.ankiNoDecks);
+      return;
+    }
+    const preferDeck = card.deck && optRes.data.decks.includes(card.deck) ? card.deck : optRes.data.decks.find((d) => d !== "Default") || optRes.data.decks[0];
+    fillSelect($("anki-deck"), optRes.data.decks, preferDeck);
+    const preferModel = card.note_model && optRes.data.models.includes(card.note_model) ? card.note_model : optRes.data.models[0];
+    fillSelect($("anki-model"), optRes.data.models, preferModel);
+    const locked = info.overrides || [];
+    $("anki-deck").disabled = locked.includes("deck");
+    $("anki-model").disabled = locked.includes("note_model");
+    ankiMessage(locked.length ? S.ankiOverride(locked.join(", "), info.override_file) : "");
+    await renderFieldRows(preferModel, card.note_model === preferModel ? card.fields : null);
+  }
+
+  // One select per field: empty, the portal's own sources, Yomitan's markers, or a custom template.
+  async function renderFieldRows(model, existing) {
+    const box = $("anki-fields");
+    box.replaceChildren();
+    $("anki-save").disabled = true;
+    const res = await getJSON(`/api/anki/fields?model=${encodeURIComponent(model)}`).catch(() => null);
+    if (!res || res.status !== 200 || !res.data) {
+      ankiMessage(S.ankiLoadFailed);
+      return;
+    }
+    const info = state.cardSetup || {};
+    const locked = (info.overrides || []).includes("fields");
+    for (const name of res.data.fields) {
+      const value = existing && name in existing ? existing[name] : res.data.guess[name] || "";
+      const label = document.createElement("label");
+      label.className = "row-item";
+      const fieldName = document.createElement("span");
+      fieldName.className = "field-name";
+      fieldName.textContent = name;
+      label.append(fieldName);
+      const select = document.createElement("select");
+      select.className = "select";
+      select.dataset.field = name;
+      select.disabled = locked;
+      const option = (template, text) => {
+        const o = document.createElement("option");
+        o.value = template;
+        o.textContent = text;
+        return o;
+      };
+      select.append(option("", S.fieldEmpty));
+      const portalGroup = document.createElement("optgroup");
+      portalGroup.label = S.groupPortal;
+      for (const src of Object.values(info.sources || {})) portalGroup.append(option(src.template, src.label));
+      const dictGroup = document.createElement("optgroup");
+      dictGroup.label = S.groupYomitan;
+      for (const marker of info.markers || []) dictGroup.append(option(`{${marker}}`, marker));
+      select.append(portalGroup, dictGroup);
+      if (value && ![...select.options].some((o) => o.value === value)) select.append(option(value, value));
+      select.append(option("\u0000custom", S.fieldCustom));
+      select.value = value;
+      select.addEventListener("change", () => {
+        if (select.value !== "\u0000custom") return;
+        const typed = window.prompt(name, value) || "";
+        if (typed && ![...select.options].some((o) => o.value === typed)) select.insertBefore(option(typed, typed), select.lastChild);
+        select.value = typed;
+      });
+      label.append(select);
+      box.append(label);
+    }
+    $("anki-save").disabled = false;
+  }
+
+  async function saveAnkiSetup() {
+    const fields = {};
+    for (const select of $("anki-fields").querySelectorAll("select")) fields[select.dataset.field] = select.value === "\u0000custom" ? "" : select.value;
+    $("anki-save").disabled = true;
+    const res = await api("/api/card", { deck: $("anki-deck").value, note_model: $("anki-model").value, fields }).catch(() => null);
+    $("anki-save").disabled = false;
+    if (!res || res.status !== 200 || !res.data || !res.data.ok) {
+      ankiMessage((res && res.data && res.data.error) || S.ankiLoadFailed);
+      return;
+    }
+    const card = res.data.card;
+    state.info = { ...(state.info || {}), card: card ? { deck: card.deck, note_model: card.note_model } : null };
+    state.inDeck.clear();
+    toast(S.ankiSaved);
+    closeAnkiSetup();
+    renderAnkiRow();
+    if (!$("home").hidden) renderSetupHints();
+  }
+
+  function closeAnkiSetup() {
+    $("anki-sheet").classList.remove("open");
+    $("anki-sheet").style.transform = "";
+    $("anki-sheet").setAttribute("aria-hidden", "true");
+    $("anki-backdrop").classList.remove("open");
+  }
+
+  function renderAnkiRow() {
+    const card = state.info && state.info.card;
+    $("set-anki-text").textContent = card ? `${card.deck} · ${card.note_model}` : S.setupAnki;
+  }
+
+  // ---- Settings > Paired devices (lan mode, or a device paired in tailscale mode)
+
+  async function renderDevices() {
+    const res = await getJSON("/api/devices").catch(() => null);
+    const data = res && res.status === 200 ? res.data : null;
+    const box = $("devices");
+    box.replaceChildren();
+    $("devices-group").hidden = !data || (data.mode === "local" || (data.mode === "tailscale" && !data.devices.length));
+    if (!data) return;
+    if (!data.devices.length) {
+      const empty = document.createElement("div");
+      empty.className = "row-item status-text";
+      empty.textContent = S.devicesNone;
+      box.append(empty);
+    }
+    for (const d of data.devices) {
+      const row = document.createElement("div");
+      row.className = "row-item";
+      const text = document.createElement("span");
+      text.textContent = `${d.name}${d.current ? ` (${S.deviceThis})` : ""}`;
+      const seen = document.createElement("span");
+      seen.className = "status-text";
+      seen.textContent = S.deviceSeen(new Date(d.seen).toLocaleDateString());
+      const forget = document.createElement("button");
+      forget.type = "button";
+      forget.className = "paste";
+      forget.textContent = S.deviceForget;
+      forget.setAttribute("aria-label", `${S.deviceForget} ${d.name}`);
+      forget.addEventListener("click", async () => {
+        await api("/api/devices/forget", { id: d.id }).catch(() => null);
+        if (d.current) location.reload();
+        else renderDevices();
+      });
+      const left = document.createElement("div");
+      left.className = "device-text";
+      left.append(text, seen);
+      row.append(left, forget);
+      box.append(row);
+    }
+  }
+
+  // ------------------------------------------------------------ toasts
+
+  // A success pill leaves by itself after TOAST_MS; an error pill with Retry stays until it is
+  // tapped (Retry) or dismissed (a tap on its text).
+  function toast(text, onRetry) {
+    const pill = document.createElement("div");
+    pill.className = `toast${onRetry ? " error" : ""}`;
+    pill.setAttribute("role", onRetry ? "alert" : "status");
+    const label = document.createElement("span");
+    label.className = "toast-text";
+    label.textContent = text;
+    pill.append(label);
+    const remove = () => {
+      pill.classList.add("leaving");
+      setTimeout(() => pill.remove(), 250);
+    };
+    if (onRetry) {
+      const retry = document.createElement("button");
+      retry.className = "retry";
+      retry.textContent = S.retry;
+      retry.addEventListener("click", () => {
+        remove();
+        onRetry();
+      });
+      pill.append(retry);
+      label.addEventListener("click", remove);
+    } else {
+      setTimeout(remove, TOAST_MS);
+    }
+    $("toasts").append(pill);
+  }
+
+  route();
+})();

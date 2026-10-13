@@ -1,0 +1,165 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Shisu-ko">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="app.css">
+  <title>Shisu-ko</title>
+</head>
+<body>
+  <main id="home" class="home" hidden>
+    <div class="home-head">
+      <h1>Shisu-ko</h1>
+      <button id="edit-btn" class="edit-btn" hidden>Edit</button>
+    </div>
+    <form id="open-form" class="url-field" autocomplete="off">
+      <input id="open-input" type="url" inputmode="url" enterkeyhint="go" placeholder="YouTube link or video ID" aria-label="YouTube link or video ID">
+      <button id="paste-btn" type="button" class="paste" hidden>Paste</button>
+    </form>
+    <p id="open-error" class="form-error" role="alert" hidden></p>
+    <section id="setup-hints" class="setup-hints" aria-labelledby="setup-title" hidden>
+      <h2 id="setup-title" data-s="setupTitle">Before you start</h2>
+      <ul id="setup-list"></ul>
+    </section>
+    <ul id="recent" class="recent" aria-label="Recent videos"></ul>
+    <p id="recent-empty" class="muted empty" data-s="emptyRecent" hidden>Videos you watch show up here, with how far you got.</p>
+  </main>
+
+  <div id="watch" class="watch" hidden>
+    <div class="player-box">
+      <div id="player"></div>
+      <!-- Over the iframe once the video has played: every tap lands here, never on YouTube's UI. -->
+      <button id="btn-home" class="btn-home" aria-label="Back to videos">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 5 7.5 12l7 7"/></svg>
+      </button>
+      <div id="shield" class="shield">
+        <svg class="shield-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z"/></svg>
+      </div>
+    </div>
+    <!-- The subtitles: one list of cues, the one being said centred, the rest fading out. -->
+    <div id="lyrics" class="lyrics" aria-label="Subtitles">
+      <div id="lyrics-track" class="lyrics-track"></div>
+      <div id="lyrics-status" class="lyrics-status" aria-live="polite" hidden></div>
+      <button id="back-to-now" class="back-to-now" hidden>Back to now</button>
+    </div>
+    <div id="scrubber" class="scrubber">
+      <span id="scrub-live" class="scrub-live" hidden data-s="live">LIVE</span>
+      <div id="scrub-track" class="scrub-track" role="slider" tabindex="0" aria-label="Position" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
+        <div class="scrub-rail"><div id="scrub-buffer" class="scrub-buffer"></div><div id="scrub-fill" class="scrub-fill"></div></div>
+        <div id="scrub-thumb" class="scrub-thumb"></div>
+      </div>
+      <div class="scrub-times" aria-hidden="true"><span id="scrub-elapsed">0:00</span><span id="scrub-remaining">-0:00</span></div>
+    </div>
+    <div class="toolbar-space" aria-hidden="true"></div>
+    <nav class="toolbar" aria-label="Playback">
+      <button id="btn-prev" class="tool" aria-label="Previous line">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5h9M4 11.5h13M4 16.5h9M19.5 14.5V5M16.5 8l3-3 3 3"/></svg>
+      </button>
+      <button id="btn-replay" class="tool" aria-label="Replay line">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5.2 9.5A7.5 7.5 0 1 1 4.5 13M3.5 6v4h4M9.5 12.5h5"/></svg>
+      </button>
+      <button id="btn-play" class="tool play" aria-label="Play">
+        <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 5v14l11-7z"/></svg>
+        <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 5v14M15.5 5v14"/></svg>
+      </button>
+      <button id="btn-next" class="tool" aria-label="Next line">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h9M4 12.5h13M4 17.5h9M19.5 9.5V19M16.5 16l3 3 3-3"/></svg>
+      </button>
+      <button id="btn-settings" class="tool" aria-label="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg>
+      </button>
+    </nav>
+  </div>
+
+  <section id="sheet" class="sheet word-sheet" role="dialog" aria-label="Dictionary" aria-hidden="true">
+    <div class="grabber" aria-hidden="true"></div>
+    <div id="sheet-scroll" class="sheet-scroll">
+      <div id="sheet-headword" class="headword"></div>
+      <div class="reading-row">
+        <span id="sheet-reading" class="reading"></span>
+        <button id="sheet-audio" class="speaker" aria-label="Play word audio">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5zM15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></svg>
+        </button>
+        <span id="sheet-freq" class="freq"></span>
+      </div>
+      <div id="sheet-candidates" class="tabs" role="tablist"></div>
+      <div id="sheet-body" class="defs"></div>
+    </div>
+    <div class="sheet-foot">
+      <button id="sheet-mine" class="mine">Mine</button>
+    </div>
+  </section>
+
+  <div id="settings-backdrop" class="backdrop"></div>
+  <section id="settings" class="sheet settings-sheet" role="dialog" aria-label="Settings" aria-hidden="true">
+    <div class="grabber" aria-hidden="true"></div>
+    <div class="sheet-scroll">
+      <h2 class="sheet-title">Settings</h2>
+      <h3 class="group-label">Playback</h3>
+      <div class="group">
+        <label class="row-item">Auto-pause after each line<input id="set-autopause" type="checkbox" role="switch" class="switch"></label>
+        <label class="row-item">Pause when looking up a word<input id="set-lookup-pause" type="checkbox" role="switch" class="switch"></label>
+        <div class="row-item">Speed
+          <div id="set-speed" class="segmented" role="radiogroup" aria-label="Speed"></div>
+        </div>
+      </div>
+      <h3 class="group-label">Subtitles</h3>
+      <div class="group">
+        <label class="row-item">Word highlight<input id="set-sweep" type="checkbox" role="switch" class="switch"></label>
+        <label class="row-item">Furigana<input id="set-furigana" type="checkbox" role="switch" class="switch"></label>
+        <label class="row-item">Listening mode<input id="set-listening" type="checkbox" role="switch" class="switch"></label>
+      </div>
+      <p class="group-note">Listening mode hides the text while the video plays.</p>
+      <h3 class="group-label">Anki</h3>
+      <div class="group">
+        <button id="set-anki" class="row-item link" type="button"><span id="set-anki-text">Deck and note type</span><span class="chevron" aria-hidden="true"></span></button>
+      </div>
+      <div id="devices-group" hidden>
+        <h3 class="group-label">Paired devices</h3>
+        <div id="devices" class="group"></div>
+      </div>
+      <h3 class="group-label">Server</h3>
+      <div class="group">
+        <div id="set-status" class="row-item status-text"></div>
+      </div>
+      <p id="player-note" class="group-note" hidden data-s="usingYouTube">Using YouTube's player</p>
+    </div>
+  </section>
+
+  <div id="anki-backdrop" class="backdrop"></div>
+  <section id="anki-sheet" class="sheet settings-sheet" role="dialog" aria-labelledby="anki-title" aria-hidden="true">
+    <div class="grabber" aria-hidden="true"></div>
+    <div class="sheet-scroll">
+      <h2 id="anki-title" class="sheet-title">Anki</h2>
+      <p id="anki-message" class="group-note" role="status" hidden></p>
+      <h3 class="group-label">Cards go to</h3>
+      <div class="group">
+        <label class="row-item">Deck<select id="anki-deck" class="select"></select></label>
+        <label class="row-item">Note type<select id="anki-model" class="select"></select></label>
+      </div>
+      <h3 class="group-label">Fields</h3>
+      <div id="anki-fields" class="group"></div>
+      <p class="group-note">Each field gets a part of the word's dictionary entry, the sentence, its audio or a
+        picture of the video. Fields left empty stay empty.</p>
+      <div class="sheet-foot">
+        <button id="anki-save" class="mine" type="button">Save</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script src="lib.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
