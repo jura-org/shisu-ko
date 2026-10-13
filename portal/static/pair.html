@@ -1,0 +1,33 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Shisu-ko">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="app.css">
+  <title>Pair this device · Shisu-ko</title>
+</head>
+<body>
+  <main class="home pair">
+    <h1>Pair this device</h1>
+    <p class="pair-text">This portal only answers devices you have paired with it. The window where the portal
+      runs on your computer shows a pairing link, a QR code and an 8-digit code: scan the QR code
+      with this device's camera, or type the code here.</p>
+    <form id="pair-form" class="url-field" autocomplete="off">
+      <input id="pair-code" type="text" inputmode="numeric" pattern="[0-9 ]*" maxlength="9" placeholder="8-digit code"
+        aria-label="Pairing code" autocomplete="one-time-code">
+      <button type="submit" class="paste">Pair</button>
+    </form>
+    <p id="pair-error" class="form-error" role="alert" hidden></p>
+    <p class="pair-text muted">A code works once and for 30 minutes; the portal then shows a new one.</p>
+  </main>
+  <script src="pair.js"></script>
+</body>
+</html>

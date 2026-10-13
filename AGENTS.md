@@ -26,6 +26,9 @@ server/       server.py (single file) + setup/run scripts + update.py; runtime d
               kitsune_engine.py: the Kitsune-Transcribe models on PyTorch (loaded by path, torch
               imported lazily); kitsune_setup.py installs PyTorch + requirements-kitsune.txt
               (stdlib only; setup runs it for a Kitsune pick, before the download)
+portal/       the phone portal: portal.py (stdlib server; yt-dlp and PyAV imported lazily), qr.py
+              (the pairing QR code), static/ (the page; lib.js holds its pure helpers and every UI
+              string), tests/; started by server/portal.cmd / portal.sh or `nix run .#portal`
 docker/       Windows wrappers for docker compose, WSL Docker Engine installer
 docs/dev/     developer docs: the full design of each subsystem, its reasons and measurements
 docs/cws/     Chrome Web Store setup: the service account and publisher id cws-listing.yml needs
@@ -142,7 +145,9 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   `SHISUKO_CONTAINER` only, since toolbox and distrobox share the home folder's Firefox; and
   `engine`, whose `"rocm"` only a passed `server.py --probe-gpu` writes), `server-<port>.lock`,
   `server.log`, the AMD engine's `rocm/` (with its marker `shisuko-rocm.json`), `rocm-starts` and
-  `next-model`, and, on Windows, `native-messaging/shisuko.json` (Firefox's host manifest) and
+  `next-model`, the portal's `portal-state.json` (positions, the card setup, paired devices'
+  token hashes), `portal.json` (an optional card override) and `portal-thumbs/`, and, on Windows,
+  `native-messaging/shisuko.json` (Firefox's host manifest) and
   `native-messaging/shisuko-chrome.json` (Chrome's). Detail: `docs/dev/cue-building.md`, "Runtime
   data and the cue cache", and `docs/dev/server-runtime.md` for the AMD engine.
 - With the AMD engine on Windows (`rocm_on_windows()`) every exit goes through `hard_exit()` /
@@ -165,6 +170,18 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   are reused only when model (compared canonically) and language match. `covered` always means
   "Whisper has seen this"; what a language-paused session only listens to goes into
   `Session.probed`, which is never written to `covered` or the cache.
+- The phone portal (`portal/`) answers nobody but loopback by default (`--mode local`). `--mode lan`
+  answers only devices holding a token from pairing (a one-time code, rate-limited; only the
+  token's hash is stored) and is the only mode that may listen on 0.0.0.0; `--mode tailscale` answers
+  this computer's own Tailscale user's devices (`tailscale status`) or a paired token
+  (`check_binds()`, `authorize()`). Every endpoint passes the Host check and the owner/token gate,
+  except `/pair`, `/api/pair` and the pairing page's own files (`OPEN_PATHS`), which still take the
+  Host check; POSTs are JSON only and refuse a foreign `Origin`. The portal never fetches a URL a
+  client names: video streams are resolved by yt-dlp on the computer and reach the page only as
+  opaque, expiring `/api/hls/<token>/` paths. It talks to the server only through `/sync`, `/clip`
+  and `/health`, using `/sync`'s opt-in `words` and its `retrying` / `retry_in` fields, and
+  works without them. It has no built-in card setup: a deck, note type and fields come from the
+  page (or `portal.json`) or nothing is mined. Detail: `docs/dev/portal.md`.
 - No absolute personal paths, no secrets and no `.env` in tracked files. `.env.example` documents it.
 - Line endings: LF everywhere, CRLF only for `*.cmd` (`.gitattributes` enforces this).
 
@@ -225,6 +242,13 @@ and `requestUpdate()` in `background.js`; `renderUpdate()` in `popup.js`; the wo
 `.github/workflows/`, the Chrome Web Store's `cws-listing.yml` and `cws-schedule.yml` among them,
 and `scripts/cws.mjs`.
 
+**Phone portal** (`docs/dev/portal.md`). `portal/portal.py`: `Services` (`authorize()`, `pair()`,
+`card()`, `mine()`, `media()`, `health()`), `PortalState` (positions, card, devices), `HlsProxy`
+(`rewrite_master()`, `rewrite_media()`, segments, `frame()` with PyAV), `guess_fields()`,
+`validate_card()`, `add_note_once()`. `portal/static/app.js` drives the page; `lib.js` holds the
+pure parts (link parsing, the timing estimate and `unitTimes()`, `segmentWords()`, retries, the
+resume rule, `STRINGS`).
+
 **Build and tests** (`docs/dev/build-and-test.md`). `scripts/build.mjs` derives Chrome from the
 Firefox source; `_serverlib.py`, `_loadBackground.js` and `_loadContent.js` load the code under test.
 
@@ -263,6 +287,10 @@ Kitsune-Transcribe models (Japanese only, PyTorch): setup installs PyTorch for a
 hand, with the venv's Python: `server/kitsune_setup.py` (`--cpu`, `--force`, `--status`). Names:
 `kitsune-0.6b` / `-0.3b` / `-0.1b` (bf16), plus `-fp16`, `-int8`, `-fp8`, `-nvfp4`, `-mxfp4`.
 
+Phone portal: `server\portal.cmd [--mode local|lan|tailscale]` (Windows), `server/portal.sh`, or
+`nix run .#portal`, with the server's venv; `--forget-devices` revokes every paired device. See
+`docs/dev/portal.md`.
+
 Docker: `docker\up.cmd`, `docker\logs.cmd`, `docker\down.cmd` (or `docker compose up -d` etc.).
 `up.cmd` keeps a minimized "Shisu-ko WSL keep-alive" window open when Docker Engine runs inside
 WSL, because WSL stops the distro (and Docker) seconds after the last WSL session ends.
@@ -292,6 +320,7 @@ Automated tests (also run in CI via `.github/workflows/tests.yml`, no GPU/networ
 ```
 pip install -r server/requirements-test.txt && python -m pytest server/tests
 node --test addon/tests/*.test.js
+python -m pytest portal/tests && node --test portal/tests/lib.test.js
 ```
 
 Test `server.py`'s pure functions by importing the module; register it in `sys.modules` before

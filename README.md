@@ -484,6 +484,48 @@ cached, because the recording YouTube publishes afterwards runs on a different c
 stream ends and comes back as a video, Shisu-ko starts over on the video's clock. Streams with
 DVR disabled cannot be followed, since the server needs the numbered audio segments.
 
+## Phone portal
+
+The phone portal plays a YouTube video on a phone or tablet with Shisu-ko's subtitles, looks words
+up with Yomitan and mines them into Anki, all served by the computer that runs the server. It needs
+no app and no extension on the phone: open a page in its browser (or add it to the home screen).
+
+<p>
+<img src="docs/images/portal-watch.png" width="190" alt="The watch view: the video, and the line being said in the middle with its words lighting up as they are spoken">
+<img src="docs/images/portal-sheet.png" width="190" alt="A tapped word in the dictionary sheet: headword, reading with pitch accent, definitions and the Mine button">
+<img src="docs/images/portal-anki-setup.png" width="190" alt="The Anki setup: deck, note type, and what each field of the note gets">
+<img src="docs/images/portal-home.png" width="190" alt="The list of videos, each with how far you got">
+</p>
+
+It uses the services the extension uses, so set those up first: the server, Anki with
+AnkiConnect, and Yomitan in a browser on the computer with the
+[Yomitan API](https://github.com/yomidevs/yomitan-api) installed (the portal asks it for
+dictionary entries and card fields; that browser must stay open). Then start the portal next to the
+server:
+
+```
+server\portal.cmd --mode lan        (Windows)
+server/portal.sh --mode lan         (Linux, macOS)
+nix run .#portal -- --mode lan      (Nix)
+```
+
+- `--mode local` (the default) answers this computer only, at `http://127.0.0.1:8791/`.
+- `--mode lan` answers phones and tablets on your network, once paired: the portal prints a link,
+  a QR code and an 8-digit code. Scan the code with the phone's camera, or open the page and type the
+  number. Each device keeps a token; Settings lists the paired devices and forgets any of them, and
+  `--forget-devices` forgets them all.
+- `--mode tailscale` answers your own devices on your [Tailscale](https://tailscale.com/) network
+  (those signed in as the same Tailscale user as the computer), from anywhere.
+
+On the phone, paste a YouTube link. The video plays in the page's own player, streamed through the
+computer; the subtitles below it centre the line being said and light up its words as they are
+spoken. Drag the bar above the buttons to move through the video; the list shows the line you will land
+on. Tap a word for its dictionary entry, tap a definition to pick it, and Mine adds the card
+with that sentence, its audio and a picture of the video. The first Mine asks which deck and note
+type to use, and guesses what each field gets from its name; Settings > Anki changes it. The list
+of videos remembers how far you got, on every device. How it works, and its security model:
+[docs/dev/portal.md](docs/dev/portal.md).
+
 ## Settings
 
 ![Popup, dark theme](docs/images/popup-dark.png)

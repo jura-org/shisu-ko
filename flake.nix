@@ -47,6 +47,16 @@
           '';
         };
 
+        # The phone portal: yt-dlp for the video, PyAV for the card's picture; no Whisper.
+        portalPython = pkgs.python3.withPackages (ps: with ps; [ yt-dlp av pytest ]);
+        portal = pkgs.writeShellApplication {
+          name = "shisu-ko-portal";
+          runtimeInputs = runtimeTools;
+          text = ''
+            exec ${portalPython}/bin/python ${self}/portal/portal.py "$@"
+          '';
+        };
+
         # Restarts after a crash (driver reset, OOM); exit code 2 is a startup error, do not retry.
         serverLoop = pkgs.writeShellApplication {
           name = "shisu-ko";
@@ -102,6 +112,7 @@
           python = cuda.python;
           addon = cuda.addon;
           addon-chrome = cuda.addon-chrome;
+          portal = cuda.portal;
         });
 
       apps = forAll (system:
@@ -113,13 +124,15 @@
         in {
           default = app cuda.serverLoop "shisu-ko";
           server = app cuda.server "shisu-ko-server";
+          portal = app cuda.portal "shisu-ko-portal";
           check = script "shisu-ko-check" ''
             ${cuda.server}/bin/shisu-ko-server --check
           '';
           tests = script "shisu-ko-tests" ''
             cd "''${SHISUKO_SRC:-${self}}"
             ${cuda.python}/bin/python -m pytest server/tests "$@"
-            ${pkgs.nodejs}/bin/node --test addon/tests/*.test.js
+            ${cuda.portalPython}/bin/python -m pytest portal/tests
+            ${pkgs.nodejs}/bin/node --test addon/tests/*.test.js portal/tests/*.test.js
           '';
         });
 
