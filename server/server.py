@@ -49,6 +49,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import shutil
 import signal
@@ -76,7 +77,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.17.1"
+VERSION = "0.17.3"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -1749,7 +1750,13 @@ class Session:
     last_sync: float = field(default_factory=time.time)
     busy: Optional[list] = None
     fetching: bool = False
-    error_at: float = 0.0  # time.time() of the last failed fetch; drives the automatic retry
+    error_at: float = 0.0  # time.time() of the last failed fetch
+    # The automatic retry of a failed fetch (Fetcher.record_failure): failures since the last
+    # success, when the next attempt is due (0: none scheduled, --retry-after after error_at
+    # applies, as for a live follower's error), and whether the failure is one no retry can cure.
+    fail_count: int = 0
+    retry_at: float = 0.0
+    permanent: bool = False
     lock: threading.RLock = field(default_factory=threading.RLock)
 
     def cache_path(self) -> Path:
@@ -2009,6 +2016,60 @@ def friendly_error(exc: Exception, cookies: str = "") -> str:
     return last[:200]
 
 
+# How a failed fetch is retried (fetch_error_kind(), retry_delay()). The phrases are the ones
+# friendly_error() turns into words for the viewer, plus yt-dlp's own for a gone video.
+FETCH_BACKOFF_BASE = 2.0          # seconds before the first retry; doubles per failure up to --retry-after
+FETCH_BACKOFF_RATE_LIMITED = 8.0  # the same after YouTube said "too many requests": back off harder
+FETCH_BACKOFF_JITTER = 0.2        # each wait is cut by up to this share, so clients never retry in step
+RATE_LIMIT_PHRASES = ("http error 429", "too many requests", "try again later", "rate-limit", "rate limit")
+# Nothing changes these by waiting. A sign-in wall is among them only while no cookies are sent:
+# with cookies, signing in to YouTube in that browser cures it, and every download reads them anew.
+PERMANENT_PHRASES = (
+    # yt-dlp passes YouTube's own reason through: "Video unavailable" and "This video is unavailable"
+    # (an id that never existed) both occur.
+    "private video", "video is private", "members-only", "join this channel", "video unavailable",
+    "video is unavailable", "video is not available", "has been removed",
+    "no longer available", "account associated with this video has been terminated",
+    "this video does not exist", "not available in your country", "not made this video available",
+    "incomplete youtube id", "unsupported url", "is not a valid url", "javascript runtime",
+    "live event will begin", "premieres in",
+)
+SIGN_IN_PHRASES = ("sign in to confirm", "not a bot", "age-restricted", "inappropriate for some users")
+
+
+def fetch_error_kind(exc: BaseException, cookies: str = "") -> str:
+    """"permanent", "rate_limited" or "transient" for a failed audio fetch.
+
+    Transient is the default: HTTP 403 (an expired or refused format URL, the incident this rule
+    came from), 5xx, timeouts, connection resets, "unable to download video data", fragment errors,
+    and anything unrecognised, since the server retried every failure before and an unknown message
+    is likelier a hiccup than a verdict. Rate limiting is tested first: YouTube's "This content
+    isn't available, try again later" also reads "Video unavailable". `cookies` is cookies_note().
+    """
+    low = (str(exc) or exc.__class__.__name__).lower()
+    if any(p in low for p in RATE_LIMIT_PHRASES):
+        return "rate_limited"
+    if any(p in low for p in SIGN_IN_PHRASES):
+        return "transient" if cookies else "permanent"
+    if any(p in low for p in PERMANENT_PHRASES):
+        return "permanent"
+    return "transient"
+
+
+def retry_delay(failures: int, kind: str, cap: float, jitter: float) -> float:
+    """Seconds before retry number `failures` (1 for the first): 2, 4, 8, 16 ... (8, 16 ... when rate
+    limited) capped at `cap` (--retry-after), each cut by up to FETCH_BACKOFF_JITTER; `jitter` is
+    a draw from [0, 1)."""
+    base = FETCH_BACKOFF_RATE_LIMITED if kind == "rate_limited" else FETCH_BACKOFF_BASE
+    delay = min(cap, base * 2 ** min(max(failures, 1) - 1, 16))
+    return max(0.0, delay * (1.0 - FETCH_BACKOFF_JITTER * jitter))
+
+
+def ytdlp_retry_sleep(n: int) -> float:
+    """yt-dlp's wait before its own retry `n` of a request or fragment: 0.5, 1, 2, 4 seconds."""
+    return min(0.5 * 2 ** max(n, 0), 4.0)
+
+
 def find_cached_audio(video_id: str) -> Optional[Path]:
     for p in CACHE_DIR.glob(f"{video_id}.*"):
         if p.suffix.lower() in AUDIO_SUFFIXES and p.is_file() and p.stat().st_size > 0:
@@ -2095,8 +2156,11 @@ def declared_language(info) -> Optional[str]:
 
 
 class Fetcher:
-    def __init__(self, args):
+    def __init__(self, args, clock=time.time, sleep=time.sleep, rng=random.random):
         self.args = args
+        self.clock = clock
+        self.sleep = sleep
+        self.rng = rng
 
     def cookies_note(self) -> str:
         """What a download sends YouTube for a sign-in, in words for friendly_error(); "" for nothing."""
@@ -2124,8 +2188,13 @@ class Fetcher:
             "quiet": True,
             "noprogress": True,
             "noplaylist": True,
+            # yt-dlp's own retries cover 5xx, timeouts and resets within one request; a 403 or 429 it
+            # does not retry, which download_once() and Fetcher.fetch() take care of.
             "retries": 3,
             "fragment_retries": 3,
+            "extractor_retries": 3,
+            "retry_sleep_functions": {"http": ytdlp_retry_sleep, "fragment": ytdlp_retry_sleep,
+                                      "extractor": ytdlp_retry_sleep},
             "socket_timeout": 30,
             "logger": YtdlpLogger(),
             "js_runtimes": self.js_runtimes(),
@@ -2142,6 +2211,64 @@ class Fetcher:
         return opts
 
     def fetch(self, s: Session) -> None:
+        """Fetch the audio, retrying a transient failure with exponential backoff while it is watched.
+
+        The retry is the server's own, not the next /sync's: this thread keeps `fetching` set while
+        it waits, so no sync starts a second one. It stops waiting once no client has synced the
+        video for --client-timeout (watched()); the next /sync after `retry_at` then starts over.
+        """
+        try:
+            while not self.fetch_once(s):
+                with s.lock:
+                    delay = None if s.permanent or not s.retry_at else s.retry_at - self.clock()
+                if delay is None or not self.watched(s):
+                    return
+                self.sleep(max(0.0, delay))
+                with s.lock:
+                    if s.status != "error":
+                        return
+                if not self.watched(s):
+                    return
+                log.info("[%s] retrying the audio fetch (attempt %d)", s.video_id, s.fail_count + 1)
+        finally:
+            with s.lock:
+                s.fetching = False
+
+    def watched(self, s: Session) -> bool:
+        """Whether a client synced this video recently enough to be worth a retry on its behalf."""
+        window = float(getattr(self.args, "client_timeout", 30.0) or 0.0)
+        if window <= 0:
+            window = float(getattr(self.args, "idle_minutes", 30) or 30) * 60.0
+        with s.lock:
+            return self.clock() - s.last_sync <= window
+
+    def succeeded(self, s: Session) -> None:
+        """Forget earlier failures. Call with s.lock held."""
+        s.fail_count, s.retry_at, s.permanent = 0, 0.0, False
+
+    def record_failure(self, s: Session, exc: BaseException) -> None:
+        """Set the session's error and schedule the next attempt, or none for a permanent error."""
+        cookies = self.cookies_note()
+        kind = fetch_error_kind(exc, cookies)
+        cap = float(getattr(self.args, "retry_after", 30.0))
+        with s.lock:
+            s.status = "error"
+            s.error = friendly_error(exc, cookies)
+            s.error_at = self.clock()
+            s.preview = None  # a preview from a partial download must not outlive the failure
+            s.fail_count += 1
+            s.permanent = kind == "permanent"
+            delay = 0.0 if s.permanent else retry_delay(s.fail_count, kind, cap, self.rng())
+            s.retry_at = 0.0 if s.permanent else s.error_at + delay
+        if s.permanent:
+            log.error("[%s] fetching audio failed, not retried: %s", s.video_id, exc)
+        else:
+            log.error("[%s] fetching audio failed (%s, failure %d), retrying in %.1f s: %s",
+                      s.video_id, kind.replace("_", " "), s.fail_count, delay, exc)
+
+    def fetch_once(self, s: Session) -> bool:
+        """One attempt. True when it is over (audio ready, language refused, live stream followed),
+        False when it failed and record_failure() has said what happens next."""
         try:
             with s.lock:
                 s.status = "downloading"
@@ -2159,13 +2286,17 @@ class Fetcher:
                         s.language_paused = True
                         s.duration = s.duration_hint
                         s.status = "ready"
+                        self.succeeded(s)
                     log.info("[%s] YouTube calls this video %s, not %s; nothing is transcribed%s",
                              s.video_id, foreign.language, self.args.language,
                              f": {s.title}" if s.title else "")
-                    return
+                    return True
                 if path is None:
+                    with s.lock:
+                        self.succeeded(s)
+                    # The follower handles its own errors and leaves an error for get_session().
                     self.follow_live(s)  # returns when the stream ends or nobody watches any more
-                    return
+                    return True
             else:
                 log.info("[%s] using cached audio %s", s.video_id, path.name)
             with s.lock:
@@ -2193,17 +2324,12 @@ class Fetcher:
                 s.duration = float(len(audio)) / SAMPLE_RATE
                 s.preview = None
                 s.status = "ready"
+                self.succeeded(s)
             log.info("[%s] audio ready, %s long%s", s.video_id, fmt_time(s.duration), f": {s.title}" if s.title else "")
+            return True
         except Exception as exc:  # noqa: BLE001
-            log.error("[%s] fetching audio failed: %s", s.video_id, exc)
-            with s.lock:
-                s.status = "error"
-                s.error = friendly_error(exc, self.cookies_note())
-                s.error_at = time.time()
-                s.preview = None  # a preview from a partial download must not outlive the failure
-        finally:
-            with s.lock:
-                s.fetching = False
+            self.record_failure(s, exc)
+            return False
 
     def preview_range(self, s: Session, duration: float) -> tuple:
         """The [start, end) seconds a preview should cover for the current playhead."""
@@ -2318,8 +2444,15 @@ class Fetcher:
             try:
                 ydl.process_ie_result(info, download=True)
             except Exception as exc:  # noqa: BLE001
-                log.debug("[%s] process_ie_result failed (%s); retrying with a plain download", s.video_id, exc)
+                # A 403 on the media request is most often a format URL that went stale or a player
+                # client YouTube refused this once: download() extracts the info anew, so the second
+                # try gets fresh URLs. Waiting cures neither a permanent error nor a rate limit, and
+                # a second request straight away would only feed the latter.
                 if find_cached_audio(s.video_id) is None:
+                    if fetch_error_kind(exc, self.cookies_note()) != "transient":
+                        raise
+                    log.info("[%s] the download failed (%s); trying once more with fresh format URLs",
+                             s.video_id, exc)
                     ydl.download([url])
         path = find_cached_audio(s.video_id)
         if path is None:
@@ -3317,7 +3450,7 @@ class App:
                 self.load_cache(s)
                 self.sessions[video_id] = s
         with s.lock:
-            retry_due = s.status == "error" and time.time() - s.error_at >= self.args.retry_after
+            retry_due = s.status == "error" and self.retry_due(s, time.time())
             need_fetch = (s.status in ("pending", "evicted") or retry_due) and not s.fetching
             if need_fetch:
                 if retry_due:
@@ -3326,6 +3459,26 @@ class App:
         if need_fetch:
             threading.Thread(target=self.fetcher.fetch, args=(s,), daemon=True, name=f"fetch-{video_id}").start()
         return s
+
+    def retry_due(self, s: Session, now: float) -> bool:
+        """Whether a sync of this errored session should start a fetch. Call with s.lock held.
+
+        A permanent error is asked again only of a viewer who comes back after --idle-minutes (the
+        video may have been made public meanwhile); s.last_sync is still the previous sync here.
+        """
+        if s.permanent:
+            return now - s.last_sync > float(getattr(self.args, "idle_minutes", 30)) * 60.0
+        if s.retry_at:
+            return now >= s.retry_at
+        return now - s.error_at >= self.args.retry_after
+
+    def retry_state(self, s: Session, now: float) -> dict:
+        """`retrying` and `retry_in` (seconds, None when nothing is scheduled) for an errored
+        session's /sync answer. Call with s.lock held."""
+        if s.permanent:
+            return {"retrying": False, "retry_in": None}
+        due = s.retry_at or (s.error_at + self.args.retry_after)
+        return {"retrying": True, "retry_in": round(max(0.0, due - now), 1)}
 
     def sync(self, video_id: str, url: str, t: float, since: int, model=None, words: bool = False) -> dict:
         """The /sync answer. `words` asks for each cue's word timings; without it no cue carries
@@ -3355,6 +3508,9 @@ class App:
                 "heard": s.heard,
                 "language_paused": s.language_paused,
             }
+            if s.status == "error":
+                # Added only to an error, so every other answer is what it always was.
+                resp.update(self.retry_state(s, time.time()))
         resp.update(self.model_state(model))
         self.maybe_evict()
         return resp
@@ -5384,7 +5540,7 @@ def parse_args(argv=None):
     p.add_argument("--max-cue-seconds", type=float, default=7.0)
     p.add_argument("--min-cue-seconds", type=float, default=0.8, help="cues shorter than this are extended or merged")
     p.add_argument("--idle-minutes", type=int, default=30, help="release decoded audio of videos not synced for this long")
-    p.add_argument("--retry-after", type=float, default=30.0, help="seconds before a failed audio fetch is retried automatically, and the least time between two attempts to load a model that failed to download or load")
+    p.add_argument("--retry-after", type=float, default=30.0, help="the longest wait between two attempts at a failed audio fetch (the waits start at 2 s and double; a permanent error is not retried), and the least time between two attempts to load a model that failed to download or load")
     p.add_argument("--client-timeout", type=float, default=30.0, help="stop transcribing ahead for a video whose tab has not synced for this many seconds (0 = never stop)")
     p.add_argument("--cpu-threads", type=int, default=0)
     p.add_argument("--cookies-from-browser", default="",

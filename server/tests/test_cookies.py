@@ -459,7 +459,9 @@ def test_a_failed_fetch_says_what_it_sent(monkeypatch, tmp_path):
         raise WALL
 
     monkeypatch.setattr(fetcher, "download", download)
-    session = server.Session(video_id="abcdefghijk", url="u", fetching=True)
+    # With cookies sent the wall is worth retrying (fetch_error_kind()); last_sync=0 means no client
+    # is watching, so the fetch records the error and leaves the retry to the next /sync.
+    session = server.Session(video_id="abcdefghijk", url="u", fetching=True, last_sync=0.0)
     fetcher.fetch(session)
     assert session.status == "error"
     assert session.error.startswith("YouTube asks for a sign-in although the server sends firefox's YouTube cookies")

@@ -67,6 +67,12 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   and the default response never changes (`without_words()`). Their texts join to the cue's text
   exactly or the cue carries none; the field is optional in the cache, never a reason to bump
   `CACHE_FORMAT`. Detail: `docs/dev/cue-building.md`, "Word timings".
+- A failed audio fetch is retried by the server with exponential backoff (`retry_delay()`: 2 s
+  doubling, harder after a 429, never longer than `--retry-after`, with jitter) only while a client
+  syncs the video, and only when `fetch_error_kind()` calls it transient. A permanent error (private,
+  removed, members-only, a sign-in wall with no cookies sent) is never retried automatically, and
+  the language refusal stays a `ready` session, never an error. `/sync` adds `retrying` and
+  `retry_in` to an errored session's answer only. Detail: `docs/dev/server-runtime.md`.
 - The add-on never installs itself: no `update_url`, no `.xpi` download or install
   (`addon/tests/settings.test.js`); its updates come from addons.mozilla.org. Its one remote
   request is the anonymous `GET` of GitHub's `releases/latest` in `fetchLatestRelease()`, never with
