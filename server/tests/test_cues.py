@@ -887,7 +887,7 @@ def test_build_window_cues_repairs_the_lead_word_before_the_vad_gate():
 
 
 def test_build_cues_never_cuts_inside_a_kanji_or_katakana_compound():
-    # 22:13 of 5csq1MlSspA: one 13 s segment with no pause, split only by the hard limits. The cut
+    # 22:13 of video A (a long-form Japanese podcast episode): one 13 s segment with no pause, split only by the hard limits. The cut
     # used to land inside 能|力 and 学|校 (and, on this synthetic timing, 絶|対 and 必|要).
     text = ("結局、社会に出たときに、たぶん、人と関わることって絶対必要になるし、言われたことを言われたとおり"
             "できる能力って必要になるから、それを養うのって学校じゃないかなって思うんで、行ったほうがいいとは思う。")
