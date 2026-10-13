@@ -22,6 +22,16 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   `browser-api.js` adapter supplies it on Chrome, where its internal bridge necessarily calls
   `chrome.*` callbacks. Application code must not call `chrome.*` directly.
 - All overlay classes and flags use the `shisuko-` / `__shisuko` prefix.
+- The subtitle has one element, `state.subWrap`, wherever it docks (`subDock`, `placeSubtitle()`).
+  The player clips, so the outside docks (window-bottom, a side with room for two columns) move
+  that element into `.shisuko-outside`, a fixed layer on `document.body`; moving it keeps its
+  listeners and its text nodes. The layer carries the root's custom properties, so a new one goes
+  on both (`applyStyleSettings()` runs for each) and a rule for the subtitle's look names both
+  (`:is(.shisuko-root, .shisuko-outside)`). Fullscreen, a page with no video and `enabled` off
+  bring the subtitle back inside the player, the setting unchanged. The geometry is pure
+  (`dockLayout()`, `dockTargets()`, `nearestDock()`) and tested; a drag starts only on the grip,
+  never on the text. Leaving a box outside the player for YouTube's page resumes a hover pause
+  (`isPageElement()`); leaving it for anything else keeps the pause, as inside.
 - Settings defaults live once in `addon/settings.js` (`SHISUKO_DEFAULT_SETTINGS`), loaded before
   `background.js`, `content.js` and `popup.js`. To add a setting, add it there and add the popup
   input with the same id; `addon/tests/settings.test.js` enforces both.
@@ -273,8 +283,8 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
 - Regular Firefox only keeps signed add-ons; unsigned builds are temporary installs only.
 - An update or reload kills Firefox's content script without running another line of it, then
   injects a fresh one into the open tabs. The dead instance's overlay stays in the player, frozen
-  on its last cue, under the fresh one's: `ensureOverlay()` removes every `.shisuko-root` before
-  it builds its own. Its `shisuko-hide-native` class needs nothing, since the boot's
+  on its last cue, under the fresh one's: `ensureOverlay()` removes every `.shisuko-root`, and
+  every `.shisuko-outside` layer on the body, before it builds its own. Its `shisuko-hide-native` class needs nothing, since the boot's
   `applySettings()` sets or clears it from the settings. Chrome's orphans keep running with a
   dead runtime and tear themselves down (`runtimeAlive()`, `shutdown()`).
 - Screenshots fail on DRM-protected videos (tainted canvas); the audio clip still works.
