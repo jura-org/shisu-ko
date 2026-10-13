@@ -159,6 +159,39 @@ install has no setup and no venv, so `run.sh` refuses there; its command is
 `nix run . -- --save-cookies-from-browser firefox` (the flake's loop stops on exit 0 and 2 like
 `run.sh`).
 
+## How a failed audio fetch is retried
+
+YouTube refuses a media request now and then with HTTP 403 (a stale format URL, a player client
+refused this once) and serves the same video a minute later. The server retries on its own:
+
+- Inside one attempt (`download_once()`): when `process_ie_result()` fails with anything
+  `fetch_error_kind()` calls transient, `ydl.download([url])` extracts the info anew, so the
+  second try gets fresh format URLs straight away. A rate limit or a permanent error is not tried
+  twice. yt-dlp's own `retries`, `fragment_retries` and `extractor_retries` are 3 each, with
+  `retry_sleep_functions` waiting 0.5, 1, 2 then 4 s (`ytdlp_retry_sleep()`); they cover 5xx,
+  timeouts and resets but never a 4xx, which is why the two layers above exist.
+- Between attempts (`Fetcher.fetch()` around `fetch_once()`): `record_failure()` classifies the
+  error and schedules `Session.retry_at` at 2, 4, 8, 16 s ... after the failure (`retry_delay()`;
+  8, 16 ... after a 429 or YouTube's "try again later"), never more than `--retry-after` (30 s),
+  each wait cut by up to 20% of jitter. The fetch thread sleeps until then and tries again, so
+  the retry needs no /sync; it holds `fetching` meanwhile, so no sync starts a second fetch. It
+  stops once no client has synced the video for `--client-timeout` (`watched()`), and the next
+  /sync after `retry_at` starts it again (`App.retry_due()`). Success, the language refusal and a
+  live stream reset the count (`succeeded()`).
+- Never retried (`permanent`): a private, removed or unavailable video, members-only, an
+  unsupported URL, a missing JavaScript runtime, and the sign-in walls (bot check, age gate) when
+  no cookies are sent. With cookies the walls are transient: signing in to YouTube in that browser
+  cures them. Anything unrecognised counts as transient, as every failure did before. A permanent
+  error is asked again only of a viewer who comes back after `--idle-minutes`.
+- The language refusal (`ForeignLanguage`) is not an error and never reaches any of this.
+- `/sync` adds `retrying` (bool) and `retry_in` (seconds, null when nothing is scheduled) to the
+  answer of a session in `error`, and only there; every other answer keeps its keys.
+- Live streams: only the metadata step is shared. Once `LiveFollower` runs it counts its own
+  failed segments (`LIVE_MAX_ERRORS`) and `DashLiveSource` refreshes an expired URL on a 403; an
+  error it leaves sets no `retry_at`, so the old rule applies, `--retry-after` after `error_at`.
+
+Tests: `server/tests/test_fetch_backoff.py`.
+
 ## How the Apple GPU works
 
 CTranslate2 has no Metal backend, so on Apple Silicon faster-whisper decodes on the CPU. MLX runs

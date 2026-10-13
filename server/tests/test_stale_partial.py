@@ -95,4 +95,5 @@ def test_other_errors_are_not_retried_from_scratch(monkeypatch, tmp_path):
         assert "unavailable" in str(exc)
     else:
         raise AssertionError("expected the download to fail")
-    assert FakeYoutubeDL.attempts == [True, True]
+    # A permanent error is not even tried a second time with fresh URLs (download_once()).
+    assert FakeYoutubeDL.attempts == [True]

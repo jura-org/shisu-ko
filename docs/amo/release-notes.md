@@ -1,10 +1,11 @@
 0.7.0 was the last version on this listing; 0.8.0 to 0.14.0 came out on GitHub only (https://github.com/Multysquid/shisu-ko/releases has every release's full notes). What changed since 0.7.0:
 
+- 0.17.3: a video YouTube refuses for a moment (HTTP 403) is fetched again within seconds; the server can send word timings to a client that asks.
 - 0.17.1: the AMD engine can be tried on a card setup calls unsupported (amd_setup.py --ignore-old-graphics, at your own risk).
 - 0.17.0: an Apple Silicon Mac transcribes on its own GPU, about twice the CPU's speed, on large-v3-turbo; a video in another language is left alone before it downloads.
 - 0.16.0: the server runs Kitsune-Transcribe models next to Whisper: small Japanese-only recognisers distilled from Cohere Transcribe. Pick kitsune-0.6b or -0.1b at setup, any size in the popup, in bf16, fp16, int8, fp8, NVFP4 or MXFP4; setup installs PyTorch for them.
 - 0.15.0: the server can run Whisper on an AMD graphics card (experimental); setup offers it where it finds a Radeon RX 7000/9000 or Ryzen AI GPU (RX 6800/6900 on Linux too). Setup also remembers the browser whose YouTube cookies every server start sends, for YouTube's "Sign in to confirm you're not a bot".
-- 0.14.6: mining finds the fields in any case (Eminent's picture, sentenceAudio), and a card without them names its own. With "Particles count as known", the copula is found where Firefox's splitter hid it (大変だったね) and everyday grammar words (ある, する, この, こと …) count as known; a card for one decides its colour.
+- 0.14.6: mining finds the fields in any case, and a card without them names its own. "Particles count as known" also covers the copula and everyday grammar words.
 - 0.14.5: word colours show only what your Anki deck says. Particles (は, です) and names and Latin text (OK) are no longer coloured without a card; both are switches, off by default, in a new "More word colour options" drawer with the katakana switch and your known-words list.
 - 0.14.4: speech Whisper skipped at the start of a stretch of audio (up to 20 seconds with no subtitle, even though someone was talking) is transcribed again and filled in. Videos you watched before are transcribed again on your next visit.
 - 0.14.3: Alt+Shift+H hides the status badge on the video, the red "server offline" too (a popup switch as well).

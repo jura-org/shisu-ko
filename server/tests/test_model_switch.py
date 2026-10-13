@@ -918,7 +918,7 @@ def test_download_model_files_uses_the_models_directory_and_wants_model_bin(monk
 def http_sync():
     calls = []
 
-    def sync(video_id, url, t, since, model=None):
+    def sync(video_id, url, t, since, model=None, words=False):
         calls.append(model)
         return {"ok": True}
 
