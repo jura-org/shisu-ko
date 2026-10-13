@@ -42,6 +42,16 @@ test("popup.js and content.js share the font family rule and the preset stacks",
   assert.equal(squash(jsConst(POPUP, "SUB_FONTS", "popup.js")), squash(jsConst(CONTENT, "SUB_FONTS", "content.js")));
 });
 
+test("the popup's dock select offers exactly the docks content.js knows, the default first", () => {
+  const html = fs.readFileSync(path.join(ADDON, "popup.html"), "utf8");
+  const select = html.match(/<select id="subDock">([^]*?)<\/select>/);
+  assert.ok(select, "popup.html has no subDock select");
+  const options = [...select[1].matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]);
+  const docks = JSON.parse(jsConst(CONTENT, "SUB_DOCKS", "content.js"));
+  assert.deepEqual(options, docks);
+  assert.equal(loadContent().api.state.settings.subDock, docks[0]);
+});
+
 test("popup.js mirrors the server's model name rule", () => {
   const js = jsRegexPattern(jsConst(POPUP, "MODEL_NAME_RE", "popup.js"));
   assert.equal(js.flags, "", "the server's rule has no flags");

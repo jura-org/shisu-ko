@@ -28,6 +28,8 @@ by `run.cmd` / `run.sh` before each start and by the extension once a day.
   scans them. Hovering pauses the video, the dictionary popup keeps it paused, and moving back
   over the video resumes it.
 - **Transcript panel** with every line so far. A timestamp jumps there, a pickaxe mines it.
+- **Subtitles where you want them.** Drag the subtitle by its grip to the top of the video, the
+  bottom of the window, or beside the video in vertical text, read top to bottom like a book.
 - **Sentence mining by itself.** The moment Yomitan adds a card, a screenshot and an MP3 clip of
   the line you were reading go into it. The pickaxe on a subtitle or a transcript line, or Alt+Shift+M,
   does the same on demand, into the newest card or into your Downloads folder.
@@ -291,7 +293,8 @@ Hover a subtitle and the video pauses while the pointer is on the text. Scan wor
 as usual: when the pointer moves into Yomitan's popup the video stays paused, and it resumes
 about a third of a second after the pointer comes back over the video. Space or the play button
 resume it too. The transcript panel is plain text as well, so earlier lines can be looked up,
-and its timestamps seek the video.
+and its timestamps seek the video. A subtitle docked outside the video (the window's bottom, or
+beside it) pauses the same way, and leaving it for the page around it resumes the video as well.
 
 ## Sentence mining
 
@@ -536,14 +539,15 @@ box, an outline, and the transcript docked left:
 
 | Style setting | Meaning |
 |---|---|
-| Height above the bottom | Where the subtitle box sits, 2-40% of the player height; it still drops when YouTube's controls fade out |
+| Place | Where the subtitle sits: bottom or top of the video, bottom of the window, or left or right of the video in vertical text, like a book. Dragging the grip (⠿) at the box's edge does the same: the docks light up, and the release snaps to the nearest. A side too narrow for two columns (theater mode, a small window) puts the column inside the video at that edge. Fullscreen shows only the video, so there the window's bottom becomes the video's and the sides go inside; leaving fullscreen puts them back |
+| Height above the bottom | For the bottom of the video: 2-40% of the player height; it still drops when YouTube's controls fade out |
 | Font | Gothic (the default stack), Gothic bold, Rounded or Mincho, for the subtitle and the transcript |
 | Font family | Any font installed on this computer, by name. It goes in front of the preset's stack, so the preset stays the fallback and still decides the weight. The popup previews the result and says whether the name resolved; Firefox cannot list installed fonts, hence the suggestions instead of a menu |
 | Text colour | Colour of the subtitle text |
 | Background | Opacity of the black box behind the text, 0-100% |
 | Outline the text | Black outline instead of the box; readable over bright video with the background turned down |
 | Transcript panel side | Docks the panel right or left; the subtitle moves out of its way |
-| Reset style | Restores the seven settings above and nothing else |
+| Reset style | Restores the eight settings above and nothing else |
 
 The **Transcription model** drawer picks the model the server runs. The field takes a
 Kitsune-Transcribe model (`kitsune-0.6b`, `kitsune-0.3b-int8`, ...; see

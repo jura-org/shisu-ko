@@ -53,6 +53,10 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
 - Application code uses the `browser.*` promise API; only `browser-api.js`, the Chrome adapter,
   calls `chrome.*`.
 - All overlay classes and flags use the `shisuko-` / `__shisuko` prefix.
+- The subtitle is one element (`state.subWrap`) on every dock (`subDock`, `placeSubtitle()`); the
+  outside docks move it into `.shisuko-outside`, a fixed layer on `document.body` that carries the
+  root's custom properties (style rules name both). Fullscreen, a page with no video and `enabled`
+  off bring it back inside the player. `isPageElement()` decides a hover pause left outside it.
 - Settings defaults live once in `addon/settings.js` (`SHISUKO_DEFAULT_SETTINGS`). A new setting goes
   there plus a popup input with the same id; `addon/tests/settings.test.js` enforces both.
 - The server listens on `127.0.0.1:8790`. Port 8765 belongs to AnkiConnect; never use it.
@@ -352,7 +356,8 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
   Never add a token.
 - Regular Firefox only keeps signed add-ons; unsigned builds are temporary installs only.
 - Firefox kills an updated or reloaded extension's content script without running its code; its
-  overlay stays in the page, so `ensureOverlay()` removes every `.shisuko-root` first. Chrome's
+  overlay stays in the page, so `ensureOverlay()` removes every `.shisuko-root` and
+  `.shisuko-outside` first. Chrome's
   orphans keep running and shut themselves down (`runtimeAlive()`).
 - Screenshots fail on DRM-protected videos (tainted canvas); the audio clip still works.
 - The native server and the container both use port 8790; run one at a time.

@@ -24,7 +24,8 @@ const EXPORTS =
   " onSubtitleLeave, onPlayerMouseMove, onPlayerMouseLeave, modelForSync, fontStack, sync, onVideoChanged, setSubtitle, updateStatus, statusText, isShortsUrl," +
   " startTimeFromUrl, findPlayer, discover, pollForNewCard, autoMine, onTranscriptLineEnter, onTranscriptLineLeave," +
   " renderText, refreshWordMarks, pollWordIndex, wordColoursOn, syncTick, transcriptLine, mineCue," +
-  " knownList, rebuildWordIndex, segmentAt, entryWordFor, knownTarget, markKnown };\n";
+  " knownList, rebuildWordIndex, segmentAt, entryWordFor, knownTarget, markKnown," +
+  " dockLayout, dockTargets, nearestDock, placeSubtitle, isPageElement };\n";
 
 function instrument(source) {
   const open = source.indexOf(OPEN);
@@ -160,6 +161,8 @@ function loadContent(overrides = {}) {
         Promise.resolve().then(() => this.onload && this.onload());
       }
     },
+    // Layout waits for a frame that never comes here; a test that wants it runs placeSubtitle().
+    requestAnimationFrame: () => 0,
     window: { addEventListener: () => {}, removeEventListener: () => {} },
     location: { href: overrides.href || "https://www.youtube.com/watch?v=abcdef1234" },
     document: {

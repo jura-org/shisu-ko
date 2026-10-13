@@ -192,7 +192,7 @@ const RANGES = {
 };
 
 // "Reset style" restores these and nothing else, so a botched experiment costs one click.
-const STYLE_KEYS = ["subPosition", "subFont", "subFontFamily", "subTextColor", "subBackgroundOpacity", "subOutline", "transcriptSide"];
+const STYLE_KEYS = ["subDock", "subPosition", "subFont", "subFontFamily", "subTextColor", "subBackgroundOpacity", "subOutline", "transcriptSide"];
 
 // Called for every event of every control (a slider drag is hundreds of them), so it only writes
 // what changed: the popup repaints on every mutation, and an unchanged textContent is still one.

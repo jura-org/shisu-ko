@@ -204,6 +204,57 @@ try {
   await page.mouse.move(box.x + 10, box.y + 10);
   await poll(() => video.evaluate((el) => !el.paused), (value) => value, 3000);
 
+  // Drag the subtitle's grip to each dock: the box follows the pointer, snaps to the nearest dock
+  // on release, and the dock is saved. The fixture player sits at the page's top left, so there
+  // is room to its right for vertical columns outside it, and the window bottom lies below it.
+  const viewport = page.viewportSize();
+  const dragGrip = async (x, y) => {
+    const sub = await page.locator(".shisuko-sub").boundingBox();
+    await page.mouse.move(sub.x + sub.width / 2, sub.y + sub.height / 2);
+    const grip = await poll(() => page.locator(".shisuko-drag").boundingBox(), (value) => !!value && value.width > 0, 3000);
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(grip.x + grip.width / 2 + 10, grip.y + grip.height / 2 + 10, { steps: 3 });
+    assert.equal(await page.locator(".shisuko-dock-target").count() >= 4, true, "the docks show while dragging");
+    await page.mouse.move(x, y, { steps: 8 });
+    await page.mouse.up();
+    assert.equal(await page.locator(".shisuko-dock-target").count(), 0, "the targets go with the release");
+  };
+  const storedDock = () => worker.evaluate(() => new Promise((resolveDock) => chrome.storage.local.get("settings", (got) => resolveDock(got.settings?.subDock))));
+  const playerRect = await page.locator("#movie_player").boundingBox();
+  await dragGrip(playerRect.x + playerRect.width + 60, playerRect.y + 200);
+  await poll(storedDock, (value) => value === "video-right", 3000);
+  const right = await page.locator(".shisuko-sub").evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return { mode: getComputedStyle(el).writingMode, left: r.left, outside: !!el.closest(".shisuko-outside") };
+  });
+  assert.equal(right.mode, "vertical-rl");
+  assert.equal(right.outside, true, "the right dock lives outside the player");
+  assert.ok(right.left >= playerRect.x + playerRect.width, `the column must stand right of the video (left ${right.left})`);
+  await dragGrip(playerRect.x + playerRect.width / 2, viewport.height - 10);
+  await poll(storedDock, (value) => value === "window-bottom", 3000);
+  const windowBottom = await page.locator(".shisuko-sub").evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return { mode: getComputedStyle(el).writingMode, bottom: r.bottom };
+  });
+  assert.equal(windowBottom.mode, "horizontal-tb");
+  assert.ok(windowBottom.bottom > playerRect.y + playerRect.height && windowBottom.bottom <= viewport.height,
+    `the box must sit below the video at the window's bottom (bottom ${windowBottom.bottom})`);
+  await dragGrip(playerRect.x + playerRect.width / 2, playerRect.y + playerRect.height * 0.85);
+  await poll(storedDock, (value) => value === "video-bottom", 3000);
+  assert.equal(await page.locator(".shisuko-sub").evaluate((el) => !!el.closest(".shisuko-root")), true);
+  assert.equal(await page.locator(".shisuko-outside").evaluate((el) => el.classList.contains("shisuko-hidden")), true);
+  // A press without a move is a click, and moves nothing.
+  const grip = await page.locator(".shisuko-drag").boundingBox();
+  if (grip) {
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+    await page.mouse.down();
+    await page.mouse.up();
+    assert.equal(await storedDock(), "video-bottom");
+  }
+  await page.mouse.move(box.x + 10, box.y + 10);
+  await poll(() => video.evaluate((el) => !el.paused), (value) => value, 3000);
+
   await page.locator(".shisuko-line-mine").first().click({ force: true });
   const records = await poll(() => worker.evaluate(() => new Promise((resolve) => chrome.downloads.search({ orderBy: ["-startTime"] }, resolve))), (items) => items.length >= 2 && items.filter((item) => item.state === "complete" && item.filename).length >= 2, 10000);
   const files = await Promise.all(records.map((item) => readFile(item.filename).catch(() => null)));

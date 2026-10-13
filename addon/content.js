@@ -110,6 +110,26 @@
   const SUB_POSITION_MAX = 40;
   // How far the box drops once YouTube's controls fade out: 11% - 4% at the default position.
   const AUTOHIDE_DROP = 7;
+  // Where the subtitle may sit (the subDock setting). video-bottom is the placement from before
+  // the setting; the others are dockLayout()'s.
+  const SUB_DOCKS = ["video-bottom", "video-top", "window-bottom", "video-left", "video-right"];
+  // Gap between an outside box and the window edge (window-bottom) or the video edge (the sides).
+  const DOCK_GAP_PX = 16;
+  const SIDE_GAP_PX = 12;
+  // The inside docks, in % of the player, as content.css places them: the top dock's gap, the
+  // side columns' top and bottom (clear of the controls) and their gap from the edge.
+  const DOCK_TOP_PCT = 6;
+  const SIDE_BOTTOM_PCT = 12;
+  const SIDE_EDGE_PCT = 2;
+  // An outside side needs room for two columns of text plus the box's padding, in em; narrower,
+  // the column goes inside the video at that edge. Two line-heights (1.35) and 0.25em per side.
+  const SIDE_MIN_EM = 2 * 1.35 + 0.5;
+  // The transcript panel's width and gap, as content.css has them: min(34%, 380px) + 16px.
+  const PANEL_PCT = 34;
+  const PANEL_MAX_PX = 380;
+  const PANEL_GAP_PX = 16;
+  // A pointer that moved less than this between press and release on the grip clicked it.
+  const DRAG_THRESHOLD_PX = 4;
   const HOVER_ALPHA_STEP = 0.18; // 0.72 -> 0.90, the hover shade the overlay always had
   const PLAIN_SHADOW = "0 0 3px rgba(0, 0, 0, 0.9)";
   // Four 1px offsets carve the letter out of the video; the blur softens the corners they leave.
@@ -125,6 +145,11 @@
     toastEl: null,
     toastTimer: null,
     subWrap: null,
+    // The viewport-fixed layer on document.body that holds the subtitle when it docks outside the
+    // player (which clips), and the drag's targets.
+    outside: null,
+    layoutFrame: 0, // the pending requestAnimationFrame of scheduleLayout()
+    drag: null, // the grip's press, then its drag (onGripDown)
     subBox: null,
     subText: null,
     mineBtn: null,
@@ -250,6 +275,7 @@
   function shutdown() {
     for (const t of timers) clearInterval(t);
     timers.length = 0;
+    endDrag(null);
     detach();
     clearHoverCapture();
     clearTranscriptHover();
@@ -257,8 +283,12 @@
     clearResumeTimer();
     // An orphaned instance must stop swallowing arrow keys; the fresh one owns them now.
     window.removeEventListener("keydown", onKeyDown, true);
+    window.removeEventListener("resize", onViewportChange);
+    window.removeEventListener("scroll", onViewportChange, true);
     if (state.root) state.root.remove();
     state.root = null;
+    if (state.outside) state.outside.remove();
+    state.outside = null;
     document.documentElement.classList.remove("shisuko-hide-native");
     try {
       delete window.__shisukoLoaded;
@@ -333,6 +363,19 @@
   function isAdPlaying() {
     const p = state.player;
     return !!(p && (p.classList.contains("ad-showing") || p.classList.contains("ad-interrupting")));
+  }
+
+  // Whether the pointer, gone to `el`, is still on the page rather than in a dictionary popup:
+  // anything of the player's (isYouTubeElement), our own layer outside it, and YouTube's page
+  // around the player. Yomitan's popup is an iframe, or a host element of its own directly under
+  // the body (or inside the fullscreen player, where only the player's own count).
+  function isPageElement(el) {
+    if (!el || el.tagName === "IFRAME") return false;
+    if (isYouTubeElement(el)) return true;
+    if (!state.player || state.player.contains(el)) return false;
+    if (el === document.documentElement || el === document.body) return true;
+    if (state.outside && state.outside.contains(el)) return true;
+    return typeof el.closest === "function" && !!el.closest("ytd-app");
   }
 
   function isYouTubeElement(el) {
@@ -518,6 +561,7 @@
       state.root.classList.toggle("shisuko-has-transcript", !!s.showTranscript);
       state.transcriptEl.classList.toggle("shisuko-hidden", !s.showTranscript);
       applyStyleSettings(state.root, s);
+      if (state.outside) applyStyleSettings(state.outside, s);
       // Before the panel is read: highlightTranscript() measures the active line, and the font
       // size the panel is measured at must be the new one.
       updateFontSize();
@@ -538,6 +582,7 @@
       }
     }
     if (!s.enabled) setSubtitle(null);
+    placeSubtitle();
     updateStatus();
   }
 
@@ -575,6 +620,17 @@
     mineBtn.title = "Mine this sentence: screenshot + audio (Alt+Shift+M)";
     mineBtn.addEventListener("click", onMineClick);
     subBox.appendChild(mineBtn);
+    // The grip moves the box to another dock; the text itself stays free for selection and Yomitan.
+    const grip = document.createElement("button");
+    grip.type = "button";
+    grip.className = "shisuko-drag";
+    grip.textContent = "⠿";
+    grip.title = "Drag to move the subtitles";
+    grip.addEventListener("pointerdown", onGripDown);
+    // YouTube's player toggles playback on a click and starts a selection on a press: neither may
+    // reach it from the grip.
+    for (const type of ["mousedown", "click", "dblclick"]) grip.addEventListener(type, swallowTrusted);
+    subBox.appendChild(grip);
     subWrap.appendChild(subBox);
     root.appendChild(subWrap);
 
@@ -607,9 +663,10 @@
 
     subBox.addEventListener("mouseenter", onSubtitleEnter);
     subBox.addEventListener("mouseleave", onSubtitleLeave);
+    subBox.addEventListener("mousemove", onSubtitleMove);
 
     player.appendChild(root);
-    Object.assign(state, { root, statusEl, toastEl, subWrap, subBox, subText, mineBtn, transcriptEl, transcriptList: list });
+    Object.assign(state, { root, statusEl, toastEl, subWrap, subBox, subText, mineBtn, grip, transcriptEl, transcriptList: list });
     state.activeCueId = null;
     state.activeLineEl = null;
     state.transcriptDirty = true;
@@ -642,11 +699,314 @@
 
   function ensureOverlay(player) {
     if (state.root && state.root.isConnected && state.root.parentElement === player) return;
+    endDrag(null);
     if (state.root) state.root.remove();
+    if (state.outside) state.outside.remove();
+    state.outside = null;
     // A dead instance's overlay, frozen on its last cue: Firefox unloads an updated extension's
-    // content script without running its shutdown(), and its DOM stays in the page.
+    // content script without running its shutdown(), and its DOM stays in the page, the layer
+    // outside the player on the body included.
     for (const stale of document.querySelectorAll(".shisuko-root")) stale.remove();
+    for (const stale of document.querySelectorAll(".shisuko-outside")) stale.remove();
     buildOverlay(player);
+  }
+
+  // ------------------------------------------------------------ subtitle dock
+
+  function subDock(s) {
+    return oneOf(s.subDock, SUB_DOCKS, DEFAULT_SETTINGS.subDock);
+  }
+
+  // Where a dock puts the subtitle. Pure: the dock, the player's and the viewport's boxes in
+  // viewport px ({ left, top, width, height }; the viewport needs only the size) and
+  // { confined, fontPx, bottomPct, transcript } in; { dock, outside, vertical, side, rect } out.
+  // `confined` means nothing outside the player shows (fullscreen, or no video page): there a
+  // window-bottom renders as video-bottom (the `dock` answered) and a side goes inside the video.
+  // `transcript` is the open panel's side, or null. An outside rect is where the subwrap goes (with
+  // `bottom` when it hangs from the window's bottom edge); an inside one approximates the box
+  // content.css places, for the drag's targets.
+  function dockLayout(dock, player, viewport, opts) {
+    const d = oneOf(dock, SUB_DOCKS, "video-bottom");
+    const o = opts || {};
+    const font = o.fontPx > 0 ? o.fontPx : 20;
+    const row = font * 1.9; // a line of text with the box's padding
+    const panel = Math.min((player.width * PANEL_PCT) / 100, PANEL_MAX_PX) + PANEL_GAP_PX;
+    const panelLeft = o.transcript === "left" ? panel : 0;
+    const panelRight = o.transcript === "right" ? panel : 0;
+    const right = player.left + player.width;
+    if (d === "window-bottom" && !o.confined) {
+      const width = Math.max(0, Math.min(player.width, viewport.width - 2 * DOCK_GAP_PX));
+      const centred = player.left + (player.width - width) / 2;
+      const left = Math.min(Math.max(centred, DOCK_GAP_PX), viewport.width - DOCK_GAP_PX - width);
+      const top = viewport.height - DOCK_GAP_PX - row;
+      return { dock: d, outside: true, vertical: false, side: null, rect: { left, top, width, height: row, bottom: DOCK_GAP_PX } };
+    }
+    if (d === "video-left" || d === "video-right") {
+      const side = d === "video-left" ? "left" : "right";
+      const room = side === "left" ? player.left : viewport.width - right;
+      if (!o.confined && room >= SIDE_MIN_EM * font + 2 * SIDE_GAP_PX) {
+        const left = side === "left" ? SIDE_GAP_PX : right + SIDE_GAP_PX;
+        const rect = { left, top: player.top + SIDE_GAP_PX, width: room - 2 * SIDE_GAP_PX, height: Math.max(0, player.height - 2 * SIDE_GAP_PX) };
+        return { dock: d, outside: true, vertical: true, side, rect };
+      }
+      // Inside, at that edge; past the transcript panel when it is open on that side.
+      const edge = (player.width * SIDE_EDGE_PCT) / 100 + (side === "left" ? panelLeft : panelRight);
+      const top = player.top + (player.height * DOCK_TOP_PCT) / 100;
+      const height = (player.height * (100 - DOCK_TOP_PCT - SIDE_BOTTOM_PCT)) / 100;
+      const left = side === "left" ? player.left + edge : right - edge - row;
+      return { dock: d, outside: false, vertical: true, side, rect: { left, top, width: row, height } };
+    }
+    const top = d === "video-top";
+    const bandLeft = player.left + panelLeft;
+    const bandWidth = Math.max(0, player.width - panelLeft - panelRight);
+    const bottomPct = clampNumber(o.bottomPct, SUB_POSITION_MIN, SUB_POSITION_MAX, DEFAULT_SETTINGS.subPosition);
+    const rect = {
+      left: bandLeft + bandWidth * 0.04, // the subwrap's 4% padding
+      top: top ? player.top + (player.height * DOCK_TOP_PCT) / 100 : player.top + player.height * (1 - bottomPct / 100) - row,
+      width: bandWidth * 0.92,
+      height: row,
+    };
+    return { dock: top ? d : "video-bottom", outside: false, vertical: false, side: null, rect };
+  }
+
+  // The docks a drag may end on right now, each with its place. Pure. Confined, window-bottom is
+  // not offered: it would render where video-bottom does.
+  function dockTargets(player, viewport, opts) {
+    const docks = opts && opts.confined ? SUB_DOCKS.filter((d) => d !== "window-bottom") : SUB_DOCKS;
+    return docks.map((dock) => ({ dock, rect: dockLayout(dock, player, viewport, opts).rect }));
+  }
+
+  // The dock whose rect lies nearest the point (0 inside it); the first one on a tie. Pure.
+  function nearestDock(point, targets) {
+    let best = null;
+    let bestDistance = Infinity;
+    for (const { dock, rect } of targets) {
+      const dx = Math.max(rect.left - point.x, 0, point.x - (rect.left + rect.width));
+      const dy = Math.max(rect.top - point.y, 0, point.y - (rect.top + rect.height));
+      const distance = Math.hypot(dx, dy);
+      if (distance < bestDistance) {
+        best = dock;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
+  function playerBox() {
+    const r = state.player.getBoundingClientRect();
+    return { left: r.left, top: r.top, width: r.width, height: r.height };
+  }
+
+  function viewportBox() {
+    const el = document.documentElement;
+    return { width: el.clientWidth || window.innerWidth, height: el.clientHeight || window.innerHeight };
+  }
+
+  // Nothing outside the player can show: in fullscreen, on a page with no video (the miniplayer
+  // over YouTube's home), or with the player itself out of view.
+  function layoutOptions(player) {
+    const s = state.settings;
+    const confined = !!document.fullscreenElement || !getVideoIdFromUrl(location.href) || !(player.width > 0 && player.height > 0);
+    return {
+      confined,
+      fontPx: parseFloat(state.subBox.style.fontSize) || 0,
+      bottomPct: s.subPosition,
+      transcript: s.showTranscript ? oneOf(s.transcriptSide, TRANSCRIPT_SIDES, DEFAULT_SETTINGS.transcriptSide) : null,
+    };
+  }
+
+  function subtitleOutside() {
+    return !!(state.outside && state.subWrap && state.subWrap.parentNode === state.outside);
+  }
+
+  // The layer on the body for what lives outside the player. It carries the root's custom
+  // properties, so the subtitle looks the same in it.
+  function outsideLayer() {
+    if (state.outside && state.outside.isConnected) return state.outside;
+    const layer = document.createElement("div");
+    layer.className = "shisuko-outside shisuko-hidden";
+    applyStyleSettings(layer, state.settings);
+    document.body.appendChild(layer);
+    state.outside = layer;
+    return layer;
+  }
+
+  const BOX_PROPS = ["left", "top", "right", "bottom", "width", "height"];
+
+  // Inline px placement of the subwrap, or none (null): content.css places it then.
+  function setBox(el, rect) {
+    for (const prop of BOX_PROPS) el.style[prop] = "";
+    if (!rect) return;
+    for (const prop of BOX_PROPS) if (rect[prop] !== undefined) el.style[prop] = `${rect[prop]}px`;
+    if (rect.bottom !== undefined) el.style.top = "auto";
+    else el.style.bottom = "auto";
+    el.style.right = "auto";
+    if (rect.bottom !== undefined) el.style.height = "";
+  }
+
+  function setDockClasses(wrap, layout) {
+    wrap.classList.toggle("shisuko-dock-top", !!layout && layout.dock === "video-top");
+    wrap.classList.toggle("shisuko-vertical", !!layout && layout.vertical);
+    wrap.classList.toggle("shisuko-side-left", !!layout && layout.side === "left");
+    wrap.classList.toggle("shisuko-side-right", !!layout && layout.side === "right");
+  }
+
+  // Puts the subtitle on its dock: classes for the docks inside the player (content.css places
+  // them), the outside layer and px for the rest. Moving the element keeps its listeners and its
+  // text nodes, so Yomitan holds the same text wherever it is. Off, it goes back inside the root,
+  // which is hidden.
+  function placeSubtitle() {
+    const wrap = state.subWrap;
+    if (!wrap || !state.root || (state.drag && state.drag.moving)) return;
+    const s = state.settings;
+    const dock = subDock(s);
+    let layout = null;
+    if (dock !== "video-bottom" && state.player && state.player.isConnected) {
+      const player = playerBox();
+      layout = dockLayout(dock, player, viewportBox(), layoutOptions(player));
+    }
+    const outside = !!(s.enabled && layout && layout.outside);
+    const host = outside ? outsideLayer() : state.root;
+    if (wrap.parentNode !== host) host.appendChild(wrap);
+    wrap.classList.remove("shisuko-dragging");
+    setDockClasses(wrap, layout);
+    setBox(wrap, outside ? layout.rect : null);
+    if (state.outside) state.outside.classList.toggle("shisuko-hidden", !outside);
+  }
+
+  // Layout reads the player's box, so it waits for the next frame and runs once per frame.
+  function scheduleLayout() {
+    if (state.layoutFrame || !state.subWrap) return;
+    state.layoutFrame = requestAnimationFrame(() => {
+      state.layoutFrame = 0;
+      placeSubtitle();
+    });
+  }
+
+  function onViewportChange() {
+    if (subDock(state.settings) !== "video-bottom") scheduleLayout();
+  }
+
+  function swallowTrusted(ev) {
+    if (!ev.isTrusted) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+  }
+
+  // The grip: a press, and once the pointer has moved DRAG_THRESHOLD_PX, a drag; the release
+  // snaps the box to the nearest dock and saves it. The moves are followed on the window, not
+  // through pointer capture: the drag moves the box (grip included) to another parent, which
+  // would release a capture.
+  function onGripDown(ev) {
+    if (!ev.isTrusted || ev.button !== 0 || ev.isPrimary === false || !state.player) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    endDrag(null);
+    state.drag = { x: ev.clientX, y: ev.clientY, moving: false, targets: [], marks: [], near: null };
+    window.addEventListener("pointermove", onDragMove, true);
+    window.addEventListener("pointerup", onDragUp, true);
+    window.addEventListener("pointercancel", onDragCancel, true);
+    window.addEventListener("keydown", onDragKey, true);
+  }
+
+  function onDragMove(ev) {
+    const drag = state.drag;
+    if (!ev.isTrusted || !drag || ev.isPrimary === false) return;
+    if (!drag.moving) {
+      if (Math.hypot(ev.clientX - drag.x, ev.clientY - drag.y) < DRAG_THRESHOLD_PX) return;
+      startDragging();
+    }
+    ev.preventDefault();
+    ev.stopPropagation();
+    moveDrag(ev.clientX, ev.clientY);
+  }
+
+  function startDragging() {
+    const drag = state.drag;
+    const player = playerBox();
+    const opts = layoutOptions(player);
+    drag.moving = true;
+    drag.targets = dockTargets(player, viewportBox(), opts);
+    // Fullscreen shows nothing outside the player, so the drag happens inside it there.
+    drag.host = opts.confined ? state.root : outsideLayer();
+    drag.host.classList.remove("shisuko-hidden");
+    const origin = drag.host.getBoundingClientRect();
+    drag.origin = { x: origin.left, y: origin.top };
+    drag.marks = drag.targets.map(({ rect }) => {
+      const mark = document.createElement("div");
+      mark.className = "shisuko-dock-target";
+      setBox(mark, { left: rect.left - drag.origin.x, top: rect.top - drag.origin.y, width: rect.width, height: rect.height });
+      drag.host.appendChild(mark);
+      return mark;
+    });
+    const wrap = state.subWrap;
+    if (wrap.parentNode !== drag.host) drag.host.appendChild(wrap);
+    setDockClasses(wrap, null);
+    wrap.classList.add("shisuko-dragging");
+    setBox(wrap, { left: 0, top: 0 });
+    // Where the grip sits in the box, so the box hangs from the pointer by it.
+    const box = wrap.getBoundingClientRect();
+    const grip = state.grip.getBoundingClientRect();
+    drag.grab = { x: grip.left + grip.width / 2 - box.left, y: grip.top + grip.height / 2 - box.top };
+    document.documentElement.classList.add("shisuko-dragging");
+  }
+
+  function moveDrag(x, y) {
+    const drag = state.drag;
+    state.lastPointer.x = x;
+    state.lastPointer.y = y;
+    setBox(state.subWrap, { left: x - drag.grab.x - drag.origin.x, top: y - drag.grab.y - drag.origin.y });
+    drag.near = nearestDock({ x, y }, drag.targets);
+    drag.marks.forEach((mark, i) => mark.classList.toggle("shisuko-dock-near", drag.targets[i].dock === drag.near));
+  }
+
+  function onDragUp(ev) {
+    const drag = state.drag;
+    if (!ev.isTrusted || !drag || ev.isPrimary === false) return;
+    if (drag.moving) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      // The click that follows lands on whatever lies under the pointer now, the player maybe.
+      window.addEventListener("click", swallowTrusted, true);
+      setTimeout(() => window.removeEventListener("click", swallowTrusted, true), 0);
+    }
+    endDrag(drag.moving ? nearestDock({ x: ev.clientX, y: ev.clientY }, drag.targets) : null);
+  }
+
+  function onDragCancel(ev) {
+    if (ev.isTrusted) endDrag(null);
+  }
+
+  function onDragKey(ev) {
+    if (!ev.isTrusted || ev.key !== "Escape" || !state.drag) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    endDrag(null);
+  }
+
+  // Ends a press or a drag: on `dock`, saved, or (null) back where it was.
+  function endDrag(dock) {
+    const drag = state.drag;
+    if (!drag) return;
+    state.drag = null;
+    window.removeEventListener("pointermove", onDragMove, true);
+    window.removeEventListener("pointerup", onDragUp, true);
+    window.removeEventListener("pointercancel", onDragCancel, true);
+    window.removeEventListener("keydown", onDragKey, true);
+    if (!drag.moving) return;
+    for (const mark of drag.marks) mark.remove();
+    document.documentElement.classList.remove("shisuko-dragging");
+    if (dock && dock !== subDock(state.settings)) {
+      // At once here; the storage echo brings the same value to every other tab.
+      state.settings = Object.assign({}, state.settings, { subDock: dock });
+      saveSettings({ subDock: dock }).then((res) => {
+        if (res && res.ok === false) showToast("Not saved: " + (res.error || "unknown error"), "error", 6000);
+      });
+    }
+    placeSubtitle();
+    // The box has left the pointer behind, and no mouseleave said so (onSubtitleLeave sits out
+    // the drag): a hover pause is decided now, the way leaving the box decides it.
+    if (state.hoverPaused) scheduleResume();
   }
 
   // ------------------------------------------------------------ discovery
@@ -681,6 +1041,9 @@
     }
     if (player !== state.player || video !== state.video) attach(player, video);
     else if (player && (!state.root || !state.root.isConnected)) ensureOverlay(player);
+    // A dock beside the video follows it wherever the page moves it, and goes back inside the
+    // player on a page with no video (onViewportChange covers resizes and scrolls).
+    if (subDock(state.settings) !== "video-bottom") scheduleLayout();
     if (href !== state.lastHref) {
       state.lastHref = href;
       const id = getVideoIdFromUrl(href);
@@ -694,7 +1057,10 @@
     state.video = video;
     if (player) {
       ensureOverlay(player);
-      state.resizeObserver = new ResizeObserver(() => updateFontSize());
+      state.resizeObserver = new ResizeObserver(() => {
+        updateFontSize();
+        scheduleLayout();
+      });
       state.resizeObserver.observe(player);
       player.addEventListener("mousemove", onPlayerMouseMove);
       player.addEventListener("mouseleave", onPlayerMouseLeave);
@@ -2516,15 +2882,42 @@
     if (!ev.isTrusted) return;
     clearHoverCapture();
     state.hoverSeenAt = Date.now();
+    // The box follows the grip; endDrag() decides about the pause once it lands.
+    if (state.drag && state.drag.moving) return;
+    if (subtitleOutside()) {
+      // No player listener follows the pointer out here: where it left is where it is.
+      state.lastPointer.x = ev.clientX;
+      state.lastPointer.y = ev.clientY;
+      state.pointerInPlayer = false;
+    }
     if (!state.hoverPaused) return;
     const related = ev.relatedTarget;
     // Leaving towards a dictionary popup (an iframe, or anything that is not part of the
-    // player) keeps the video paused until the pointer comes back over the video.
-    if (!related || related.tagName === "IFRAME" || !isYouTubeElement(related)) {
+    // player, or of the page around a box outside it) keeps the video paused until the pointer
+    // comes back over the video.
+    if (!stillOnPage(related)) {
       state.awaitingPlayerMove = true;
       return;
     }
     scheduleResume();
+  }
+
+  // The pointer over a box outside the player, where onPlayerMouseMove never hears it:
+  // Alt+Shift+K reads the word under it (knownTarget), and the hover counts as seen.
+  function onSubtitleMove(ev) {
+    if (!ev.isTrusted || !subtitleOutside()) return;
+    state.lastPointer.x = ev.clientX;
+    state.lastPointer.y = ev.clientY;
+    state.pointerInPlayer = true;
+    state.hoverSeenAt = Date.now();
+  }
+
+  // Whether the pointer, gone to `el` from the subtitle, is still on the page rather than in a
+  // dictionary popup. Inside the player only the player counts; a box outside it is left for
+  // the page around it as well (isPageElement).
+  function stillOnPage(el) {
+    if (subtitleOutside()) return isPageElement(el);
+    return !!el && el.tagName !== "IFRAME" && isYouTubeElement(el);
   }
 
   function onPlayerMouseMove(ev) {
@@ -2553,7 +2946,7 @@
       if (!state.hoverPaused || !state.video) return;
       if (state.subBox && state.subBox.matches(":hover")) return;
       const under = document.elementFromPoint(state.lastPointer.x, state.lastPointer.y);
-      if (under && (under.tagName === "IFRAME" || !isYouTubeElement(under))) {
+      if (under && !stillOnPage(under)) {
         state.awaitingPlayerMove = true;
         return;
       }
@@ -2612,6 +3005,16 @@
       state.rediscover = true;
       setTimeout(discover, 50);
     });
-    document.addEventListener("fullscreenchange", () => setTimeout(updateFontSize, 100));
+    // Fullscreen shows nothing outside the player: the outside docks come inside, and back after.
+    document.addEventListener("fullscreenchange", () => {
+      scheduleLayout();
+      setTimeout(() => {
+        updateFontSize();
+        scheduleLayout();
+      }, 100);
+    });
+    window.addEventListener("resize", onViewportChange, { passive: true });
+    // Captured: a scroll inside the page (the Shorts reel) moves the player too, and does not bubble.
+    window.addEventListener("scroll", onViewportChange, { capture: true, passive: true });
   });
 })();

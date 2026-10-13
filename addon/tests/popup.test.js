@@ -1172,7 +1172,7 @@ test("Reset style takes an edit still on its way with it, and runs the check it 
   assert.equal(popup.el("subPosition").value, 11);
   assert.equal(popup.el("subPositionOut").textContent, "11%");
   assert.deepEqual(saves(), [
-    { subPosition: 11, subFont: "default", subFontFamily: "", subTextColor: "#ffffff", subBackgroundOpacity: 72, subOutline: false, transcriptSide: "right", serverUrl: "http://127.0.0.1:8791" },
+    { subDock: "video-bottom", subPosition: 11, subFont: "default", subFontFamily: "", subTextColor: "#ffffff", subBackgroundOpacity: 72, subOutline: false, transcriptSide: "right", serverUrl: "http://127.0.0.1:8791" },
   ]);
   assert.equal(state.settings.serverUrl, "http://127.0.0.1:8791");
   assert.equal(state.settings.subFont, "default");
@@ -1271,6 +1271,22 @@ test("the font probe runs once per name, and a slider drag redraws neither the s
   assert.equal(popup.canvas.canvases, 2);
   await wait(200);
   assert.deepEqual(saves(), [{ fontScale: 2, subFontFamily: "", subFont: "mincho" }]);
+});
+
+test("the dock select shows the stored dock, saves a new one alone, and follows a drag on the video", async () => {
+  const state = { health: offline, settings: { subDock: "video-left" } };
+  const { popup, saves, elsewhere } = await openForm(state);
+  const dock = popup.el("subDock");
+  assert.equal(dock.value, "video-left");
+  dock.value = "window-bottom";
+  dock.dispatch("change");
+  await wait(200);
+  assert.deepEqual(saves(), [{ subDock: "window-bottom" }]);
+  assert.equal(state.settings.subDock, "window-bottom");
+  // The content script saves the dock a drag ended on; the open form shows it.
+  elsewhere({ subDock: "video-right" });
+  assert.equal(dock.value, "video-right");
+  assert.equal(saves().length, 1, "an echo is not saved again");
 });
 
 // popup.html is the options page too, alive in a tab for as long as the tab is: the poll is for
