@@ -1137,14 +1137,14 @@ test("addToAnki references the filename Anki reports back, not the one it asked 
   });
   const { sandbox } = loadBackground({ fetch: anki.fetch });
   const settings = await sandbox.getSettings();
-  const image = { ...MEDIA.image, filename: "shisuko_SAxvVpdUw24_6380.jpg" };
-  const audio = { ...MEDIA.audio, filename: "shisuko_SAxvVpdUw24_6380.mp3" };
+  const image = { ...MEDIA.image, filename: "shisuko_FixtureVid1_6380.jpg" };
+  const audio = { ...MEDIA.audio, filename: "shisuko_FixtureVid1_6380.mp3" };
   const res = await sandbox.addToAnki(settings, { text: "猫" }, image, audio, 555);
 
   assert.equal(res.ok, true, JSON.stringify(res));
   const update = anki.calls.find((c) => c.action === "updateNoteFields");
-  assert.equal(update.params.note.fields.Picture, '<img src="shisuko_saxvvpduw24_6380.jpg">');
-  assert.equal(update.params.note.fields.SentenceAudio, "[sound:shisuko_saxvvpduw24_6380.mp3]");
+  assert.equal(update.params.note.fields.Picture, '<img src="shisuko_fixturevid1_6380.jpg">');
+  assert.equal(update.params.note.fields.SentenceAudio, "[sound:shisuko_fixturevid1_6380.mp3]");
 });
 
 // ------------------------------------------------------------------ the whole sentence, not the cue
