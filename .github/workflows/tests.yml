@@ -53,6 +53,41 @@ jobs:
       - name: Run server tests
         run: python -m pytest server/tests -v
 
+  portal:
+    name: Portal (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      # PyAV runs the picture tests; yt-dlp is only imported lazily, so the tests need none of it.
+      - name: Install test dependencies
+        run: pip install pytest numpy av
+      - name: Check the portal's syntax
+        shell: bash
+        run: |
+          for f in portal/portal.py portal/qr.py; do
+            python -W error -c "import ast, sys; ast.parse(open(sys.argv[1], encoding='utf-8').read())" "$f"
+          done
+          for f in portal/static/*.js; do node --check "$f"; done
+      - name: Run portal tests
+        run: python -m pytest portal/tests -v
+      - name: Run portal page tests
+        run: node --test portal/tests/lib.test.js
+      - name: Check the launcher's shell syntax
+        if: runner.os == 'Linux'
+        run: |
+          bash -n server/portal.sh
+          test "$(git ls-files -s server/portal.sh | cut -c1-6)" = 100755
+
   launchers:
     name: Launcher scripts (Linux)
     runs-on: ubuntu-latest
