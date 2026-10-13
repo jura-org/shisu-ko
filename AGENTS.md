@@ -63,6 +63,10 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   was started by `run.cmd` / `run.sh` (`SHISUKO_LAUNCHER=1`) without `--no-update` or
   `SHISUKO_NO_UPDATE` (`App.update_blocker()`); else it exits with `EXIT_UPDATE` (4). The server
   never spawns `update.py` and never downloads a release itself; the launcher does.
+- A cue's word timings (`words`) are opt-in on `/sync`: only a body with `"words": true` gets them,
+  and the default response never changes (`without_words()`). Their texts join to the cue's text
+  exactly or the cue carries none; the field is optional in the cache, never a reason to bump
+  `CACHE_FORMAT`. Detail: `docs/dev/cue-building.md`, "Word timings".
 - The add-on never installs itself: no `update_url`, no `.xpi` download or install
   (`addon/tests/settings.test.js`); its updates come from addons.mozilla.org. Its one remote
   request is the anonymous `GET` of GitHub's `releases/latest` in `fetchLatestRelease()`, never with

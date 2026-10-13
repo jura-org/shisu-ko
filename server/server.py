@@ -1227,6 +1227,73 @@ def rows_fit(text: str, limits: CueLimits, at_mark: bool = False) -> bool:
     return at_mark or min(len(row) for row in rows) >= MIN_PIECE_CHARS
 
 
+# --------------------------------------------------------------------------- word timings on cues
+#
+# A cue keeps the words it was built from as `words`: [{"start", "end", "text"}] on the video's
+# clock. Their texts joined are the cue's text exactly, seam newlines included, so a client can
+# light up the word being spoken without re-deriving anything. Optional on every cue: a cache
+# record written before the field existed lacks it, and /sync sends it only to a client that asks.
+
+def cue_words(group) -> list:
+    """A group's words as cue word dicts whose texts join to word_text(group).
+
+    word_text() strips the joined text, so the whitespace it drops is cut off the edge words, and a
+    word left with no text at all is dropped rather than shipped empty.
+    """
+    texts = [w.word or "" for w in group]
+    lo, hi = 0, len(texts)
+    while lo < hi and not texts[lo].strip():
+        lo += 1
+    while hi > lo and not texts[hi - 1].strip():
+        hi -= 1
+    if lo == hi:
+        return []
+    texts[lo] = texts[lo].lstrip()
+    texts[hi - 1] = texts[hi - 1].rstrip()
+    return [{"start": w.start, "end": w.end, "text": t} for w, t in zip(group[lo:hi], texts[lo:hi])]
+
+
+def join_words(prev: dict, seam: str, cue: dict) -> None:
+    """Append `cue`'s words to `prev`'s after a merge joined their texts with `seam`.
+
+    The seam goes on the end of the previous row's last word. A side without words (a cue from an
+    old cache record) leaves the merged cue without any: a partial list would be a wrong one.
+    """
+    if not prev.get("words") or "words" not in cue:
+        prev.pop("words", None)
+        return
+    # New lists and dicts: `prev` is a shallow copy, and its words are still the input cue's.
+    head = [dict(w) for w in prev["words"]]
+    head[-1]["text"] += seam
+    prev["words"] = head + [dict(w) for w in cue["words"]]
+
+
+def settle_words(cues) -> list:
+    """Round every cue's word times as the cue times are, clamp them into the cue and keep them in
+    order; drop the words of a cue whose text they no longer spell. Run after normalise_gaps()."""
+    for cue in cues:
+        ws = cue.get("words")
+        if ws is None:
+            continue
+        if not ws or "".join(w["text"] for w in ws) != cue["text"]:
+            del cue["words"]
+            continue
+        floor, hi = cue["start"], cue["end"]
+        settled = []
+        for w in ws:
+            start = min(max(round(w["start"], 2), floor), hi)
+            end = min(max(round(w["end"], 2), start), hi)
+            settled.append({"start": start, "end": end, "text": w["text"]})
+            floor = end
+        cue["words"] = settled
+    return cues
+
+
+def without_words(cue: dict) -> dict:
+    """The cue as /sync sends it to a client that did not ask for word timings."""
+    return {k: v for k, v in cue.items() if k != "words"} if "words" in cue else cue
+
+
 def merge_adjacent(cues, limits: CueLimits, max_gap: float, only_short: bool) -> list:
     """Fold neighbouring cues together while they stay inside the char and duration limits.
 
@@ -1251,6 +1318,7 @@ def merge_adjacent(cues, limits: CueLimits, max_gap: float, only_short: bool) ->
                     and (seam != "\n" or rows_fit(text, limits, at_mark=True))):
                 prev["end"] = cue["end"]
                 prev["text"] = text
+                join_words(prev, seam, cue)
                 continue
         out.append(dict(cue))
     return out
@@ -1308,6 +1376,7 @@ def merge_segments(cues, limits: CueLimits) -> list:
                 # Elsewhere the line break is the first thing to give up. A row nobody can read, or
                 # a third row, is worse than no break at all, and refusing the merge over one leaves
                 # the stub alone on screen - which is how 言ってた ended up a four-character cue.
+                seam = ""
                 text = prev["text"] + cue["text"]
             lines = text.split("\n")
             fits = (len(text) - text.count("\n") <= limits.max_chars
@@ -1321,6 +1390,7 @@ def merge_segments(cues, limits: CueLimits) -> list:
                         and len(text) - text.count("\n") <= limits.cross_chars)):
                 prev["end"] = cue["end"]
                 prev["text"] = text
+                join_words(prev, seam, cue)
                 prev.setdefault("_merged", [prev["seg"]]).extend(
                     cue.get("_merged", [cue["seg"]]))
                 continue
@@ -1381,7 +1451,9 @@ def carry_trailing_mark(words, kept) -> list:
 
 
 def build_cues(words, speech, limits: CueLimits) -> list:
-    """One Whisper segment's words -> display-ready cues [{start, end, text}] (P1 rules 1-7)."""
+    """One Whisper segment's words -> display-ready cues [{start, end, text, words}] (P1 rules 1-7).
+
+    `words` are not yet rounded or clamped into the cue: build_window_cues() settles them last."""
     words = carry_trailing_mark(words, trim_words(words, speech, limits.trim_slack))
     cues = []
     for group in group_words(words, speech, limits):
@@ -1389,7 +1461,8 @@ def build_cues(words, speech, limits: CueLimits) -> list:
         onset = nearest_onset(speech, start, limits.snap_reach)
         if onset is not None:  # P1.3: cue in at the speech onset, not at Whisper's first word
             start = min(max(start, onset - limits.lead_in), onset + 0.30)
-        cues.append({"start": start, "end": max(group[-1].end, start + 0.01), "text": word_text(group)})
+        cues.append({"start": start, "end": max(group[-1].end, start + 0.01), "text": word_text(group),
+                     "words": cue_words(group)})
 
     for i, cue in enumerate(cues):
         ceiling = cues[i + 1]["start"] - limits.min_gap if i + 1 < len(cues) else float("inf")
@@ -1535,7 +1608,7 @@ def build_window_cues(segs, offset: float, speech, limits: CueLimits, seg_id: in
     for cue in out:
         cue["start"] = round(cue["start"], 2)
         cue["end"] = round(max(cue["end"], cue["start"] + 0.05), 2)
-    return normalise_gaps(out, limits), seg_id
+    return settle_words(normalise_gaps(out, limits)), seg_id
 
 
 # The prompt sometimes makes Whisper open a window with a timestamp seconds past its first speech,
@@ -3254,7 +3327,9 @@ class App:
             threading.Thread(target=self.fetcher.fetch, args=(s,), daemon=True, name=f"fetch-{video_id}").start()
         return s
 
-    def sync(self, video_id: str, url: str, t: float, since: int, model=None) -> dict:
+    def sync(self, video_id: str, url: str, t: float, since: int, model=None, words: bool = False) -> dict:
+        """The /sync answer. `words` asks for each cue's word timings; without it no cue carries
+        any, so a client that never asks sees exactly what it saw before the field existed."""
         self.request_model(model)
         s = self.get_session(video_id, url)
         with s.lock:
@@ -3273,7 +3348,7 @@ class App:
                 # Only the intervals around the playhead: the whole list would be resent every second.
                 "speech": [[round(a, 2), round(b, 2)] for a, b in s.speech
                            if b >= s.want_t - SPEECH_SYNC_BACK and a <= s.want_t + SPEECH_SYNC_AHEAD],
-                "cues": s.cues[since:],
+                "cues": s.cues[since:] if words else [without_words(c) for c in s.cues[since:]],
                 "next": len(s.cues),
                 "busy": s.busy,
                 # The last foreign language heard, and whether it has silenced this video.
@@ -3645,8 +3720,10 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(model, str):
             self._json(400, {"ok": False, "error": "invalid model"})
             return
+        # Opt-in: only a literal true adds the word timings, so every other body answers as before.
+        words = body.get("words") is True
         try:
-            self._json(200, self.app.sync(video_id, str(body.get("url") or ""), t, since, model))
+            self._json(200, self.app.sync(video_id, str(body.get("url") or ""), t, since, model, words))
         except Exception as exc:  # noqa: BLE001
             log.exception("sync failed")
             self._json(500, {"ok": False, "error": str(exc)})

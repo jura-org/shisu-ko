@@ -187,6 +187,22 @@ decides every window as `process()` does, `wants_lyrics()` and then `sung_in_tar
 into its record, its own `--lyrics off` sending every window through the detector; `replay_cues.py`
 passes a record's `lyrics` through, building on `lyrics_spans()` and the lyrics gates).
 
+Word timings. A cue built from timed words keeps them as `words`: `[{"start", "end", "text"}]`,
+seconds on the video's clock. `build_cues()` takes them from the same group it takes the text from
+(`cue_words()`), after `repair_lead_words()`, `punctuate_words()` and `carry_trailing_mark()` have
+had their say, so the texts joined are the cue's text exactly. A merge concatenates the lists
+(`join_words()`) and puts a seam's newline on the end of the first row's last word.
+`settle_words()` runs last in `build_window_cues()`, after `normalise_gaps()`: it rounds the times
+as the cue times are rounded, clamps them into the cue and keeps each start at or after the
+previous word's end. A cue whose words no longer spell its text, or that merged with a cue holding
+none, loses the field rather than carry a wrong one; `words` is absent, never empty. Every backend
+gives word times today (faster-whisper, MLX, Kitsune), since a segment without words is gated as
+`empty`. `/sync` sends `words` only to a body with `"words": true` (`without_words()` strips it
+otherwise), so the extension's answer is byte for byte what it was. The field is optional in the
+cache, so `CACHE_FORMAT` stays 6: a bump would throw away every watched video to add data nothing
+displays, while a record written before the field existed loads unchanged and simply has no
+`words` until its video is transcribed again.
+
 Sung lyrics (P0.3 of the doc): singing over music is no speech to Silero, so `process()` decides
 `wants_lyrics()` after the detector and the language watch: with `--lyrics auto` (default; `off`
 is the switch), less than `LYRICS_MAX_SPEECH_S` (1 s) of detected speech in the window and an
