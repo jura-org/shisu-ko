@@ -157,8 +157,18 @@
     <details>
       <summary>Subtitle style</summary>
       <div class="drawer">
+        <label class="row field">
+          <span class="lead">Place <span class="soft">or drag the subtitle's grip</span></span>
+          <select id="subDock">
+            <option value="video-bottom">Bottom of the video</option>
+            <option value="video-top">Top of the video</option>
+            <option value="window-bottom">Bottom of the window</option>
+            <option value="video-left">Left of the video (vertical)</option>
+            <option value="video-right">Right of the video (vertical)</option>
+          </select>
+        </label>
         <label class="row range">
-          <span class="lead">Height above the bottom</span>
+          <span class="lead">Height above the bottom <span class="soft">bottom of the video</span></span>
           <output id="subPositionOut"></output>
           <input type="range" id="subPosition" min="2" max="40" step="1">
         </label>

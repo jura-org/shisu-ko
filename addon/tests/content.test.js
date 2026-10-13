@@ -3806,3 +3806,200 @@ test("leaving a transcript line, or a hover the viewer did not make, sends nothi
   assert.equal(sent.length, sentSoFar);
   assert.equal(premines().length, 1);
 });
+
+// ------------------------------------------------------------------ the subtitle's dock
+
+const PLAYER = { left: 200, top: 60, width: 960, height: 540 };
+const WIDE = { width: 1600, height: 900 };
+
+test("dockLayout keeps video-bottom and video-top inside the player, top at 6% and clear of the panel", () => {
+  const { api } = loadContent();
+  const bottom = plain(api.dockLayout("video-bottom", PLAYER, WIDE, { fontPx: 20, bottomPct: 11 }));
+  assert.deepEqual([bottom.dock, bottom.outside, bottom.vertical], ["video-bottom", false, false]);
+  assert.equal(bottom.rect.top + bottom.rect.height, 60 + 540 * 0.89);
+  const top = plain(api.dockLayout("video-top", PLAYER, WIDE, { fontPx: 20, transcript: "right" }));
+  assert.deepEqual([top.dock, top.outside, top.vertical], ["video-top", false, false]);
+  assert.equal(top.rect.top, 60 + 540 * 0.06);
+  // The panel on the right takes min(34%, 380px) + 16px of the band, as content.css does.
+  assert.ok(top.rect.left + top.rect.width <= 200 + 960 - (326.4 + 16));
+  // Anything else is today's placement.
+  assert.equal(api.dockLayout("somewhere", PLAYER, WIDE, {}).dock, "video-bottom");
+});
+
+test("dockLayout hangs window-bottom from the viewport, centred on the video and clamped inside", () => {
+  const { api } = loadContent();
+  const wide = plain(api.dockLayout("window-bottom", PLAYER, WIDE, { fontPx: 20 }));
+  assert.deepEqual([wide.dock, wide.outside, wide.vertical], ["window-bottom", true, false]);
+  assert.equal(wide.rect.bottom, 16);
+  assert.equal(wide.rect.width, 960);
+  assert.equal(wide.rect.left, 200); // centred on the video's centre
+  // A narrow window: no wider than the viewport less its gaps, and never past its edges.
+  const narrow = plain(api.dockLayout("window-bottom", { left: 300, top: 0, width: 900, height: 500 }, { width: 800, height: 600 }, { fontPx: 20 }));
+  assert.equal(narrow.rect.width, 768);
+  assert.equal(narrow.rect.left, 16);
+  assert.ok(narrow.rect.left + narrow.rect.width <= 800 - 16);
+  // Fullscreen shows nothing outside the player: it renders as video-bottom.
+  const full = plain(api.dockLayout("window-bottom", PLAYER, WIDE, { confined: true }));
+  assert.deepEqual([full.dock, full.outside], ["video-bottom", false]);
+});
+
+test("dockLayout puts a side outside the video in vertical text, and inside when the room is short", () => {
+  const { api } = loadContent();
+  const right = plain(api.dockLayout("video-right", PLAYER, WIDE, { fontPx: 25 }));
+  assert.deepEqual([right.outside, right.vertical, right.side], [true, true, "right"]);
+  assert.deepEqual(right.rect, { left: 1160 + 12, top: 72, width: 440 - 24, height: 540 - 24 });
+  const left = plain(api.dockLayout("video-left", PLAYER, WIDE, { fontPx: 25 }));
+  assert.deepEqual([left.outside, left.vertical, left.side], [true, true, "left"]);
+  assert.deepEqual(left.rect, { left: 12, top: 72, width: 200 - 24, height: 540 - 24 });
+  // Theater mode: the video fills the width, and two columns do not fit beside it.
+  const theater = { left: 0, top: 56, width: 1600, height: 700 };
+  const inside = plain(api.dockLayout("video-left", theater, WIDE, { fontPx: 25 }));
+  assert.deepEqual([inside.outside, inside.vertical, inside.side], [false, true, "left"]);
+  assert.equal(inside.rect.left, 1600 * 0.02);
+  // Just too narrow for two columns of a large font: inside as well.
+  const big = plain(api.dockLayout("video-left", PLAYER, WIDE, { fontPx: 60 }));
+  assert.equal(big.outside, false);
+  // Fullscreen: inside, whatever the room.
+  assert.equal(api.dockLayout("video-right", PLAYER, WIDE, { fontPx: 25, confined: true }).outside, false);
+  // The transcript open on that side: the column stands past the panel's inner edge.
+  const panel = plain(api.dockLayout("video-right", theater, WIDE, { fontPx: 25, transcript: "right" }));
+  assert.ok(panel.rect.left + panel.rect.width <= 1600 - (380 + 16));
+  const other = plain(api.dockLayout("video-right", theater, WIDE, { fontPx: 25, transcript: "left" }));
+  assert.ok(other.rect.left + other.rect.width > 1600 - 380);
+});
+
+test("dockTargets offers every dock, less window-bottom in fullscreen; nearestDock picks the closest", () => {
+  const { api } = loadContent();
+  const all = plain(api.dockTargets(PLAYER, WIDE, { fontPx: 25 }));
+  assert.deepEqual(all.map((t) => t.dock), ["video-bottom", "video-top", "window-bottom", "video-left", "video-right"]);
+  const full = plain(api.dockTargets(PLAYER, WIDE, { fontPx: 25, confined: true }));
+  assert.deepEqual(full.map((t) => t.dock), ["video-bottom", "video-top", "video-left", "video-right"]);
+  assert.equal(api.nearestDock({ x: 1400, y: 300 }, all), "video-right"); // inside the band
+  assert.equal(api.nearestDock({ x: 50, y: 300 }, all), "video-left");
+  assert.equal(api.nearestDock({ x: 680, y: 880 }, all), "window-bottom");
+  assert.equal(api.nearestDock({ x: 680, y: 100 }, all), "video-top");
+  assert.equal(api.nearestDock({ x: 680, y: 560 }, all), "video-bottom");
+  assert.equal(api.nearestDock({ x: 680, y: 880 }, full), "video-bottom"); // fullscreen: no window dock
+  assert.equal(api.nearestDock({ x: 0, y: 0 }, []), null);
+});
+
+// A watch page with a player at PLAYER in a 1600 x 900 window, and the body the outside layer
+// goes on.
+async function dockPage(href) {
+  const loaded = loadContent(href ? { href } : {});
+  const { sandbox, stubElement } = loaded;
+  const { player, video } = playerWithVideo(stubElement, "movie_player", 12, false);
+  player.getBoundingClientRect = () => PLAYER;
+  const body = stubElement("body");
+  sandbox.document.body = body;
+  Object.assign(sandbox.document.documentElement, { clientWidth: WIDE.width, clientHeight: WIDE.height });
+  const byQuery = { "#movie_player": player, ".html5-video-player": player, "video.html5-main-video": video };
+  sandbox.document.querySelector = (sel) => byQuery[sel] || null;
+  sandbox.document.querySelectorAll = (sel) => (sel === ".shisuko-outside" ? body.children.filter((el) => el.className.startsWith("shisuko-outside")) : []);
+  await settled(); // the boot's discover() attaches to the player
+  return { ...loaded, player, video, body };
+}
+
+test("an outside dock moves the subtitle to a layer on the body, and back inside when off, in fullscreen or off a video page", async () => {
+  const page = await dockPage();
+  const { api, sandbox, body } = page;
+  const wrap = api.state.subWrap;
+  assert.equal(wrap.parentNode, api.state.root); // video-bottom: where it always was
+  assert.equal(api.state.outside, null, "no layer for a viewer who never leaves the player");
+  api.state.settings.subDock = "video-right";
+  api.placeSubtitle();
+  const layer = api.state.outside;
+  assert.equal(layer.parentNode, body);
+  assert.equal(wrap.parentNode, layer);
+  assert.equal(layer.classList.contains("shisuko-hidden"), false);
+  assert.equal(wrap.classList.contains("shisuko-vertical"), true);
+  assert.equal(wrap.style.left, "1172px");
+  assert.equal(wrap.style.top, "72px");
+  // The same element, so the same listeners and the same text for Yomitan.
+  assert.equal(api.state.subBox.parentNode, wrap);
+
+  sandbox.document.fullscreenElement = page.player;
+  api.placeSubtitle();
+  assert.equal(wrap.parentNode, api.state.root);
+  assert.equal(wrap.classList.contains("shisuko-vertical"), true, "still a column, inside the video");
+  assert.equal(wrap.style.left, "", "content.css places it inside");
+  assert.equal(layer.classList.contains("shisuko-hidden"), true);
+  assert.equal(api.state.settings.subDock, "video-right", "the setting stays");
+  sandbox.document.fullscreenElement = null;
+  api.placeSubtitle();
+  assert.equal(wrap.parentNode, layer);
+
+  // YouTube's home with the miniplayer: no video page, nothing outside the player.
+  sandbox.location.href = "https://www.youtube.com/";
+  api.placeSubtitle();
+  assert.equal(wrap.parentNode, api.state.root);
+  assert.equal(layer.classList.contains("shisuko-hidden"), true);
+  sandbox.location.href = "https://www.youtube.com/watch?v=abcdef1234";
+  api.placeSubtitle();
+  assert.equal(wrap.parentNode, layer);
+
+  // The master switch off: nothing outside, the root hidden.
+  await page.onSettingsChanged({ settings: { newValue: { enabled: false, subDock: "video-right" } } }, "local");
+  assert.equal(wrap.parentNode, api.state.root);
+  assert.equal(api.state.root.classList.contains("shisuko-hidden"), true);
+  assert.equal(layer.classList.contains("shisuko-hidden"), true);
+
+  // Back on, then window-bottom: hung from the window's bottom edge, horizontal.
+  await page.onSettingsChanged({ settings: { newValue: { subDock: "window-bottom" } } }, "local");
+  assert.equal(wrap.parentNode, layer);
+  assert.equal(wrap.classList.contains("shisuko-vertical"), false);
+  assert.deepEqual([wrap.style.bottom, wrap.style.top, wrap.style.width], ["16px", "auto", "960px"]);
+  // A setting nobody knows is video-bottom.
+  await page.onSettingsChanged({ settings: { newValue: { subDock: "url(x)" } } }, "local");
+  assert.equal(wrap.parentNode, api.state.root);
+  assert.equal(wrap.style.bottom, "");
+});
+
+test("a fresh instance removes the outside layer a dead one left on the body", async () => {
+  const { api, sandbox, stubElement } = loadContent();
+  const { player, video } = playerWithVideo(stubElement, "movie_player", 12, false);
+  const body = stubElement("body");
+  sandbox.document.body = body;
+  const stale = stubElement("div");
+  stale.className = "shisuko-outside";
+  stale.textContent = "a frozen line";
+  body.appendChild(stale);
+  const byQuery = { "#movie_player": player, ".html5-video-player": player, "video.html5-main-video": video };
+  sandbox.document.querySelector = (sel) => byQuery[sel] || null;
+  sandbox.document.querySelectorAll = (sel) => (sel === ".shisuko-outside" ? body.children.filter((el) => el.className === "shisuko-outside") : []);
+  await settled();
+  assert.ok(api.state.root);
+  assert.equal(stale.parentNode, null);
+});
+
+test("leaving a box outside the player for the page resumes; for a dictionary popup it keeps the pause", async () => {
+  const page = await dockPage();
+  const { api, sandbox } = page;
+  const timers = [];
+  sandbox.setTimeout = (fn) => timers.push(fn);
+  api.state.settings.subDock = "video-right";
+  api.placeSubtitle();
+  let plays = 0;
+  api.state.video = { currentTime: 1, paused: false, ended: false, pause() { this.paused = true; }, play: async () => { plays++; } };
+  // YouTube's page around the player: inside ytd-app, not the player's.
+  const pageEl = { nodeType: 1, tagName: "DIV", className: "", parentNode: null, closest: (sel) => (sel === "ytd-app" ? {} : null) };
+  const yomitanHost = { nodeType: 1, tagName: "DIV", className: "", parentNode: null, closest: () => null };
+  assert.equal(api.isPageElement(pageEl), true);
+  assert.equal(api.isPageElement(yomitanHost), false);
+  assert.equal(api.isPageElement({ tagName: "IFRAME" }), false);
+
+  api.onSubtitleEnter({ isTrusted: true });
+  assert.equal(api.state.hoverPaused, true);
+  api.onSubtitleLeave({ isTrusted: true, relatedTarget: yomitanHost, clientX: 1150, clientY: 300 });
+  assert.equal(api.state.awaitingPlayerMove, true, "Yomitan's popup keeps the pause");
+  assert.equal(timers.length, 0);
+
+  api.onSubtitleEnter({ isTrusted: true });
+  api.onSubtitleLeave({ isTrusted: true, relatedTarget: pageEl, clientX: 1500, clientY: 300 });
+  assert.equal(api.state.awaitingPlayerMove, false);
+  assert.deepEqual(plain(api.state.lastPointer), { x: 1500, y: 300 }, "where it left is where it is");
+  sandbox.document.elementFromPoint = () => pageEl;
+  timers.at(-1)();
+  assert.equal(api.state.hoverPaused, false);
+  assert.equal(plays, 1);
+});

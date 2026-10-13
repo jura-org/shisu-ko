@@ -8,6 +8,18 @@
   color: #fff;
 }
 
+/* The subtitle's layer outside the player (the outside docks, and the drag's targets): fixed to
+   the viewport on document.body, since the player clips what leaves it. Above YouTube's page,
+   below its masthead (z-index 2020), which so covers a box whose video has scrolled under it. */
+.shisuko-outside {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2000;
+  font-family: "Noto Sans JP", "Noto Sans CJK JP", "Yu Gothic UI", "Yu Gothic", "Meiryo", "Hiragino Sans", sans-serif;
+  color: #fff;
+}
+
 .shisuko-hidden {
   display: none !important;
 }
@@ -39,6 +51,96 @@
 .shisuko-root.shisuko-has-transcript.shisuko-transcript-left .shisuko-subwrap {
   right: 0;
   left: calc(min(34%, 380px) + 16px);
+}
+
+/* The other docks (the subDock setting; placeSubtitle() in content.js). Inside the player the
+   classes place the box; outside it, inline px from dockLayout() do. */
+.shisuko-root .shisuko-subwrap.shisuko-dock-top {
+  top: 6%;
+  bottom: auto;
+}
+
+/* A side: vertical text like a book's page, columns from the right, at the video's edge. */
+.shisuko-subwrap.shisuko-vertical {
+  padding: 0;
+  align-items: flex-start;
+}
+
+.shisuko-root .shisuko-subwrap.shisuko-vertical.shisuko-side-left {
+  top: 6%;
+  bottom: 12%;
+  left: 2%;
+  right: auto;
+  justify-content: flex-start;
+}
+
+.shisuko-root .shisuko-subwrap.shisuko-vertical.shisuko-side-right {
+  top: 6%;
+  bottom: 12%;
+  left: auto;
+  right: 2%;
+  justify-content: flex-end;
+}
+
+/* The transcript panel open on the column's side: the column stands just past its inner edge. */
+.shisuko-root.shisuko-has-transcript.shisuko-transcript-left .shisuko-subwrap.shisuko-vertical.shisuko-side-left {
+  left: calc(min(34%, 380px) + 16px);
+}
+
+.shisuko-root.shisuko-has-transcript:not(.shisuko-transcript-left) .shisuko-subwrap.shisuko-vertical.shisuko-side-right {
+  right: calc(min(34%, 380px) + 16px);
+}
+
+/* Outside, beside the video: the box hugs the video's edge. */
+.shisuko-outside .shisuko-subwrap {
+  padding: 0;
+  transition: none;
+}
+
+.shisuko-outside .shisuko-subwrap.shisuko-side-left {
+  justify-content: flex-end;
+}
+
+.shisuko-outside .shisuko-subwrap.shisuko-side-right {
+  justify-content: flex-start;
+}
+
+.shisuko-subwrap.shisuko-vertical .shisuko-sub {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  text-align: start;
+  padding: 1.4em 0.25em;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+/* Following the pointer: horizontal, its own width, nothing animated. */
+.shisuko-subwrap.shisuko-dragging {
+  width: min(600px, 80vw);
+  padding: 0;
+  justify-content: flex-start;
+  transition: none;
+}
+
+html.shisuko-dragging,
+html.shisuko-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+  -moz-user-select: none !important;
+}
+
+/* The docks a drag can end on; the one a release would pick is brighter. */
+.shisuko-dock-target {
+  position: absolute;
+  pointer-events: none;
+  border: 2px dashed rgba(255, 255, 255, 0.35);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.shisuko-dock-target.shisuko-dock-near {
+  border-color: rgba(255, 214, 0, 0.9);
+  background: rgba(255, 214, 0, 0.12);
 }
 
 .shisuko-sub {
@@ -113,11 +215,70 @@
   user-select: none;
 }
 
+/* Grip, the same at the left edge: the one place a drag starts, so the text stays free for
+   selection and Yomitan. */
+.shisuko-drag {
+  position: absolute;
+  left: -1.7em;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1.5em;
+  height: 1.5em;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.75);
+  color: #ddd;
+  font-size: 0.75em;
+  line-height: 1;
+  cursor: grab;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.08s ease, background 0.08s ease, visibility 0s linear 0.08s;
+  pointer-events: auto;
+  user-select: none;
+  touch-action: none;
+}
+
 .shisuko-sub:hover .shisuko-mine,
-.shisuko-mine:focus-visible {
+.shisuko-mine:focus-visible,
+.shisuko-sub:hover .shisuko-drag,
+.shisuko-drag:focus-visible,
+.shisuko-dragging .shisuko-drag {
   opacity: 1;
   visibility: visible;
   transition-delay: 0s;
+}
+
+.shisuko-drag:hover {
+  background: rgba(255, 255, 255, 0.9);
+  color: #000;
+}
+
+.shisuko-subwrap.shisuko-dragging .shisuko-mine {
+  opacity: 0;
+  visibility: hidden;
+}
+
+/* Vertical: the grip at the column's head, the mine button at its foot, both inside the box's
+   own padding (see .shisuko-vertical .shisuko-sub), so neither can leave the window or the video
+   with a box that starts at its top. The buttons keep horizontal writing, so their glyphs stand
+   upright. */
+.shisuko-vertical .shisuko-mine,
+.shisuko-vertical .shisuko-drag {
+  writing-mode: horizontal-tb;
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+}
+
+.shisuko-vertical .shisuko-mine {
+  top: auto;
+  bottom: 0.2em;
+}
+
+.shisuko-vertical .shisuko-drag {
+  top: 0.2em;
 }
 
 .shisuko-mine:hover {
@@ -301,7 +462,8 @@
    colour the text by the one and draw an overbar by the other, on the subtitle and in the
    transcript alike. The span changes nothing else about the text, so Yomitan scans across it.
    "proper" is no card state: a place name or Latin text the matcher names, in blue. */
-.shisuko-root {
+.shisuko-root,
+.shisuko-outside {
   --shisuko-learned: #7ed957;
   --shisuko-learning: #ffd84d;
   --shisuko-suspended: #ffa432;
@@ -313,53 +475,53 @@
   --shisuko-odaka: #7ed957;
 }
 
-.shisuko-root .shisuko-word {
+:is(.shisuko-root, .shisuko-outside) .shisuko-word {
   font: inherit;
   color: inherit;
   text-shadow: inherit;
 }
 
-.shisuko-root .shisuko-word[data-status="learned"] {
+:is(.shisuko-root, .shisuko-outside) .shisuko-word[data-status="learned"] {
   color: var(--shisuko-learned);
 }
 
-.shisuko-root .shisuko-word[data-status="learning"] {
+:is(.shisuko-root, .shisuko-outside) .shisuko-word[data-status="learning"] {
   color: var(--shisuko-learning);
 }
 
-.shisuko-root .shisuko-word[data-status="suspended"] {
+:is(.shisuko-root, .shisuko-outside) .shisuko-word[data-status="suspended"] {
   color: var(--shisuko-suspended);
 }
 
-.shisuko-root .shisuko-word[data-status="new"] {
+:is(.shisuko-root, .shisuko-outside) .shisuko-word[data-status="new"] {
   color: var(--shisuko-new);
 }
 
-.shisuko-root .shisuko-word[data-status="proper"] {
+:is(.shisuko-root, .shisuko-outside) .shisuko-word[data-status="proper"] {
   color: var(--shisuko-proper);
 }
 
 /* The overbar: Migaku's and Yomitan's colours for the four patterns. skip-ink off keeps the bar
    whole over glyphs that reach the top of the line. */
-.shisuko-root .shisuko-word[data-pitch] {
+:is(.shisuko-root, .shisuko-outside) .shisuko-word[data-pitch] {
   text-decoration-line: overline;
   text-decoration-thickness: 0.12em;
   text-decoration-skip-ink: none;
 }
 
-.shisuko-root .shisuko-word[data-pitch="heiban"] {
+:is(.shisuko-root, .shisuko-outside) .shisuko-word[data-pitch="heiban"] {
   text-decoration-color: var(--shisuko-heiban);
 }
 
-.shisuko-root .shisuko-word[data-pitch="atamadaka"] {
+:is(.shisuko-root, .shisuko-outside) .shisuko-word[data-pitch="atamadaka"] {
   text-decoration-color: var(--shisuko-atamadaka);
 }
 
-.shisuko-root .shisuko-word[data-pitch="nakadaka"] {
+:is(.shisuko-root, .shisuko-outside) .shisuko-word[data-pitch="nakadaka"] {
   text-decoration-color: var(--shisuko-nakadaka);
 }
 
-.shisuko-root .shisuko-word[data-pitch="odaka"] {
+:is(.shisuko-root, .shisuko-outside) .shisuko-word[data-pitch="odaka"] {
   text-decoration-color: var(--shisuko-odaka);
 }
 
