@@ -843,15 +843,15 @@ REPEAT_MIN_CHARS = 16
 LYRICS_MAX_SPEECH_S = 1.0    # more detected speech than this and the window is ordinary talk
 LYRICS_MIN_RMS = 0.02        # about -34 dBFS: sung windows measure 0.11-0.47, a timelapse's background
                              # music 0.015, room tone far below
+LYRICS_QUIET_RMS = 0.004     # the lowest floor a talk window's own quiet speech may pull it down to
 LYRICS_MAX_NO_SPEECH = 0.9   # the decoder's "not speech" probability for its 30 s decode. No judge of
                              # singing: a rap verse scored 0.59 and an 18-voice chorus 0.80, every line
                              # right, while a sign-off made up over background music scored 0.47; so
                              # only what the decoder is all but sure of is refused on it
 LYRICS_MIN_LOGPROB = -0.8    # sung windows scored -0.14 to -0.58; made-up lines -0.49 to -0.91
 LYRICS_MIN_WORD_PROB = 0.35  # mean word probability: genuine lines from 0.48, a garbled それられ 0.30
-LYRICS_MIN_STRETCH_S = 4.0   # a talk window's loud stretch the detector heard nothing in is planned again
-                             # as a window of its own from this length: about one sung line, and each
-                             # such window costs a Silero pass and an encoder pass for the head
+LYRICS_MIN_STRETCH_S = 4.0   # a talk window's loud stretch the detector heard nothing in is put to the
+                             # head from this length: about one sung line, and each costs an encoder pass
 
 
 def absolute_words(seg, offset: float) -> list:
@@ -2818,12 +2818,14 @@ def wants_lyrics(args, audio, speech, start: float, end: float) -> bool:
     return speech_seconds(speech, start, end) < LYRICS_MAX_SPEECH_S and rms(audio) >= LYRICS_MIN_RMS
 
 
-def transcribe_options(args, model, lyrics: bool) -> dict:
+def transcribe_options(args, model, lyrics: bool, detector: bool = True) -> dict:
     """The options of a window's model.transcribe() call: Transcriber.process() and dump_words.py
     both take them from here, so the A/B rig decodes what the server does.
 
     A Kitsune model reads the VAD options alone and gets no prompt (its decoder prompt is fixed,
-    `takes_prompt`), so retry_prompt_skips() never decodes a window twice for it.
+    `takes_prompt`), so retry_prompt_skips() never decodes a window twice for it. `detector` False
+    is a talk window holding speech the detector missed (Transcriber.choose_path()): decoded whole,
+    prompt and all.
     """
     options = dict(
         language=args.language,
@@ -2843,27 +2845,47 @@ def transcribe_options(args, model, lyrics: bool) -> dict:
         # blocklist holds no sentence of the prompt, so a noisy window the language head lets
         # through could echo the prompt itself into the cache with nothing to catch it.
         options.update(vad_filter=False, initial_prompt=None)
-    else:
+    elif detector:
         options.update(vad_filter=True, vad_parameters=vad_parameters())
+    else:
+        options.update(vad_filter=False)
     return options
 
 
-def unsung_stretches(audio, start: float, end: float, speech, cues,
+def unsung_stretches(audio, start: float, end: float, speech,
                      min_seconds: float = LYRICS_MIN_STRETCH_S) -> list:
     """The parts of a talk window, at least `min_seconds` long, that the detector heard nothing in
-    and that are not silence: what a song shares a window with the line announcing it.
+    and that are loud next to the speech it did hear: a song beside the line announcing it, or a
+    shriek Silero takes for noise. `audio` is the window's samples from `start`.
 
-    wants_lyrics() judges a window whole, so a 歌枠's MC line (a second of detected speech) sends
-    the window the detector's way, faster-whisper decodes only that line, and the thirty seconds of
-    singing after it are covered with nothing in them. process() leaves these stretches out of the
-    covered range instead; the planner brings each back as a window of its own, where the rule sees
-    next to no speech and judges it alone. `audio` is the window's samples from `start`.
+    Loud means half the window's own speech level, held between LYRICS_QUIET_RMS and LYRICS_MIN_RMS.
+    The cap keeps an ordinary video where the absolute floor had it (its talk measures 0.04 and up);
+    the ratio reaches a quietly mixed one, whose talk measures 0.016 and whose missed lines 0.019.
+    The window's own speech is enough to measure: only a window holding LYRICS_MAX_SPEECH_S of it
+    gets here, so no level has to be kept per video.
+    """
+    floor = max(LYRICS_QUIET_RMS, min(LYRICS_MIN_RMS, rms(speech_samples(audio, speech, start, end - start)) / 2))
+    out = []
+    for a, b in unheard_stretches([[start, end]], speech, [], min_seconds):
+        if rms(audio[int((a - start) * SAMPLE_RATE):int((b - start) * SAMPLE_RATE)]) >= floor:
+            out.append([a, b])
+    return out
+
+
+def vouched_segments(segs, offset: float, speech, stretches) -> list:
+    """`segs` less every segment lying mostly inside `stretches` that lyrics_reason() refuses.
+
+    A rescued stretch counts as speech, which would excuse anything the decoder wrote there, a
+    sign-off over the music included; the detector heard nothing in it, so the decoder's own
+    confidence judges it, as on the lyrics path. dump_words.py records what this keeps.
     """
     out = []
-    for a, b in unheard_stretches([[start, end]], speech, cues, min_seconds):
-        samples = audio[max(0, int((a - start) * SAMPLE_RATE)):max(0, int((b - start) * SAMPLE_RATE))]
-        if rms(samples) >= LYRICS_MIN_RMS:
-            out.append([a, b])
+    for seg in segs:
+        words, reason = gate_segment(seg, offset, speech, lyrics=True)
+        inside = bool(words) and (2 * interval_overlap(words[0].start, words[-1].end, stretches)
+                                  > words[-1].end - words[0].start)
+        if not (reason and inside):
+            out.append(seg)
     return out
 
 
@@ -2999,6 +3021,32 @@ class Transcriber(threading.Thread):
                  s.video_id, fmt_time(start), fmt_time(end), args.language, language, probability)
         return False
 
+    def choose_path(self, s: Session, audio, speech, start: float, end: float) -> tuple:
+        """(lyrics, rescued) for a window: whether it takes the lyrics path, and the loud stretches
+        the detector missed in a talk window that the head hears the target language in, almost
+        always none. process() and dump_words.py both decide here.
+
+        Singing over music is no speech to Silero, so a window it heard next to nothing in, whose
+        audio is not silence, is decoded without the detector and gated on Whisper's own confidence
+        (lyrics_reason), once the head has heard the target language in it: loud noise and a
+        foreign song stay with the detector, which decodes nothing of them. A talk window can hide
+        the same thing beside its speech (a song after the line announcing it, a shriek): its
+        unsung_stretches() go to the head together, and if it hears the target language the window
+        is decoded whole with them counted as speech, so a line the detector caught late reaches
+        the decoder in one piece. Neither verdict is a vote: a foreign song never pauses. A model
+        whose gates this path has no figures for (Kitsune) never takes either.
+        """
+        args = self.app.args
+        if getattr(args, "lyrics", "auto") != "auto" or not getattr(self.app.model, "sings", True):
+            return False, []
+        if speech_seconds(speech, start, end) < LYRICS_MAX_SPEECH_S:
+            return wants_lyrics(args, audio, speech, start, end) and self.sung_in_target(s, audio, start, end), []
+        stretches = unsung_stretches(audio, start, end, speech)
+        if stretches and self.sung_in_target(s, speech_samples(audio, stretches, start, end - start),
+                                             stretches[0][0], stretches[-1][1]):
+            return False, stretches
+        return False, []
+
     def process(self, s: Session, start: float, end: float) -> None:
         args = self.app.args
         with s.lock:
@@ -3055,22 +3103,17 @@ class Transcriber(threading.Thread):
             log.info("[%s] %s-%s: skipped (heard %s, paused)", s.video_id, fmt_time(start), fmt_time(end), heard)
             return
 
-        # Singing over music is no speech to Silero, so a window it heard nothing in, whose audio
-        # is not silence, is decoded without the detector and gated on Whisper's own confidence
-        # (lyrics_reason), once the language head has heard the target language in it: loud
-        # noise and a foreign song stay with the detector, which decodes nothing of them. The
-        # language watch above cast no vote on such a window, and the head's verdict here is no
-        # vote either: a foreign song never pauses.
-        # A model whose gates this path has no figures for (Kitsune) never takes it.
-        lyrics = (getattr(self.app.model, "sings", True) and wants_lyrics(args, audio, speech, start, end)
-                  and self.sung_in_target(s, audio, start, end))
-        options = transcribe_options(args, self.app.model, lyrics)
+        lyrics, rescued = self.choose_path(s, audio, speech, start, end)
+        options = transcribe_options(args, self.app.model, lyrics, detector=not rescued)
+        speech = merge_intervals(speech + rescued) if rescued else speech
         try:
             segments, _info = self.app.model.transcribe(audio, **options)
             segs = list(segments)
             skipped, spliced = 0.0, 0
             if not lyrics:
                 segs, skipped, spliced = retry_prompt_skips(self.app.model, audio, options, segs, start, speech)
+            if rescued:
+                segs = vouched_segments(segs, start, speech, rescued)
         except Exception as exc:  # noqa: BLE001
             log.error("[%s] transcription of %s-%s failed: %s", s.video_id, fmt_time(start), fmt_time(end), exc)
             if gpu_context_broken(exc):
@@ -3096,17 +3139,11 @@ class Transcriber(threading.Thread):
         with s.lock:
             seg_id = s.seg_next
         fresh, seg_id = build_window_cues(segs, start, speech, limits, seg_id, drops, new_end, lyrics)
-
-        # A song shares a window with the line announcing it: the detector heard that line, so the
-        # window went its way and nothing of the singing was decoded. Its loud unheard stretches are
-        # not covered; the planner brings each back as a window of its own, where wants_lyrics()
-        # sees next to no speech. Only a window that the speech heard in it kept from the lyrics
-        # path: one the head refused (or --lyrics off, or a model without the path) is covered
-        # whole, or it would be planned for ever.
-        unsung: list = []
-        if not lyrics and getattr(args, "lyrics", "auto") == "auto" and getattr(self.app.model, "sings", True) \
-                and speech_seconds(speech, start, end) >= LYRICS_MAX_SPEECH_S:
-            unsung = unsung_stretches(audio, start, new_end, speech, fresh)
+        # What the head vouched for and the whole-window decode left without a cue is not covered:
+        # the planner brings it back as a window of its own, where the lyrics path decodes it
+        # alone. A song beside its MC line comes out there, where the prompted decode of the whole
+        # window wrote nothing of it, or a sign-off the gates refused.
+        unsung = unheard_stretches(rescued, [], fresh, LYRICS_MIN_STRETCH_S)
 
         added = 0
         with s.lock:
@@ -3126,11 +3163,12 @@ class Transcriber(threading.Thread):
         elapsed = time.time() - t0
         gated = ", ".join(f"{k}:{v}" for k, v in sorted(drops.items()) if not k.startswith("_"))
         log.info(
-            "[%s] %s-%s: %d cues in %.1fs (%.0fx realtime)%s%s%s%s",
+            "[%s] %s-%s: %d cues in %.1fs (%.0fx realtime)%s%s%s%s%s",
             s.video_id, fmt_time(start), fmt_time(new_end), added, elapsed,
             (new_end - start) / max(elapsed, 1e-3), " [lyrics]" if lyrics else "",
             f" [dropped {gated}]" if gated else "",
-            f" [{sum(b - a for a, b in unsung):.0f} s heard nothing in, planned again]" if unsung else "",
+            f" [{sum(b - a for a, b in rescued):.0f} s the detector missed, decoded whole]" if rescued else "",
+            f" [{sum(b - a for a, b in unsung):.0f} s of it planned again]" if unsung else "",
             f" [{skipped:.0f} s skipped with the prompt, {spliced} segments from a decode without it]"
             if skipped else "",
         )

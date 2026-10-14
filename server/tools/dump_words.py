@@ -8,7 +8,9 @@ versions are judged on identical model output instead of on two beam searches.
 Every window is decided as Transcriber.process() decides it: one the server would take the lyrics
 path on (wants_lyrics(), then sung_in_target(): next to no speech heard, not silence, and the
 target language heard in it) is decoded without the detector, and its record carries
-"lyrics": true, which replay_cues.py reads. --lyrics off dumps every window through the detector.
+"lyrics": true, which replay_cues.py reads; a talk window holding a loud stretch the detector
+missed that the head hears the target language in is decoded whole, and its record's speech
+counts that stretch. --lyrics off dumps every window through the detector.
 A talk window whose prompted decode skipped speech is decoded again without the prompt and the
 two spliced (retry_prompt_skips()), as process() does; its record carries "prompt_retry": true.
 
@@ -123,16 +125,19 @@ def main(argv=None) -> int:
         speech = server.detect_speech(chunk, offset=start)
         # The same decision and the same call Transcriber.process() makes, so the dump is what the
         # server would have seen: a window it would take the lyrics path on is decoded without the
-        # detector, and the record says so.
-        lyrics = (getattr(model, "sings", True) and server.wants_lyrics(lyrics_args, chunk, speech, start, stop)
-                  and worker.sung_in_target(stub, chunk, start, stop))
-        options = server.transcribe_options(lyrics_args, model, lyrics)
+        # detector, and the record says so; one holding speech the detector missed is decoded
+        # whole, and its record's speech counts the missed stretches, as process() counts them.
+        lyrics, rescued = worker.choose_path(stub, chunk, speech, start, stop)
+        options = server.transcribe_options(lyrics_args, model, lyrics, detector=not rescued)
+        speech = server.merge_intervals(speech + rescued) if rescued else speech
         segments, _info = model.transcribe(chunk, **options)
         segments, skipped, spliced = list(segments), 0.0, 0
         if not lyrics:
             # The prompt-skip retry process() runs: the record holds the spliced list, so
             # replay_cues.py builds on what the server would have built on.
             segments, skipped, spliced = server.retry_prompt_skips(model, chunk, options, segments, start, speech)
+        if rescued:
+            segments = server.vouched_segments(segments, start, speech, rescued)
         record = {"window": [start, stop],
                   "speech": [[round(a, 2), round(b, 2)] for a, b in speech],
                   "lyrics": lyrics,

@@ -406,8 +406,8 @@ probability.
 
 **What the transcriber does differently.** A Kitsune model says `detects_language = False`,
 `sings = False`, `takes_prompt = False`. `process()` skips the language watch for it (no language
-head; `detect_language()` raises), never takes the lyrics path or leaves unsung stretches
-uncovered (the lyrics gates read Whisper's confidence figures), and `transcribe_options()` passes
+head; `detect_language()` raises), never takes the lyrics path or decodes a talk window
+whole (the lyrics gates read Whisper's confidence figures), and `transcribe_options()` passes
 no initial prompt, so `retry_prompt_skips()` never decodes a window twice. `dump_words.py` takes
 its options and its lyrics decision from the same helpers and loads a Kitsune model through
 `load_kitsune_model()`.

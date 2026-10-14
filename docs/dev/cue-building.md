@@ -235,16 +235,30 @@ lines into one row, and a pause inside a segment never split), and a stranded fi
 beginning a pad before the next word, so the repair slides the head onto that onset as it does on
 the talk path. `process()` passes them as `speech` and stores them in `Session.speech`, so the
 sync's speech list and the cache carry the sung lines (nothing else reads them today; `/clip`
-slices the audio by the times the client sends); the log line gains ` [lyrics]`. A song shares a
-window with the line announcing it (a 歌枠's MC line): `wants_lyrics()` judges the window whole,
-the second of speech sends it the detector's way, and nothing of the singing is decoded, so
-`process()` leaves the `unsung_stretches()` of a talk window (loud, `rms()` at least
-`LYRICS_MIN_RMS`, unheard, `unheard_stretches()` of the window at `LYRICS_MIN_STRETCH_S`, 4 s,
-under both floors) out of `covered` when the window holds `LYRICS_MAX_SPEECH_S` or more of
-detected speech, and only then (a window the head refused, or `--lyrics off`, is covered whole,
-or it would be planned for ever); the planner brings each back as a window of its own, where the
-rule sees next to no speech and judges it alone, and the log line gains
-` [N s heard nothing in, planned again]`. `App.cache_record(s)` is the record `save_cache()`
+slices the audio by the times the client sends); the log line gains ` [lyrics]`. A talk window can hide the same thing beside its speech: a song after the
+line announcing it (a 歌枠's MC line), or a shriek Silero takes for noise. `wants_lyrics()` judges
+the window whole, so the detector's decode used to cut both out, and a line whose onset the
+detector caught late reached Whisper with its head clipped off. `Transcriber.choose_path()`
+decides both paths before the decode (`process()` and `dump_words.py` call it): a window holding
+`LYRICS_MAX_SPEECH_S` or more of detected speech has its `unsung_stretches()` (unheard,
+`unheard_stretches()` of the window at `LYRICS_MIN_STRETCH_S`, 4 s, under both floors; loud, `rms()`
+at least half the window's own detected-speech level, held between `LYRICS_QUIET_RMS`, 0.004, and
+`LYRICS_MIN_RMS`) put to `sung_in_target()` together, their samples concatenated. Only a verdict for
+the target language changes anything: the window is then decoded whole (`transcribe_options(...,
+detector=False)`: `vad_filter=False`, the prompt kept), the stretches join `speech` for the
+prompt-skip retry, the gates, the cue builder and `Session.speech`, and `vouched_segments()` drops a
+segment lying mostly inside a stretch that `lyrics_reason()` refuses, since a stretch counted as
+speech would excuse a sign-off made up over the music. A part of a stretch, 4 s or more, that the
+decode left without a cue is kept out of `covered`, and the planner brings it back as a window of
+its own, where the lyrics path decodes it alone (a song beside talk the prompted whole-window
+decode wrote nothing of). A refused or silent stretch costs nothing beyond the head's pass, and the
+window is decoded and covered as before; a window without such a stretch decodes exactly as before.
+The floor is relative because a quietly mixed video's talk measures 0.016 and its missed lines 0.019,
+under the old absolute 0.02, while ordinary talk measures 0.04 and up and keeps the old floor; the
+window's own speech is the measure, so nothing is kept per video. Measured over the first ten
+minutes of 40 cached videos (451 windows): 51 windows hold a stretch at the old floor, 55 at this
+one, and the head accepts 18. The log line gains ` [N s the detector missed, decoded whole]` and
+` [N s of it planned again]`. `App.cache_record(s)` is the record `save_cache()`
 writes (`"lyrics"` beside the cues, the covered ranges and the speech), and `retranscribe.py`'s
 `write_results()` writes the same. The language watch is untouched: without speech intervals it
 casts no vote, and the head's verdict in `sung_in_target()` never reaches `language_vote()`, so
