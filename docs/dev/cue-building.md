@@ -233,7 +233,8 @@ displays, while a record written before the field existed loads unchanged and si
 Sung lyrics (P0.3 of the doc): singing over music is no speech to Silero, so `process()` decides
 `wants_lyrics()` after the detector and the language watch: with `--lyrics auto` (default; `off`
 is the switch), less than `LYRICS_MAX_SPEECH_S` (1 s) of detected speech in the window and an
-`rms()` of at least `LYRICS_MIN_RMS` (0.02), and then, that holding, a target-language verdict on
+`rms()` of at least `loudness_floor(Session.talk_rms)` (`LYRICS_MIN_RMS`, 0.02, on an ordinary
+video; see below), and then, that holding, a target-language verdict on
 the window from `Transcriber.sung_in_target()` (the language head over the window's own samples,
 `speech_samples(audio, [[start, end]], start)`, the window's first `LANGUAGE_DETECT_SECONDS` (30 s)
 and, when those are refused and the window is longer, its last 30 s, so a song starting after an
@@ -275,17 +276,40 @@ the target language changes anything: the window is then decoded whole (`transcr
 detector=False)`: `vad_filter=False`, the prompt kept), the stretches join `speech` for the
 prompt-skip retry, the gates, the cue builder and `Session.speech`, and `vouched_segments()` drops a
 segment lying mostly inside a stretch that `lyrics_reason()` refuses, since a stretch counted as
-speech would excuse a sign-off made up over the music; its refusals count in the log's `[dropped …]`. A part of a stretch, 4 s or more, that the
-decode left without a cue is kept out of `covered`, and the planner brings it back as a window of
-its own, where the lyrics path decodes it alone (a song beside talk the prompted whole-window
-decode wrote nothing of). A refused or silent stretch costs nothing beyond the head's pass, and the
+speech would excuse a sign-off made up over the music; its refusals count in the log's `[dropped …]`. A part of a stretch, 4 s or more, that runs to
+the window's end and holds no cue goes back to the planner as a cut segment does: `new_end` moves to
+its start, and the next window hears it from its own start, verdict carried (below). A part inside
+the window stays covered. It used to be planned again alone, and a 4 s window padded to Whisper's
+30 s is where it invents: a picture book's song tail came back as "おやすみなさい。" or "ご視聴あり
+がとうございました。" in three runs of three, over audio the reference decode holds nothing in, while
+none of nine such windows over two videos gave back a line the whole window had missed. A refused or silent stretch costs nothing beyond the head's pass, and the
 window is decoded and covered as before; a window without such a stretch decodes exactly as before.
 The floor is relative because a quietly mixed video's talk measures 0.016 and its missed lines 0.019,
-under the old absolute 0.02, while ordinary talk measures 0.04 and up and keeps the old floor; the
-window's own speech is the measure, so nothing is kept per video. Measured over the first ten
+under the old absolute 0.02, while ordinary talk measures 0.04 and up and keeps the old floor
+(`loudness_floor()`); a talk window's own speech is its measure. Measured over the first ten
 minutes of 40 cached videos (451 windows): 51 windows hold a stretch at the old floor, 55 at this
-one, and the head accepts 18. The log line gains ` [N s the detector missed, decoded whole]` and
-` [N s of it planned again]`. `App.cache_record(s)` is the record `save_cache()`
+one, and the head accepts 18. A whole-song window has no speech
+of its own, so its floor is `loudness_floor()` of `Session.talk_rms`, the loudest speech level any
+talk window of the session measured (kept in memory, never cached): 0.02 until one has, and 0.02
+for good once any talk reached 0.04, so one whispered window in a loud video lowers nothing. A CPU
+scan of the cache's 284 videos (fixed 30 s windows) finds one window this opens, in a video whose
+talk measures 0.007. A song also runs on past a window's end: a stretch starting inside audio the
+head already vouched for (`Session.sung`, in memory: the stretches it accepted and the lyrics windows
+it passed) needs no verdict. Asked alone, the head hears too little of a fragment to be sure: a
+song's 12 s tail scored 0.62 and 0.66 and two lines were lost. Detected speech is not enough to
+carry: a window the segment rule cut ends inside speech, and a stretch after it may be one the head
+has just refused. Any other stretch of the window sends all of them to the head together, as before,
+and the gates still judge every line; a lyrics window is always asked, since it has thirty seconds
+to judge. A carried stretch is logged as `carries on the target language heard before it`.
+A whole-window decode can write the narration after a sung stretch in kana (わたしはあかずきんです for
+私は赤ずきんです): the music in the same encoder window shifts the decoder, since the same audio with the
+song muted comes out in kanji, and neither the prompt nor `condition_on_previous_text` changes it.
+Over the ten rescued windows of three videos the narration's kanji share is unchanged (0.234 on
+main, 0.233), so it stays: decoding the narration through the detector instead (and filling the
+stretches from a whole decode) brings back what this path fixes, since faster-whisper's VAD glues
+the lines either side of a removed stretch into one (キビタの変身に向けて飛ばす技なんだけど).
+The log line gains ` [N s the detector missed, decoded whole]` and
+` [its last N s left to the next window]`. `App.cache_record(s)` is the record `save_cache()`
 writes (`"lyrics"` beside the cues, the covered ranges and the speech), and `retranscribe.py`'s
 `write_results()` writes the same. The language watch is untouched: without speech intervals it
 casts no vote, and the head's verdict in `sung_in_target()` never reaches `language_vote()`, so

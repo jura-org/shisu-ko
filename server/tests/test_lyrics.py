@@ -468,7 +468,6 @@ def test_the_song_after_the_mc_line_is_decoded_with_it(monkeypatch, tmp_path, ca
     assert close(s.covered, [[0.0, 40.0]])
     assert close(s.speech, [[0.5, 40.0]])
     assert any("38 s the detector missed, decoded whole" in r.getMessage() for r in caplog.records)
-    assert not any("planned again" in r.getMessage() for r in caplog.records)
 
 
 def test_singing_before_the_mc_line_and_a_bridge_between_two_lines_are_decoded_with_the_talk(monkeypatch, tmp_path):
@@ -504,31 +503,43 @@ def test_a_late_onset_line_reaches_the_decoder_whole(monkeypatch, tmp_path):
     assert close(s.covered, [[0.0, 40.0]])
 
 
-def test_a_sign_off_in_a_rescued_stretch_answers_to_the_lyrics_gates_and_the_song_is_planned_again(
+def test_a_sign_off_in_a_rescued_stretch_answers_to_the_lyrics_gates_and_the_song_comes_from_the_retry(
         monkeypatch, tmp_path, caplog):
-    # The stretch counts as speech, so the talk gates would keep a sign-off the whole-window decode
+    # The stretch counts as speech, so the talk gates would keep a sign-off the prompted decode
     # wrote over the music; the decoder's own confidence judges it there instead, as on the lyrics
-    # path. Its stretch then holds no cue: the planner brings it back as a window of its own, where
-    # the lyrics path decodes the song alone.
+    # path. The song the prompted decode skipped comes from the decode without the prompt, in the
+    # same window. The music after it, to the window's end, holds nothing: it goes to the next
+    # window, which hears nothing there either and covers it for good.
     caplog.set_level(logging.INFO, logger="shisu-ko")
     song = [line(text, 6.0 + 3.0 * i, 8.5 + 3.0 * i) for i, text in enumerate(["君の声が聞こえる夜に", "星を数えて眠るまで"])]
-    worker, model = timeline_worker(monkeypatch, tmp_path, [UTAWAKU[0]] + song, heard=[[0.5, 2.5]], window=40.0)
+    worker, model = timeline_worker(monkeypatch, tmp_path, [UTAWAKU[0]] + song, heard=[[0.5, 2.5]], window=40.0,
+                                    initial_prompt=server.DEFAULT_PROMPTS["ja"])
     first = [seg(UTAWAKU[0].text, UTAWAKU[0].words), line("ご視聴ありがとうございました", 20.0, 22.0)]
     decode = model.transcribe
     model.transcribe = lambda audio, **kw: (model.calls.append(kw), (iter(first), None))[1] if not model.calls \
         else decode(audio, **kw)
     s = session(tone(80.0))
     worker.process(s, 0.0, 40.0)
-    assert [c["text"] for c in s.cues] == ["はい次の曲いきます"]
-    assert close(s.covered, [[0.0, 2.5 + LEAD_OUT]])
-    assert any("planned again" in r.getMessage() for r in caplog.records)
+    assert len(model.calls) == 2 and model.calls[1]["initial_prompt"] is None
+    assert sung_text(s.cues) == "はい次の曲いきます。君の声が聞こえる夜に星を数えて眠るまで"
+    assert any("blocklist:1" in r.getMessage() for r in caplog.records)
+    given_back = s.covered[-1][1]
+    assert close(s.covered, [[0.0, given_back]]) and given_back < 13.0
+    worker.process(s, given_back, given_back + 40.0)
+    assert close(s.covered, [[0.0, given_back + 40.0]])
 
-    window = server.plan_window(s, worker.app.args)
-    assert window == pytest.approx((2.5 + LEAD_OUT, 42.5 + LEAD_OUT))
-    worker.process(s, *window)
-    assert model.calls[1]["vad_filter"] is False and model.calls[1]["initial_prompt"] is None  # the lyrics path
-    assert [c["text"] for c in s.cues[1:]] == ["君の声が聞こえる夜に", "星を数えて眠るまで"]
-    assert close(s.covered, [[0.0, 42.5 + LEAD_OUT]])
+
+def test_a_vouched_stretch_the_decode_wrote_nothing_in_stays_covered_inside_the_window(monkeypatch, tmp_path):
+    # The stretch had a whole window of context; planning it again alone would decode a few
+    # seconds padded to thirty, where Whisper invents a sign-off. Only a stretch at the window's
+    # end goes back to the planner.
+    segs = [line("はい次の曲いきます", 0.5, 2.5), line("ありがとう", 30.5, 32.5)]
+    worker, model = timeline_worker(monkeypatch, tmp_path, segs, heard=[[0.5, 2.5], [30.5, 32.5]], window=36.0,
+                                    language_patience=0.0)
+    s = session(tone(80.0))
+    worker.process(s, 0.0, 36.0)
+    assert model.calls[0]["vad_filter"] is False
+    assert close(s.covered, [[0.0, 36.0]])
 
 
 def test_a_short_or_quiet_unheard_stretch_stays_covered(monkeypatch, tmp_path):
@@ -603,6 +614,82 @@ def test_vouched_segments_judge_what_lies_in_a_rescued_stretch_by_the_lyrics_gat
     drops: dict = {}
     assert server.vouched_segments([kept, sign_off, unsure, outside], 0.0, speech, stretches, drops) == [kept, outside]
     assert {k: v for k, v in drops.items() if not k.startswith("_")} == {"blocklist": 1, "unsure": 1}
+
+
+def test_a_song_cut_by_the_window_end_carries_its_verdict_into_the_next_window(monkeypatch, tmp_path, caplog):
+    # The MC line, then a song the window's end cuts at 30 s. The head vouched for 2.5-30; the
+    # next window's stretch starting at 30 is the same song carrying on, so it is decoded whole
+    # without a second ask, which on a 12 s tail of a real song scored 0.62 and lost two lines.
+    caplog.set_level(logging.INFO, logger="shisu-ko")
+    song = [line(text, 6.0 + 4.0 * i, 9.0 + 4.0 * i) for i, text in enumerate([
+        "君の声が聞こえる夜に", "星を数えて眠るまで", "会いたくて震える", "夜空を見上げて", "遠く離れても",
+        "同じ月を見てる", "この歌が届くなら", "もう一度だけ", "君の名前を呼ぶ", "夜が明けるまで", "ありがとう"])]
+    worker, model = timeline_worker(monkeypatch, tmp_path, [UTAWAKU[0]] + song + [line("次いきます", 50.5, 52.5)],
+                                    heard=[[0.5, 2.5], [50.5, 52.5]], window=30.0, language_patience=0.0)
+    s = session(np.concatenate([tone(52.5), silence(27.5)]))
+    worker.process(s, 0.0, 30.0)
+    assert model.detections == 1 and model.calls[0]["vad_filter"] is False
+    start = s.covered[-1][1]
+    model.verdict = ("ja", 0.62)  # what the tail alone would get: refused, were it asked
+    worker.process(s, start, start + 30.0)
+    assert model.detections == 1
+    assert model.calls[-1]["vad_filter"] is False
+    assert sung_text(s.cues).endswith("夜が明けるまでありがとう次いきます")
+    assert any("not asked again" in r.getMessage() for r in caplog.records)
+
+
+def test_only_a_stretch_carrying_on_the_speech_before_it_skips_the_head(monkeypatch, tmp_path):
+    def run(first_verdict, heard):
+        worker, model = timeline_worker(monkeypatch, tmp_path, [], heard=heard, window=30.0, language_patience=0.0)
+        model.verdict = first_verdict
+        s = session(tone(80.0))
+        worker.process(s, 0.0, 30.0)
+        model.verdict = ("ja", 0.62)
+        worker.process(s, 30.0, 60.0)
+        return model
+
+    # Refused before, after detected speech running up to the seam: asked again, refused again.
+    model = run(("en", 0.99), [[0.5, 2.5], [20.0, 30.0], [50.5, 52.5]])
+    assert model.detections == 2 and model.calls[-1]["vad_filter"] is True
+    model = run(("ja", 0.95), [[0.5, 2.5], [30.0, 32.0]])  # speech at the seam: a stretch of its own
+    assert model.detections == 2 and model.calls[-1]["vad_filter"] is True
+
+
+def test_loudness_floor_is_half_the_talk_held_between_the_quiet_and_the_absolute_floors():
+    assert server.loudness_floor(0.0) == server.LYRICS_MIN_RMS        # nothing known yet
+    assert server.loudness_floor(0.2) == server.LYRICS_MIN_RMS
+    assert server.loudness_floor(0.04) == server.LYRICS_MIN_RMS       # ordinary talk keeps the absolute floor
+    assert server.loudness_floor(0.016) == pytest.approx(0.008)
+    assert server.loudness_floor(0.001) == server.LYRICS_QUIET_RMS
+
+
+def test_a_quiet_video_s_whole_song_window_is_measured_against_its_talk(monkeypatch, tmp_path):
+    # A quietly mixed video: talk at 0.016 rms, a song at 0.012, under LYRICS_MIN_RMS. A window
+    # holding the song alone has no speech of its own to measure it against; the talk heard
+    # earlier in the video sets its floor. Nothing heard yet, or loud talk, keeps the absolute one.
+    def song_window(talk_rms):
+        worker, model = timeline_worker(monkeypatch, tmp_path, SUNG, heard=[[0.0, 10.0]] if talk_rms else [],
+                                        window=20.0, language_patience=0.0)
+        talk = tone(20.0, talk_rms * math.sqrt(2)) if talk_rms else silence(20.0)
+        s = session(np.concatenate([talk, tone(20.0, 0.012 * math.sqrt(2))]))
+        if talk_rms:
+            worker.process(s, 0.0, 20.0)
+        model.heard = []
+        model.offset = 20.0
+        lyrics, _ = worker.choose_path(s, s.audio[20 * RATE:], [], 20.0, 40.0)
+        return lyrics, s.talk_rms
+
+    lyrics, level = song_window(0.016)
+    assert lyrics is True and level == pytest.approx(0.016, rel=0.01)
+    assert song_window(0.2)[0] is False
+    assert song_window(0.0) == (False, 0.0)
+
+
+def test_wants_lyrics_takes_the_floor_it_is_given():
+    quiet = tone(20.0, 0.012 * math.sqrt(2))
+    args = SimpleNamespace(lyrics="auto")
+    assert server.wants_lyrics(args, quiet, [], 0.0, 20.0) is False
+    assert server.wants_lyrics(args, quiet, [], 0.0, 20.0, floor=0.008) is True
 
 
 # --------------------------------------------------------------------------- the language verdict
