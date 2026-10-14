@@ -197,7 +197,9 @@ a lyrics window), `build_cues()` and `merge_segments()`. Rules that must not reg
 - The merges ask `breaks_word()`, never `may_break()`: wired to `may_break()`, the merge forced a
   41-character, 8.1-second cue.
 - A sentence-mark seam never gives way (`ends_sentence()`), in `merge_adjacent()` and
-  `merge_segments()`; a merge that cannot give both a row is refused.
+  `merge_segments()`; a merge that cannot give both a row is refused, and so is one whose second
+  row does not end what it says (`finishes()`: its own mark, a pause, or nothing after it; never a
+  Whisper segment end).
 - `splice_segments()` decides what the prompted decode lacks by aligning text (`unheard_runs()`),
   never by time overlap.
 - `server/tools/cue_stats.py`, `retranscribe.py`, `dump_words.py` and `replay_cues.py` measure a

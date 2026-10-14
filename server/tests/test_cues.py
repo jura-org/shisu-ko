@@ -726,6 +726,37 @@ def test_merge_segments_gives_a_sentence_its_own_row_however_short_it_is():
     assert [c["text"] for c in server.merge_segments(cues, limits())] == ["今日はいい天気ですね。\nうん。"]
 
 
+def test_merge_segments_gives_an_unfinished_head_to_its_continuation():
+    # Folding left to right, the cue before the mark took the next sentence's head as its second
+    # row, and the line it opens then lacked it on screen and on the card mined from it.
+    cues = [cue("ちょっとこれやだ。", 0.0, 1.5), cue("ほんとは", 1.7, 2.3, 1),
+            cue("葉っぱを相手に向けて飛ばす技なんだけど", 2.3, 5.5, 1)]
+    out = server.merge_segments(cues, limits())
+    assert [c["text"] for c in out] == ["ちょっとこれやだ。", "ほんとは葉っぱを相手に向けて飛ばす技なんだけど"]
+
+
+LONG = "待ってちょっとこれやだーやだやだやだこれやだ。"  # leaves no room for the continuation
+
+
+def test_merge_segments_lets_a_finished_piece_ride_after_a_mark():
+    # Finished is a mark, a pause before the next cue, or nothing after it. A segment end is not: a
+    # real decode cut ほんとは into a segment of its own, flush against 葉っぱを….
+    head, rest = cue("ほんとは", 1.7, 2.3, 1), cue("葉っぱを相手に向けて飛ばす技なんだけど", 2.3, 5.5, 2)
+    assert [c["text"] for c in server.merge_segments([cue(LONG, 0.0, 1.5), head, rest], limits())] \
+        == [LONG, "ほんとは葉っぱを相手に向けて飛ばす技なんだけど"]
+    paused = cue("葉っぱを相手に向けて飛ばす技なんだけど", 3.0, 5.5, 1)
+    assert [c["text"] for c in server.merge_segments([cue(LONG, 0.0, 1.5), head, paused], limits())][0] \
+        == LONG + "\nほんとは"
+    assert [c["text"] for c in server.merge_segments([cue(LONG, 0.0, 1.5), head], limits())] \
+        == [LONG + "\nほんとは"]
+
+
+def test_merge_adjacent_gives_an_unfinished_head_to_its_continuation():
+    cues = [cue("ちょっとこれやだ。", 0.0, 1.5), cue("ほんとは", 1.6, 2.1), cue("葉っぱを相手に", 2.2, 3.5)]
+    out = server.merge_adjacent(cues, limits(), 0.35, only_short=True)
+    assert [c["text"] for c in out] == ["ちょっとこれやだ。", "ほんとは葉っぱを相手に"]
+
+
 def test_merge_segments_refuses_a_third_row_rather_than_glue_two_sentences():
     # The one thing a mark seam cannot do is give way: with two rows already up, flattening would
     # put two sentences on one row, so the merge goes instead.

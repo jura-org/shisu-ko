@@ -1209,6 +1209,17 @@ def ends_sentence(text: str) -> bool:
     return bool(row) and row[-1] in SENTENCE_END
 
 
+def finishes(cue: dict, nxt: Optional[dict], limits: CueLimits) -> bool:
+    """True when `cue` ends what it says: a sentence mark, a pause of `pause_split` before the next
+    cue (word to word, since a cue's end carries its lead-out), or nothing after it. A Whisper
+    segment's end is no evidence: segments are the decoder's cut, and run flush into each other."""
+    if nxt is None or ends_sentence(cue["text"]):
+        return True
+    end = cue["words"][-1]["end"] if cue.get("words") else cue["end"]
+    start = nxt["words"][0]["start"] if nxt.get("words") else nxt["start"]
+    return start - end >= limits.pause_split
+
+
 def rows_fit(text: str, limits: CueLimits, at_mark: bool = False) -> bool:
     """Whether a seamed text is a cue a viewer can read. Never a third row, whatever put the seam there.
 
@@ -1299,7 +1310,7 @@ def merge_adjacent(cues, limits: CueLimits, max_gap: float, only_short: bool) ->
     merge flat as they always did: that rule is the anti-flicker one, and it is not about sentences.
     """
     out: list = []
-    for cue in cues:
+    for i, cue in enumerate(cues):
         if out:
             prev = out[-1]
             gap = cue["start"] - prev["end"]
@@ -1310,7 +1321,8 @@ def merge_adjacent(cues, limits: CueLimits, max_gap: float, only_short: bool) ->
             if (gap <= max_gap and (short or not only_short)
                     and len(text) - text.count("\n") <= limits.max_chars
                     and cue["end"] - prev["start"] <= limits.max_seconds
-                    and (seam != "\n" or rows_fit(text, limits, at_mark=True))):
+                    and (seam != "\n" or (rows_fit(text, limits, at_mark=True)
+                                          and finishes(cue, cues[i + 1] if i + 1 < len(cues) else None, limits)))):
                 prev["end"] = cue["end"]
                 prev["text"] = text
                 join_words(prev, seam, cue)
@@ -1344,12 +1356,18 @@ def merge_segments(cues, limits: CueLimits) -> list:
     joined by seam_for().
     """
     out: list = []
-    for cue in cues:
+    for i, cue in enumerate(cues):
         if out:
             prev = out[-1]
             gap = cue["start"] - prev["end"]
             prev_row = prev["text"].split("\n")[-1]
             at_mark = ends_sentence(prev_row)
+            # After a mark only a piece that itself ends what it says joins as a row. An unfinished
+            # one opens the next sentence (ほんとは || 葉っぱを相手に…): riding on the row before, it
+            # would leave its continuation to start a cue without it, on screen and on the card.
+            if at_mark and not finishes(cue, cues[i + 1] if i + 1 < len(cues) else None, limits):
+                out.append(dict(cue))
+                continue
             # Nothing is split inside a word after a sentence mark: the speaker ended there. Without
             # this, a next cue opening on ー or a small kana made breaks_word() true and its flat
             # join put two sentences on one row (そうですね。ーっと言います).

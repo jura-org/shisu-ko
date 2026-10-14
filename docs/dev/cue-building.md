@@ -189,6 +189,17 @@ there would refuse the stub merges the anti-flicker rule exists for — so piece
 flat exactly as before. The cost is accepted: a short finished sentence (`まじ?`, `うん。`) now stands
 as its own cue for its `min_seconds` instead of riding on a neighbour's row.
 
+After a mark, only a piece that itself ends what it says joins as a row (`finishes()`): a mark of
+its own, a pause of `pause_split` before the next cue, or nothing after it. An unfinished piece
+opens the next sentence; riding on the row before, it left its continuation to start a cue without
+it (`楽しいよ。 / オーナー跳びで遊んでみたくなったら、` then `うちで行ってね。`, and the card mined from the
+second cue lost its head). Refused, it starts the next cue and the usual rules join it to what
+follows. A Whisper segment's end is deliberately no evidence: segments are the decoder's cut and
+run flush into each other (a real decode cut ほんとは into a segment of its own, then 葉っぱを… at the
+same instant). The accepted cost is an unmarked finished line run into the next with no pause, which
+now joins it flat (`住みたいかった待ってギャルと…`): two sentences on one row lose no text, a head
+missing from the mined cue does.
+
 Every cue still carries `seg`, the id of the Whisper segment it came from, and a merge re-stamps
 every cue carrying a swallowed segment's id. Mining does not read it: a segment is a run of speech,
 not a sentence, and rejoining its cues put clauses on a card that were never on screen (see "What a
