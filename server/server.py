@@ -41,6 +41,8 @@ of the venv's own CTranslate2 before anything imports it; to faster-whisper it i
 from __future__ import annotations
 
 import argparse
+import copy
+import difflib
 import errno
 import gc
 import glob
@@ -77,7 +79,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.19.0"
+VERSION = "0.19.1"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -843,15 +845,15 @@ REPEAT_MIN_CHARS = 16
 LYRICS_MAX_SPEECH_S = 1.0    # more detected speech than this and the window is ordinary talk
 LYRICS_MIN_RMS = 0.02        # about -34 dBFS: sung windows measure 0.11-0.47, a timelapse's background
                              # music 0.015, room tone far below
+LYRICS_QUIET_RMS = 0.004     # the lowest floor a quietly mixed video's own speech may pull it down to
 LYRICS_MAX_NO_SPEECH = 0.9   # the decoder's "not speech" probability for its 30 s decode. No judge of
                              # singing: a rap verse scored 0.59 and an 18-voice chorus 0.80, every line
                              # right, while a sign-off made up over background music scored 0.47; so
                              # only what the decoder is all but sure of is refused on it
 LYRICS_MIN_LOGPROB = -0.8    # sung windows scored -0.14 to -0.58; made-up lines -0.49 to -0.91
 LYRICS_MIN_WORD_PROB = 0.35  # mean word probability: genuine lines from 0.48, a garbled それられ 0.30
-LYRICS_MIN_STRETCH_S = 4.0   # a talk window's loud stretch the detector heard nothing in is planned again
-                             # as a window of its own from this length: about one sung line, and each
-                             # such window costs a Silero pass and an encoder pass for the head
+LYRICS_MIN_STRETCH_S = 4.0   # a talk window's loud stretch the detector heard nothing in is put to the
+                             # head from this length: about one sung line, and each costs an encoder pass
 
 
 def absolute_words(seg, offset: float) -> list:
@@ -865,42 +867,36 @@ def absolute_words(seg, offset: float) -> list:
 PUNCTUATION = set("\"'“¿([{-。！？、，,.!?:：;；)]}、…～~ー'\"")
 
 
-def word_anomaly_score(word: Word, short_term: bool = True) -> float:
-    """Port of faster_whisper.transcribe.word_anomaly_score (1.2.1, MIT): long, short or improbable words.
+def word_anomaly_score(word: Word) -> float:
+    """faster_whisper.transcribe.word_anomaly_score (1.2.1, MIT) less its short-word term: improbable
+    or stretched words.
 
-    `short_term` is the (0.133 - duration) * 15 penalty, and it measures the tokenizer rather than
-    the audio in Japanese: Whisper's Japanese words are sub-tokens, usually one kana, so they are
-    under 133 ms by construction and every ordinary segment scores on them. Over the two 15-minute
-    dumps of video A (a long-form Japanese podcast episode) the whole first-8-words score reaches the threshold for 37 of 279 segments
-    and 34 of 202 with the term, and for 0 and 2 without it (both of those real speech, both saved
-    by their VAD overlap). The talk path therefore scores without it; see is_segment_anomaly().
+    Upstream also adds (0.133 - duration) * 15 for a word under 133 ms. In Japanese that measures
+    the tokenizer, not the audio: Whisper's Japanese words are sub-tokens, usually one kana, under
+    133 ms by construction. Over two 15-minute talk dumps the first-8-words score reached the
+    threshold for 37 of 279 segments and 34 of 202 with the term, 0 and 2 without; every segment the
+    talk gate deleted on it was real speech (5 of 5 in 15 minutes, 29 lines in 17 before the lead
+    repair). Over the lyrics and rescued windows of the quiet-video measurement set it fired 21
+    times: 13 real lines (キビトの変身!, a sung 一撃一撃一撃, 頑張ってね、ゴーゴンちゃん), 2 garbled
+    fragments, and 6 inventions the blocklist, the repetition test or the stretched-word score
+    refuse anyway.
     """
     score = 0.0
     duration = word.end - word.start
     if word.probability < 0.15:
         score += 1.0
-    if short_term and duration < 0.133:
-        score += (0.133 - duration) * 15
     if duration > 2.0:
         score += duration - 2.0
     return score
 
 
-def is_segment_anomaly(words, short_term: bool = True) -> bool:
-    """Port of faster_whisper.transcribe.is_segment_anomaly (1.2.1, MIT).
-
-    The talk path asks with `short_term=False`, so a segment is anomalous only on improbable words
-    and stretched ones. What the term bought was false drops: in 15 minutes of one video the gate
-    deleted 一応、担任の先生とかいるの? … そうなんですよね (a 10 s block, live), a 9.6 s block of 31
-    words and three shorter lines - five drops, five real utterances, no hallucination among them -
-    while nothing at all fires without it. P0.2 of docs/subtitle-quality.md named this risk when the
-    gate went in ("false positives on very fast speech; the overlap gate is the safety"), and the
-    lead-repair measurement records the same gate eating 29 lines in 17 minutes.
-    """
+def is_segment_anomaly(words) -> bool:
+    """faster_whisper.transcribe.is_segment_anomaly (1.2.1, MIT), on word_anomaly_score() above:
+    the sum over the first 8 non-punctuation words reaches 3, or the word count."""
     words = [w for w in words if w.word.strip() and w.word.strip() not in PUNCTUATION][:8]
     if not words:
         return False
-    score = sum(word_anomaly_score(w, short_term) for w in words)
+    score = sum(word_anomaly_score(w) for w in words)
     return score >= 3 or score + 0.01 >= len(words)
 
 
@@ -943,7 +939,7 @@ def hallucination_reason(seg, words, speech):
     mean_prob = sum(w.probability for w in words) / len(words)
     if overlap < VAD_GATE_OVERLAP and not (len(text) >= VAD_GATE_CHARS and mean_prob >= VAD_GATE_PROB):
         return "vad"
-    if overlap < ANOMALY_MAX_OVERLAP and is_segment_anomaly(words, short_term=False):
+    if overlap < ANOMALY_MAX_OVERLAP and is_segment_anomaly(words):
         return "anomaly"
     # seg.compression_ratio is faster-whisper's value for the whole 30 s decode, shared by every
     # segment it produced, so one loop would take its innocent neighbours with it. Use this text.
@@ -970,9 +966,7 @@ def lyrics_reason(seg, words):
     logprob = float(getattr(seg, "avg_logprob", 0.0) or 0.0)
     if no_speech > LYRICS_MAX_NO_SPEECH or logprob < LYRICS_MIN_LOGPROB or mean_prob < LYRICS_MIN_WORD_PROB:
         return "unsure"
-    # With the short-word term, unlike the talk path above: the lyrics thresholds were all
-    # measured with it, and there is no lyrics measurement for dropping it.
-    if is_segment_anomaly(words, short_term=True):
+    if is_segment_anomaly(words):
         return "anomaly"
     if has_repetition(text) or compression_ratio(text) > COMPRESSION_LIMIT:
         return "repetition"
@@ -1215,6 +1209,17 @@ def ends_sentence(text: str) -> bool:
     return bool(row) and row[-1] in SENTENCE_END
 
 
+def finishes(cue: dict, nxt: Optional[dict], limits: CueLimits) -> bool:
+    """True when `cue` ends what it says: a sentence mark, a pause of `pause_split` before the next
+    cue (word to word, since a cue's end carries its lead-out), or nothing after it. A Whisper
+    segment's end is no evidence: segments are the decoder's cut, and run flush into each other."""
+    if nxt is None or ends_sentence(cue["text"]):
+        return True
+    end = cue["words"][-1]["end"] if cue.get("words") else cue["end"]
+    start = nxt["words"][0]["start"] if nxt.get("words") else nxt["start"]
+    return start - end >= limits.pause_split
+
+
 def rows_fit(text: str, limits: CueLimits, at_mark: bool = False) -> bool:
     """Whether a seamed text is a cue a viewer can read. Never a third row, whatever put the seam there.
 
@@ -1305,7 +1310,7 @@ def merge_adjacent(cues, limits: CueLimits, max_gap: float, only_short: bool) ->
     merge flat as they always did: that rule is the anti-flicker one, and it is not about sentences.
     """
     out: list = []
-    for cue in cues:
+    for i, cue in enumerate(cues):
         if out:
             prev = out[-1]
             gap = cue["start"] - prev["end"]
@@ -1316,7 +1321,8 @@ def merge_adjacent(cues, limits: CueLimits, max_gap: float, only_short: bool) ->
             if (gap <= max_gap and (short or not only_short)
                     and len(text) - text.count("\n") <= limits.max_chars
                     and cue["end"] - prev["start"] <= limits.max_seconds
-                    and (seam != "\n" or rows_fit(text, limits, at_mark=True))):
+                    and (seam != "\n" or (rows_fit(text, limits, at_mark=True)
+                                          and finishes(cue, cues[i + 1] if i + 1 < len(cues) else None, limits)))):
                 prev["end"] = cue["end"]
                 prev["text"] = text
                 join_words(prev, seam, cue)
@@ -1350,12 +1356,18 @@ def merge_segments(cues, limits: CueLimits) -> list:
     joined by seam_for().
     """
     out: list = []
-    for cue in cues:
+    for i, cue in enumerate(cues):
         if out:
             prev = out[-1]
             gap = cue["start"] - prev["end"]
             prev_row = prev["text"].split("\n")[-1]
             at_mark = ends_sentence(prev_row)
+            # After a mark only a piece that itself ends what it says joins as a row. An unfinished
+            # one opens the next sentence (ほんとは || 葉っぱを相手に…): riding on the row before, it
+            # would leave its continuation to start a cue without it, on screen and on the card.
+            if at_mark and not finishes(cue, cues[i + 1] if i + 1 < len(cues) else None, limits):
+                out.append(dict(cue))
+                continue
             # Nothing is split inside a word after a sentence mark: the speaker ended there. Without
             # this, a next cue opening on ー or a small kana made breaks_word() true and its flat
             # join put two sentences on one row (そうですね。ーっと言います).
@@ -1617,7 +1629,7 @@ def build_window_cues(segs, offset: float, speech, limits: CueLimits, seg_id: in
 # unprompted decode of the same audio starts on time, so a skip is filled from one.
 PROMPT_SKIP_MIN_S = 3.0      # seconds of detected speech no kept segment reaches before a retry
 PROMPT_SKIP_SLACK = 0.5      # how near a kept segment must come to count as having heard a stretch
-PROMPT_SPLICE_OVERLAP = 0.2  # an unprompted segment overlapping a kept one by more is a duplicate
+PROMPT_ALIGN_MIN_CHARS = 2   # a shorter run of characters both decodes share is coincidence, not the same words
 
 
 def stretched_over_speech(words, speech, min_s: float = PROMPT_SKIP_MIN_S) -> bool:
@@ -1629,15 +1641,21 @@ def stretched_over_speech(words, speech, min_s: float = PROMPT_SKIP_MIN_S) -> bo
     return any(speech_seconds(speech, w.start, w.end) >= min_s for w in words)
 
 
-def kept_spans(segs, offset: float, speech) -> list:
-    """[start, end] on the video's clock of every talk segment that hears what it spans: the gates
-    keep it, as build_window_cues() judges, and no word of it is stretched over speech."""
-    spans = []
+def kept_lines(segs, offset: float, speech) -> list:
+    """[(segment, its words on the video's clock), ...] of every talk segment that hears what it
+    spans: the gates keep it, as build_window_cues() judges, and no word of it is stretched over
+    speech."""
+    lines = []
     for seg in segs:
         words, reason = gate_segment(seg, offset, speech)
         if reason is None and not stretched_over_speech(words, speech):
-            spans.append([words[0].start, words[-1].end])
-    return spans
+            lines.append((seg, words))
+    return lines
+
+
+def kept_spans(segs, offset: float, speech) -> list:
+    """[start, end] on the video's clock of every line kept_lines() keeps."""
+    return [[words[0].start, words[-1].end] for _, words in kept_lines(segs, offset, speech)]
 
 
 def skipped_speech(kept, speech, min_s: float = PROMPT_SKIP_MIN_S, slack: float = PROMPT_SKIP_SLACK) -> list:
@@ -1658,28 +1676,56 @@ def skipped_speech(kept, speech, min_s: float = PROMPT_SKIP_MIN_S, slack: float 
     return [g for g in groups if g[2] >= min_s]
 
 
-def splice_segments(segs, retry, offset: float, speech, stretches,
-                    max_overlap: float = PROMPT_SPLICE_OVERLAP) -> tuple:
-    """(`segs` with the segments of `retry` that fill a skipped stretch, in time order; how many were added).
+def unheard_runs(lines, other) -> list:
+    """[(segment, its words, [word index, ...]), ...]: the runs of words in `other`'s lines that have no
+    counterpart in `lines`' text. Both are kept_lines() of two decodes of the same audio.
 
-    A segment of the unprompted decode is taken when the gates keep it, no word of it is stretched
-    over speech, its midpoint lies inside one of `stretches` and it overlaps no kept segment of
-    `segs` (kept_spans()) by more than `max_overlap`. A segment of `segs` stretched over speech
-    that an added one overlaps goes: it would put its one-character cue across the real lines.
+    The decodes disagree on word timings by more than any overlap test can allow (one put というこ|と
+    a few hundredths of a second before the other's ということで、 began, and a head
+    repair_lead_words() moved sits seconds from where the other decode put it), but they agree on
+    the words. So the transcripts are aligned as text, spaces and punctuation aside, and a word is
+    heard when any of its characters falls in a stretch of PROMPT_ALIGN_MIN_CHARS or more that both
+    share. A word with no characters of its own (a lone mark) goes with the run it sits in.
     """
-    kept = kept_spans(segs, offset, speech)
+    def chars(lines_):
+        return [(ch, li, wi) for li, (_, words) in enumerate(lines_) for wi, w in enumerate(words)
+                for ch in w.word or "" if ch not in PUNCTUATION and not ch.isspace()]
+
+    mine, theirs = chars(lines), chars(other)
+    matcher = difflib.SequenceMatcher(None, [c for c, _, _ in mine], [c for c, _, _ in theirs], autojunk=False)
+    heard = {(li, wi) for i, j, n in matcher.get_matching_blocks() if n >= PROMPT_ALIGN_MIN_CHARS
+             for _, li, wi in theirs[j:j + n]}
+    spelled = {(li, wi) for _, li, wi in theirs}
+    runs = []
+    for li, (seg, words) in enumerate(other):
+        run: list = []
+        for wi in range(len(words) + 1):
+            if wi < len(words) and (li, wi) not in heard:
+                run.append(wi)
+            else:
+                if any((li, w) in spelled for w in run):
+                    runs.append((seg, words, run))
+                run = []
+    return runs
+
+
+def splice_segments(segs, retry, offset: float, speech, stretches) -> tuple:
+    """(`segs` with the pieces of `retry` that fill a skipped stretch, in time order; how many were added).
+
+    A piece is a run of the unprompted decode's words that the prompted one never said
+    (unheard_runs()) and whose midpoint lies inside one of `stretches`: a copy of its segment holding
+    only those words, its text their join. A segment of `segs` stretched over speech that an added
+    piece overlaps goes: it would put its one-character cue across the real lines.
+    """
     added = []
-    for seg in retry:
-        words, reason = gate_segment(seg, offset, speech)
-        if reason is not None or stretched_over_speech(words, speech):
+    for seg, words, run in unheard_runs(kept_lines(segs, offset, speech), kept_lines(retry, offset, speech)):
+        if not any(x <= (words[run[0]].start + words[run[-1]].end) / 2 <= y for x, y, _ in stretches):
             continue
-        a, b = words[0].start, words[-1].end
-        mid = (a + b) / 2
-        if not any(x <= mid <= y for x, y, _ in stretches):
-            continue
-        if any(min(b, y) - max(a, x) > max_overlap for x, y in kept):
-            continue
-        added.append(seg)
+        piece = copy.copy(seg)
+        piece.words = [seg.words[i] for i in run]
+        piece.text = "".join(w.word or "" for w in piece.words)
+        piece.start, piece.end = float(piece.words[0].start), float(piece.words[-1].end)
+        added.append(piece)
     if not added:
         return list(segs), 0
     filled = [[offset + float(seg.start), offset + float(seg.end)] for seg in added]
@@ -1757,6 +1803,12 @@ class Session:
     fail_count: int = 0
     retry_at: float = 0.0
     permanent: bool = False
+    # What Transcriber.choose_path() knows of the video beyond one window, kept in memory, never
+    # cached: the loudest speech a talk window measured (a whole-song window's loudness floor, 0.0
+    # until one has), and the audio the detector heard nothing in but the head heard the target
+    # language in, which a stretch carrying on from it past a window's end inherits.
+    talk_rms: float = 0.0
+    sung: list = field(default_factory=list)
     lock: threading.RLock = field(default_factory=threading.RLock)
 
     def cache_path(self) -> Path:
@@ -2811,19 +2863,30 @@ def rms(audio) -> float:
     return math.sqrt(float(np.mean(np.square(audio, dtype=np.float64))))
 
 
-def wants_lyrics(args, audio, speech, start: float, end: float) -> bool:
-    """Whether a window is transcribed without the detector: --lyrics auto, next to no speech heard, not silence."""
+def loudness_floor(level: float) -> float:
+    """What is not silence next to speech measuring `level` rms: half of it, held between
+    LYRICS_QUIET_RMS and LYRICS_MIN_RMS. An ordinary video's talk measures 0.04 and up, so its
+    floor is LYRICS_MIN_RMS exactly; a quietly mixed one's measures 0.016. No level known (0.0)
+    is LYRICS_MIN_RMS too."""
+    return max(LYRICS_QUIET_RMS, min(LYRICS_MIN_RMS, level / 2)) if level > 0 else LYRICS_MIN_RMS
+
+
+def wants_lyrics(args, audio, speech, start: float, end: float, floor: float = LYRICS_MIN_RMS) -> bool:
+    """Whether a window is transcribed without the detector: --lyrics auto, next to no speech heard,
+    louder than `floor` (loudness_floor() of the video's talk)."""
     if getattr(args, "lyrics", "auto") != "auto":
         return False
-    return speech_seconds(speech, start, end) < LYRICS_MAX_SPEECH_S and rms(audio) >= LYRICS_MIN_RMS
+    return speech_seconds(speech, start, end) < LYRICS_MAX_SPEECH_S and rms(audio) >= floor
 
 
-def transcribe_options(args, model, lyrics: bool) -> dict:
+def transcribe_options(args, model, lyrics: bool, detector: bool = True) -> dict:
     """The options of a window's model.transcribe() call: Transcriber.process() and dump_words.py
     both take them from here, so the A/B rig decodes what the server does.
 
     A Kitsune model reads the VAD options alone and gets no prompt (its decoder prompt is fixed,
-    `takes_prompt`), so retry_prompt_skips() never decodes a window twice for it.
+    `takes_prompt`), so retry_prompt_skips() never decodes a window twice for it. `detector` False
+    is a talk window holding speech the detector missed (Transcriber.choose_path()): decoded whole,
+    prompt and all.
     """
     options = dict(
         language=args.language,
@@ -2843,27 +2906,72 @@ def transcribe_options(args, model, lyrics: bool) -> dict:
         # blocklist holds no sentence of the prompt, so a noisy window the language head lets
         # through could echo the prompt itself into the cache with nothing to catch it.
         options.update(vad_filter=False, initial_prompt=None)
-    else:
+    elif detector:
         options.update(vad_filter=True, vad_parameters=vad_parameters())
+    else:
+        options.update(vad_filter=False)
     return options
 
 
-def unsung_stretches(audio, start: float, end: float, speech, cues,
-                     min_seconds: float = LYRICS_MIN_STRETCH_S) -> list:
+def unsung_stretches(audio, start: float, end: float, speech,
+                     min_seconds: float = LYRICS_MIN_STRETCH_S, level: Optional[float] = None) -> list:
     """The parts of a talk window, at least `min_seconds` long, that the detector heard nothing in
-    and that are not silence: what a song shares a window with the line announcing it.
+    and that are loud next to the speech it did hear: a song beside the line announcing it, or a
+    shriek Silero takes for noise. `audio` is the window's samples from `start`.
 
-    wants_lyrics() judges a window whole, so a 歌枠's MC line (a second of detected speech) sends
-    the window the detector's way, faster-whisper decodes only that line, and the thirty seconds of
-    singing after it are covered with nothing in them. process() leaves these stretches out of the
-    covered range instead; the planner brings each back as a window of its own, where the rule sees
-    next to no speech and judges it alone. `audio` is the window's samples from `start`.
+    Loud is loudness_floor() of the window's own speech (`level`, measured here when not given):
+    an ordinary video keeps the absolute floor, a quietly mixed one, whose talk measures 0.016 and
+    whose missed lines 0.019, gets half its talk. Only a window holding LYRICS_MAX_SPEECH_S of
+    speech gets here, so its own is enough to measure.
+    """
+    if level is None:
+        level = rms(speech_samples(audio, speech, start, end - start))
+    floor = loudness_floor(level)
+    out = []
+    for a, b in unheard_stretches([[start, end]], speech, [], min_seconds):
+        if rms(audio[int((a - start) * SAMPLE_RATE):int((b - start) * SAMPLE_RATE)]) >= floor:
+            out.append([a, b])
+    return out
+
+
+# A record's "unheard_rule": its covered ranges were made by a server that puts a talk window's loud
+# unheard stretches to the head (unsung_stretches()). App.old_record_sweep() rechecks one without it.
+UNHEARD_RULE = 2
+RECHECK_CONTEXT_S = 4.0  # talk on either side of a rechecked stretch: what its window would hold
+
+
+def unheard_ranges(covered, speech, cues) -> list:
+    """[(start, end, speech)]: every unheard stretch of a record of LYRICS_MIN_STRETCH_S or more,
+    widened by RECHECK_CONTEXT_S into the talk around it and clipped to its covered range, with the
+    speech heard inside, so Transcriber.choose_path() judges it as it would a window holding it.
+    Alone, a quiet stretch would be a window with no speech, held to the absolute LYRICS_MIN_RMS
+    until some talk was measured, which a quietly mixed video's missed line (0.019) does not reach."""
+    covered, out = merge_intervals(covered), []
+    for a, b in unheard_stretches(covered, speech, cues, LYRICS_MIN_STRETCH_S):
+        x, y = next((x, y) for x, y in covered if x <= a and b <= y)
+        lo, hi = max(x, a - RECHECK_CONTEXT_S), min(y, b + RECHECK_CONTEXT_S)
+        out.append((lo, hi, [[max(p, lo), min(q, hi)] for p, q in speech if min(q, hi) > max(p, lo)]))
+    return out
+
+
+def vouched_segments(segs, offset: float, speech, stretches, drops=None) -> list:
+    """`segs` less every segment lying mostly inside `stretches` that lyrics_reason() refuses.
+
+    A rescued stretch counts as speech, which would excuse anything the decoder wrote there, a
+    sign-off over the music included; the detector heard nothing in it, so the decoder's own
+    confidence judges it, as on the lyrics path. dump_words.py records what this keeps. A refusal
+    is counted in `drops` as build_window_cues() counts its own, so the log names the gate.
     """
     out = []
-    for a, b in unheard_stretches([[start, end]], speech, cues, min_seconds):
-        samples = audio[max(0, int((a - start) * SAMPLE_RATE)):max(0, int((b - start) * SAMPLE_RATE))]
-        if rms(samples) >= LYRICS_MIN_RMS:
-            out.append([a, b])
+    for seg in segs:
+        words, reason = gate_segment(seg, offset, speech, lyrics=True)
+        inside = bool(words) and (2 * interval_overlap(words[0].start, words[-1].end, stretches)
+                                  > words[-1].end - words[0].start)
+        if not (reason and inside):
+            out.append(seg)
+        elif drops is not None:
+            drops[reason] = drops.get(reason, 0) + 1
+            drops.setdefault("_text", []).append((reason, (getattr(seg, "text", "") or "").strip()))
     return out
 
 
@@ -2917,7 +3025,8 @@ class Transcriber(threading.Thread):
                     continue
                 picked = self.app.pick_work()
                 if picked is None:
-                    time.sleep(0.15)
+                    if next(self.app.sweep, False) is False:  # idle: one step of the sweep, else rest
+                        time.sleep(0.15)
                     continue
                 self.process(*picked)
             except Exception:  # noqa: BLE001
@@ -2999,6 +3108,52 @@ class Transcriber(threading.Thread):
                  s.video_id, fmt_time(start), fmt_time(end), args.language, language, probability)
         return False
 
+    def choose_path(self, s: Session, audio, speech, start: float, end: float) -> tuple:
+        """(lyrics, rescued) for a window: whether it takes the lyrics path, and the loud stretches
+        the detector missed in a talk window that the head hears the target language in, almost
+        always none. process() and dump_words.py both decide here.
+
+        Singing over music is no speech to Silero, so a window it heard next to nothing in, whose
+        audio is not silence, is decoded without the detector and gated on Whisper's own confidence
+        (lyrics_reason), once the head has heard the target language in it: loud noise and a
+        foreign song stay with the detector, which decodes nothing of them. A talk window can hide
+        the same thing beside its speech (a song after the line announcing it, a shriek): its
+        unsung_stretches() go to the head together, and if it hears the target language the window
+        is decoded whole with them counted as speech, so a line the detector caught late reaches
+        the decoder in one piece. Neither verdict is a vote: a foreign song never pauses. A model
+        whose gates this path has no figures for (Kitsune) never takes either.
+
+        A window is a cut the planner made, not a boundary in the audio, so both judgements read
+        what the session already knows of the video rather than the window alone. A whole-song
+        window has no speech to measure its loudness against: its floor comes from the loudest
+        talk heard so far (`s.talk_rms`). And the verdict belongs to the audio, not the window: a
+        stretch starting inside audio the head already vouched for (`s.sung`), a song carrying on
+        past the window before, needs no verdict. Asked again on its tail alone, the head hears too
+        little to be sure (a song's 12 s tail scored 0.62, under LANGUAGE_MIN_PROB, and two lines
+        were lost). The other stretches are judged as before, all of them together.
+        """
+        args = self.app.args
+        if getattr(args, "lyrics", "auto") != "auto" or not getattr(self.app.model, "sings", True):
+            return False, []
+        if speech_seconds(speech, start, end) < LYRICS_MAX_SPEECH_S:
+            lyrics = (wants_lyrics(args, audio, speech, start, end, loudness_floor(s.talk_rms))
+                      and self.sung_in_target(s, audio, start, end))
+            if lyrics:
+                s.sung = merge_intervals(s.sung + [[start, end]])
+            return lyrics, []
+        level = rms(speech_samples(audio, speech, start, end - start))
+        s.talk_rms = max(s.talk_rms, level)
+        stretches = unsung_stretches(audio, start, end, speech, level=level)
+        rescued = [st for st in stretches if find_covering(s.sung, st[0])]
+        if rescued:
+            log.info("[%s] %s-%s: carries on the target language heard before it; not asked again",
+                     s.video_id, fmt_time(rescued[0][0]), fmt_time(rescued[-1][1]))
+        if len(rescued) < len(stretches) and self.sung_in_target(
+                s, speech_samples(audio, stretches, start, end - start), stretches[0][0], stretches[-1][1]):
+            rescued = stretches
+        s.sung = merge_intervals(s.sung + rescued)
+        return False, rescued
+
     def process(self, s: Session, start: float, end: float) -> None:
         args = self.app.args
         with s.lock:
@@ -3055,22 +3210,18 @@ class Transcriber(threading.Thread):
             log.info("[%s] %s-%s: skipped (heard %s, paused)", s.video_id, fmt_time(start), fmt_time(end), heard)
             return
 
-        # Singing over music is no speech to Silero, so a window it heard nothing in, whose audio
-        # is not silence, is decoded without the detector and gated on Whisper's own confidence
-        # (lyrics_reason), once the language head has heard the target language in it: loud
-        # noise and a foreign song stay with the detector, which decodes nothing of them. The
-        # language watch above cast no vote on such a window, and the head's verdict here is no
-        # vote either: a foreign song never pauses.
-        # A model whose gates this path has no figures for (Kitsune) never takes it.
-        lyrics = (getattr(self.app.model, "sings", True) and wants_lyrics(args, audio, speech, start, end)
-                  and self.sung_in_target(s, audio, start, end))
-        options = transcribe_options(args, self.app.model, lyrics)
+        lyrics, rescued = self.choose_path(s, audio, speech, start, end)
+        options = transcribe_options(args, self.app.model, lyrics, detector=not rescued)
+        speech = merge_intervals(speech + rescued) if rescued else speech
+        drops: dict = {}
         try:
             segments, _info = self.app.model.transcribe(audio, **options)
             segs = list(segments)
             skipped, spliced = 0.0, 0
             if not lyrics:
                 segs, skipped, spliced = retry_prompt_skips(self.app.model, audio, options, segs, start, speech)
+            if rescued:
+                segs = vouched_segments(segs, start, speech, rescued, drops)
         except Exception as exc:  # noqa: BLE001
             log.error("[%s] transcription of %s-%s failed: %s", s.video_id, fmt_time(start), fmt_time(end), exc)
             if gpu_context_broken(exc):
@@ -3092,21 +3243,17 @@ class Transcriber(threading.Thread):
         if lyrics:
             # No intervals to build on: the lines that pass the gates are the window's speech.
             speech = lyrics_spans(segs, start, limits)
-        drops: dict = {}
         with s.lock:
             seg_id = s.seg_next
         fresh, seg_id = build_window_cues(segs, start, speech, limits, seg_id, drops, new_end, lyrics)
-
-        # A song shares a window with the line announcing it: the detector heard that line, so the
-        # window went its way and nothing of the singing was decoded. Its loud unheard stretches are
-        # not covered; the planner brings each back as a window of its own, where wants_lyrics()
-        # sees next to no speech. Only a window that the speech heard in it kept from the lyrics
-        # path: one the head refused (or --lyrics off, or a model without the path) is covered
-        # whole, or it would be planned for ever.
-        unsung: list = []
-        if not lyrics and getattr(args, "lyrics", "auto") == "auto" and getattr(self.app.model, "sings", True) \
-                and speech_seconds(speech, start, end) >= LYRICS_MAX_SPEECH_S:
-            unsung = unsung_stretches(audio, start, new_end, speech, fresh)
+        # A vouched stretch running to the window's end that the decode wrote nothing in goes back
+        # to the planner as a cut segment does: the next window starts there, carries the verdict
+        # and hears it from its start, with what follows. One inside the window stays covered: it
+        # had a whole window of context, and a window of a few seconds is where Whisper invents.
+        inside = [[a, min(b, new_end)] for a, b in rescued if a < new_end]
+        tail = [a for a, b in unheard_stretches(inside, [], fresh, LYRICS_MIN_STRETCH_S) if b >= new_end - 0.05]
+        given_back = new_end - tail[0] if boundary_free and tail and tail[0] > start else 0.0
+        new_end -= given_back
 
         added = 0
         with s.lock:
@@ -3119,18 +3266,19 @@ class Transcriber(threading.Thread):
                 recent.append(cue)
                 added += 1
             s.seg_next = seg_id
-            s.covered = merge_intervals(s.covered + subtract_intervals([[start, new_end]], unsung))
+            s.covered = merge_intervals(s.covered + [[start, new_end]])
             s.speech = merge_intervals(
                 s.speech + [[max(a, start), min(b, new_end)] for a, b in speech if min(b, new_end) > max(a, start)])
             s.busy = None
         elapsed = time.time() - t0
         gated = ", ".join(f"{k}:{v}" for k, v in sorted(drops.items()) if not k.startswith("_"))
         log.info(
-            "[%s] %s-%s: %d cues in %.1fs (%.0fx realtime)%s%s%s%s",
+            "[%s] %s-%s: %d cues in %.1fs (%.0fx realtime)%s%s%s%s%s",
             s.video_id, fmt_time(start), fmt_time(new_end), added, elapsed,
             (new_end - start) / max(elapsed, 1e-3), " [lyrics]" if lyrics else "",
             f" [dropped {gated}]" if gated else "",
-            f" [{sum(b - a for a, b in unsung):.0f} s heard nothing in, planned again]" if unsung else "",
+            f" [{sum(b - a for a, b in rescued):.0f} s the detector missed, decoded whole]" if rescued else "",
+            f" [its last {given_back:.0f} s left to the next window]" if given_back else "",
             f" [{skipped:.0f} s skipped with the prompt, {spliced} segments from a decode without it]"
             if skipped else "",
         )
@@ -3140,7 +3288,8 @@ class Transcriber(threading.Thread):
 # --------------------------------------------------------------------------- application
 
 class App:
-    def __init__(self, args, model, device: str, compute_type: str, model_name: Optional[str] = None):
+    def __init__(self, args, model, device: str, compute_type: str, model_name: Optional[str] = None,
+                 sweep: bool = False):
         self.args = args
         self.model = model
         self.device = device
@@ -3165,6 +3314,7 @@ class App:
         self.lock = threading.Lock()
         self.fetcher = Fetcher(args)
         self.last_evict = time.time()
+        self.sweep = self.old_record_sweep() if sweep else iter(())  # the server's own; tools and tests sweep nothing
         self.transcriber = Transcriber(self)
         self.transcriber.start()
 
@@ -3557,9 +3707,15 @@ class App:
             if timeout > 0 and now - s.last_sync > timeout:
                 continue  # nobody has synced this video recently (tab closed): do not transcribe ahead for it
             with s.lock:
+                covered = s.covered
                 window = plan_window(s, self.args)
                 if window:
                     return (s, window[0], window[1])
+                tidied = s.covered is not covered  # plan_window() assigns a new list only when it covers
+            if tidied:
+                # plan_window() covered a gap too short for a window. Unsaved, the record would stay
+                # short of fully covered, and every load would decode the audio again to find it.
+                self.save_cache(s)
         return None
 
     def maybe_evict(self) -> None:
@@ -3648,6 +3804,45 @@ class App:
             s.status = "ready"  # nothing left to transcribe, no need to fetch the audio again
         log.info("[%s] loaded %d cached cues", s.video_id, len(s.cues))
 
+    def old_record_sweep(self):
+        """Recheck the cue records written before UNHEARD_RULE, one range per idle step of the
+        transcriber thread, the only thread that touches the model, so a sync waits for one step at
+        most. A record whose unheard_ranges() Transcriber.choose_path(), the decision process()
+        makes, would decode in is deleted: its next open transcribes the video again from the audio
+        on disk. Any other is rewritten with the marker, one with no such range without reading audio.
+        Left as they are: records of another model or language, written with --lyrics off
+        (load_cache() gives those back) or paused, all of them under --lyrics off, one with ranges but
+        no audio on disk (a recheck never downloads), and one whose video a session holds by then."""
+        for path in sorted(CACHE_DIR.glob("*.cues.json")):
+            video_id = path.name[:-len(".cues.json")]
+            try:
+                data, audio = json.loads(path.read_text(encoding="utf-8")), find_cached_audio(video_id)
+                if (data.get("unheard_rule") == UNHEARD_RULE or not self.cache_model_matches(data)
+                        or data.get("language") != self.args.language or "off" in (getattr(self.args, "lyrics", "auto"), data.get("lyrics"))
+                        or data["language_state"].get("paused")):
+                    continue
+                ranges, rescue = unheard_ranges(data["covered"], data["speech"], data["cues"]), False
+                probe = Session(video_id, "")  # what choose_path() learns of the video stays out of live sessions
+                for lo, hi, heard in ranges if audio is not None else ():
+                    samples = _decode_range(audio, lo, hi, rate=SAMPLE_RATE).astype(np.float32) / 32768.0
+                    rescue = self.transcriber.choose_path(probe, samples, heard, lo, hi) != (False, [])
+                    yield
+                    if rescue:
+                        break
+                with self.lock:  # a session loads its record under this lock: one that did keeps it
+                    if video_id in self.sessions or (ranges and audio is None):
+                        continue
+                    if rescue:
+                        path.unlink()
+                    else:
+                        marked = json.dumps({**data, "unheard_rule": UNHEARD_RULE}, ensure_ascii=False)
+                        path.with_suffix(".tmp").write_text(marked, encoding="utf-8")
+                        os.replace(path.with_suffix(".tmp"), path)
+                log.info("[%s] old cue record %s", video_id, "removed: the new rule hears more" if rescue else "marked")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[%s] could not recheck the old cue record (%s); left as it is", video_id, exc)
+            yield
+
     def cache_record(self, s: Session) -> dict:
         """What save_cache() writes for a session (retranscribe.py writes the same shape elsewhere)."""
         with s.lock:
@@ -3660,6 +3855,7 @@ class App:
                 # The rule the covered ranges were made under: without the lyrics rule a sung
                 # window was covered with nothing in it, and load_cache() offers it again.
                 "lyrics": getattr(self.args, "lyrics", "auto"),
+                "unheard_rule": UNHEARD_RULE,
                 # Reopening a foreign video finds it paused instead of hallucinating all over again.
                 "language_state": {"foreign_seconds": round(s.foreign_seconds, 2),
                                    "heard": s.heard, "paused": s.language_paused},
@@ -4981,12 +5177,12 @@ def start_app(args) -> "App":
         log.info("Starting with the model '%s' that the switch asked for", wanted)
         try:
             # No local name for the model: the switch frees it through App alone (see switch_model_if_wanted).
-            return App(args, *load_model(args, wanted, path=download_model_files(wanted)), model_name=wanted)
+            return App(args, *load_model(args, wanted, path=download_model_files(wanted)), model_name=wanted, sweep=True)
         except Exception as exc:  # noqa: BLE001
             log.error("Could not load the model '%s' (%s); starting with '%s'", wanted, exc, args.model)
             failed = (wanted, friendly_model_error(exc, wanted))
     try:
-        app = App(args, *load_model(args))
+        app = App(args, *load_model(args), sweep=True)
     except Exception as exc:  # noqa: BLE001
         log.error("Could not load the model '%s': %s", args.model, exc)
         if ROCM_ACTIVE and args.device != "cpu" and not isinstance(exc, ImportError):

@@ -143,12 +143,11 @@ def test_anomaly_gate_keeps_an_anomalous_segment_that_sits_on_speech():
 
 def test_the_talk_gate_keeps_a_segment_of_one_kana_words():
     # Whisper's Japanese words are sub-tokens, usually one kana, so they are shorter than the
-    # 133 ms the short-word term penalises whatever the speaker did. Scoring on it deleted five
-    # real utterances in 15 minutes and no hallucination, so the talk path does not.
+    # 133 ms upstream's short-word term penalises whatever the speaker did. Scoring on it deleted
+    # five real utterances in 15 minutes and no hallucination, so the port leaves it out.
     ws = words([(kana, 0.1 * i, 0.1 * i + 0.08) for i, kana in enumerate("いちおうたんにんの")])
     text = "".join(w.word for w in ws)
-    assert server.is_segment_anomaly(ws) is True                      # with the term, as ported
-    assert server.is_segment_anomaly(ws, short_term=False) is False
+    assert server.is_segment_anomaly(ws) is False
     # Overlap 0.6: past the VAD gate, and under the 0.8 that would excuse the segment unasked.
     assert server.hallucination_reason(seg(text, 0.0, 1.5), ws, [[0.0, 0.53]]) is None
 
@@ -156,15 +155,26 @@ def test_the_talk_gate_keeps_a_segment_of_one_kana_words():
 def test_the_talk_gate_still_drops_improbable_words():
     ws = words([(kana, 0.1 * i, 0.1 * i + 0.08) for i, kana in enumerate("いちおうたんにんの")], prob=0.05)
     text = "".join(w.word for w in ws)
-    assert server.is_segment_anomaly(ws, short_term=False) is True
+    assert server.is_segment_anomaly(ws) is True
     assert server.hallucination_reason(seg(text, 0.0, 1.5), ws, [[0.0, 0.53]]) == "anomaly"
 
 
-def test_the_lyrics_gate_keeps_the_short_word_term():
-    # Its thresholds were measured with it, and nothing here re-measures them.
-    ws = words([(kana, 0.1 * i, 0.1 * i + 0.08) for i, kana in enumerate("いちおうたんにんの")])
-    line = SimpleNamespace(text="".join(w.word for w in ws), start=0.0, end=1.5, words=ws,
-                           compression_ratio=1.0, avg_logprob=-0.2, no_speech_prob=0.1)
+def test_the_lyrics_gate_keeps_a_short_line_of_one_kana_words():
+    # A real line's own timing (キヴィタの変身!, a shout in a rescued stretch): four sub-tokens
+    # under 133 ms scored it 4.1 on upstream's short-word term, and the lyrics gate refused it.
+    ws = words([("キ", 63.14, 63.46), ("ヴ", 63.46, 63.54), ("ィ", 63.54, 63.6), ("タ", 63.6, 63.62),
+                ("の", 63.62, 63.72), ("変", 63.72, 63.86), ("身!", 63.86, 64.12)], prob=0.79)
+    line = SimpleNamespace(text="キヴィタの変身!", start=63.14, end=64.12, words=ws,
+                           compression_ratio=1.0, avg_logprob=-0.29, no_speech_prob=0.21)
+    assert server.is_segment_anomaly(ws) is False
+    assert server.lyrics_reason(line, ws) is None
+
+
+def test_the_lyrics_gate_still_drops_stretched_words():
+    # チャンネル登録をお願いいたします。 over an outro: ten seconds of words, the long-word term's case.
+    ws = words([("チャンネル", 285.0, 289.0), ("登録を", 289.0, 292.5), ("お願いします", 292.5, 294.8)])
+    line = SimpleNamespace(text="チャンネル登録を、お願いします", start=285.0, end=294.8, words=ws,
+                           compression_ratio=1.0, avg_logprob=-0.67, no_speech_prob=0.31)
     assert server.lyrics_reason(line, ws) == "anomaly"
 
 
@@ -714,6 +724,37 @@ def test_merge_segments_gives_a_sentence_its_own_row_however_short_it_is():
     assert [c["text"] for c in server.merge_segments(cues, limits())] == ["はい。\n電車で行きます"]
     cues = [cue("今日はいい天気ですね。", 0.0, 2.0), cue("うん。", 2.2, 3.0, 1)]
     assert [c["text"] for c in server.merge_segments(cues, limits())] == ["今日はいい天気ですね。\nうん。"]
+
+
+def test_merge_segments_gives_an_unfinished_head_to_its_continuation():
+    # Folding left to right, the cue before the mark took the next sentence's head as its second
+    # row, and the line it opens then lacked it on screen and on the card mined from it.
+    cues = [cue("ちょっとこれやだ。", 0.0, 1.5), cue("ほんとは", 1.7, 2.3, 1),
+            cue("葉っぱを相手に向けて飛ばす技なんだけど", 2.3, 5.5, 1)]
+    out = server.merge_segments(cues, limits())
+    assert [c["text"] for c in out] == ["ちょっとこれやだ。", "ほんとは葉っぱを相手に向けて飛ばす技なんだけど"]
+
+
+LONG = "待ってちょっとこれやだーやだやだやだこれやだ。"  # leaves no room for the continuation
+
+
+def test_merge_segments_lets_a_finished_piece_ride_after_a_mark():
+    # Finished is a mark, a pause before the next cue, or nothing after it. A segment end is not: a
+    # real decode cut ほんとは into a segment of its own, flush against 葉っぱを….
+    head, rest = cue("ほんとは", 1.7, 2.3, 1), cue("葉っぱを相手に向けて飛ばす技なんだけど", 2.3, 5.5, 2)
+    assert [c["text"] for c in server.merge_segments([cue(LONG, 0.0, 1.5), head, rest], limits())] \
+        == [LONG, "ほんとは葉っぱを相手に向けて飛ばす技なんだけど"]
+    paused = cue("葉っぱを相手に向けて飛ばす技なんだけど", 3.0, 5.5, 1)
+    assert [c["text"] for c in server.merge_segments([cue(LONG, 0.0, 1.5), head, paused], limits())][0] \
+        == LONG + "\nほんとは"
+    assert [c["text"] for c in server.merge_segments([cue(LONG, 0.0, 1.5), head], limits())] \
+        == [LONG + "\nほんとは"]
+
+
+def test_merge_adjacent_gives_an_unfinished_head_to_its_continuation():
+    cues = [cue("ちょっとこれやだ。", 0.0, 1.5), cue("ほんとは", 1.6, 2.1), cue("葉っぱを相手に", 2.2, 3.5)]
+    out = server.merge_adjacent(cues, limits(), 0.35, only_short=True)
+    assert [c["text"] for c in out] == ["ちょっとこれやだ。", "ほんとは葉っぱを相手に"]
 
 
 def test_merge_segments_refuses_a_third_row_rather_than_glue_two_sentences():

@@ -48,3 +48,25 @@ def test_zero_timeout_disables_the_check(monkeypatch, tmp_path):
     with app.lock:
         app.sessions[VIDEO] = ready_session(last_sync_age=3600.0)
     assert app.pick_work() is not None
+
+
+def test_a_gap_too_short_for_a_window_is_saved_once_covered(monkeypatch, tmp_path):
+    # plan_window() covers a sub-1.5 s gap without a window; unsaved, the record stays short of
+    # fully covered and every load decodes the audio again only to cover it in memory once more.
+    import json
+
+    app = make_app(monkeypatch, tmp_path, client_timeout=30.0)
+    s = ready_session(last_sync_age=1.0)
+    s.duration, s.covered, s.want_t = 300.0, [[0.0, 299.2]], 298.0
+    with app.lock:
+        app.sessions[VIDEO] = s
+    assert app.pick_work() is None
+    assert s.fully_covered()
+    assert json.loads(s.cache_path().read_text(encoding="utf-8"))["covered"] == [[0.0, 300.0]]
+
+    s.cache_path().unlink()
+    s.covered, s.want_t = [[0.95, 300.0]], 0.0  # a gap at the start, which changes neither count nor end
+    assert app.pick_work() is None
+    assert json.loads(s.cache_path().read_text(encoding="utf-8"))["covered"] == [[0.0, 300.0]]
+    s.cache_path().unlink()
+    assert app.pick_work() is None and not s.cache_path().exists()  # nothing covered, nothing written

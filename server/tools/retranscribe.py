@@ -133,9 +133,9 @@ def run_video(app, worker, args, video_id: str, src: Path, out_dir: Path) -> dic
 
 
 def write_results(app, s, out_dir: Path) -> None:
-    """<video_id>.new.cues.json, in the shape save_cache() writes (the "lyrics" key included, so
-    the file is a record made under the rule to load_cache() if it is ever put in the cache
-    directory, not one to migrate), and <video_id>.speech.json."""
+    """<video_id>.new.cues.json, in the shape save_cache() writes (the "lyrics" and "unheard_rule"
+    keys included, so the file is a record made under the rules to load_cache() if it is ever put
+    in the cache directory, not one to recheck), and <video_id>.speech.json."""
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / f"{s.video_id}.new.cues.json").write_text(
         json.dumps(app.cache_record(s), ensure_ascii=False), encoding="utf-8")

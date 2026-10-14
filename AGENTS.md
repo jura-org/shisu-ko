@@ -169,7 +169,12 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   older record whole before reading anything out of it, so a geometry change bumps it. Cue caches
   are reused only when model (compared canonically) and language match. `covered` always means
   "Whisper has seen this"; what a language-paused session only listens to goes into
-  `Session.probed`, which is never written to `covered` or the cache.
+  `Session.probed`, which is never written to `covered` or the cache. One recheck sits beside it:
+  `App.old_record_sweep()`, stepped by the idle transcriber thread of the server's own `App` only,
+  deletes a record without `"unheard_rule"` (`UNHEARD_RULE`) in whose unheard stretches
+  `choose_path()` would now decode speech, read from the audio on disk (never a download), and
+  marks any other; it never touches a record a session holds. Detail: `docs/dev/cue-building.md`,
+  "Runtime data and the cue cache".
 - The phone portal (`portal/`) answers nobody but loopback by default (`--mode local`). `--mode lan`
   answers only devices holding a token from pairing (a one-time code, rate-limited; only the
   token's hash is stored) and is the only mode that may listen on 0.0.0.0; `--mode tailscale` answers
@@ -197,7 +202,11 @@ a lyrics window), `build_cues()` and `merge_segments()`. Rules that must not reg
 - The merges ask `breaks_word()`, never `may_break()`: wired to `may_break()`, the merge forced a
   41-character, 8.1-second cue.
 - A sentence-mark seam never gives way (`ends_sentence()`), in `merge_adjacent()` and
-  `merge_segments()`; a merge that cannot give both a row is refused.
+  `merge_segments()`; a merge that cannot give both a row is refused, and so is one whose second
+  row does not end what it says (`finishes()`: its own mark, a pause, or nothing after it; never a
+  Whisper segment end).
+- `splice_segments()` decides what the prompted decode lacks by aligning text (`unheard_runs()`),
+  never by time overlap.
 - `server/tools/cue_stats.py`, `retranscribe.py`, `dump_words.py` and `replay_cues.py` measure a
   change; keep them working (`dump_words.py` decides every window as `process()` does).
 

@@ -685,7 +685,9 @@ not speech to the voice-activity detector, so a window in which it hears next to
 second of speech) but the audio is not silent (a song, a 歌枠) is transcribed without it once
 Whisper hears Japanese in it, under stricter gates on Whisper's own confidence: music videos get
 their lyrics, and an instrumental may show a wrong line now and then (`--lyrics off` sends such
-windows through the detector as before, so a song stays blank). The reasoning and the measurements behind these rules are in
+windows through the detector as before, so a song stays blank). A loud stretch beside speech that
+the detector missed (a song after its announcement, a shriek) gets the same check, and then the
+whole window is transcribed without the detector. The reasoning and the measurements behind these rules are in
 [docs/subtitle-quality.md](docs/subtitle-quality.md). Cues are saved per video and per model in
 `~/.shisu-ko/cache`, so a video you have watched before shows subtitles immediately: the
 current model's cues are `<video_id>.cues.json`, and when you switch models another model's

@@ -11,7 +11,10 @@ inside a covered range, a short `--first-window` (20 s) starts at the playhead; 
 `condition_on_previous_text` false the library drops the initial prompt after the first chunk of a
 call (checked in 1.2.1), so a 40 s window decoded its last ten seconds unprompted.
 A segment touching the end of a window is dropped and the covered range ends where that segment
-began, so the next window re-transcribes it whole. These functions are pure; test them by importing the
+began, so the next window re-transcribes it whole. A gap under 1.5 s gets no window: `plan_window()`
+covers it as it is, and `pick_work()` saves the session then, or the record would stay short of fully
+covered and every load would decode the audio again to find it (39 of 193 records here held only such
+gaps). These functions are pure; test them by importing the
 module (register it in `sys.modules` before `exec_module` because of `from __future__ import annotations`).
 
 Cue building (`docs/subtitle-quality.md` is the rationale and the measurements): the server runs
@@ -41,10 +44,23 @@ gates keep it (`gate_segment()`, the one judge `build_window_cues()` also asks) 
 spans `PROMPT_SKIP_MIN_S` of detected speech (`stretched_over_speech()`): that
 line passes every gate, and only its word shows the jump; a last word stretched over the silence after
 an utterance spans no speech and still covers. Only then is the window decoded once more with
-`initial_prompt=None`, everything else the same. `splice_segments()` takes from that decode the
-covering segments whose midpoint lies in a skipped stretch and that overlap no covering prompted
-segment by more than `PROMPT_SPLICE_OVERLAP` (0.2 s), drops a stretched prompted segment an added
-one overlaps, and `build_window_cues()` gets the combined list in time order. One retry at most; a
+`initial_prompt=None`, everything else the same. `splice_segments()` then asks what the prompted
+decode never said, as text: two decodes of one audio disagree on word timings by more than any
+overlap test allows (one put というこ|と a few hundredths of a second before the other's
+ということで、 began; a head `repair_lead_words()` moved sits seconds from where the other decode
+put it), but they agree on the words. `unheard_runs()` aligns the two transcripts' covering lines
+character by character (`difflib.SequenceMatcher`, spaces and punctuation aside); a word is heard
+when any of its characters falls in a shared stretch of `PROMPT_ALIGN_MIN_CHARS` (2) or more, since
+one shared kana is coincidence. Each run of unheard words whose midpoint lies in a skipped stretch
+becomes a copy of its segment holding only those words, so a cue's words still join to its text.
+The old rule refused any segment overlapping a kept one by 0.2 s, and with it the line the segment
+opened with; on identical Whisper output the alignment brought back 早速作業していく…,
+氷のもとを探せば…, そのポイントをひたすら探る練習をするのが必要になります and キーの上にはトラックパッド…
+(where the prompted decode had written ご視聴ありがとうございました over the speech), and the seam echo
+the tolerance let through (ああすごい。 || すごい、…) went. It drops a stretched prompted segment an
+added piece overlaps, and `build_window_cues()` gets the combined list in time order. Its blind
+spot is the window's edge: the prompted text it aligns against is this window's alone, so an
+unprompted run opening on the previous window's last words is new to it. One retry at most; a
 retry that adds nothing leaves the prompted result as it was. The log line gains
 ` [N s skipped with the prompt, K segments from a decode without it]`. Never on a lyrics window or
 with an empty prompt. `dump_words.py` calls the same function, writes the spliced list and marks
@@ -111,15 +127,18 @@ midpoint as noise and drops it. The timings go, which is what P1.1 is for; the m
 word that now ends the cue.
 
 Segments go through gates before becoming cues: no words, VAD overlap under 0.5, faster-whisper's own
-word-anomaly score, repetition loops, and a gated phrase blocklist. The talk path scores the anomaly
-without the short-word term (`is_segment_anomaly(words, short_term=False)`): Whisper's Japanese words
+word-anomaly score, repetition loops, and a gated phrase blocklist. The anomaly score is upstream's
+without its short-word term (`word_anomaly_score()`), on both paths: Whisper's Japanese words
 are sub-tokens, usually one kana, so they fall under the 133 ms it penalises whatever the speaker did,
 and the term measured the tokenizer rather than the audio. Over two 15-minute dumps the first-8-words
 score reached the threshold for 37 of 279 segments and 34 of 202 with the term and for 0 and 2 without
 it, and every segment the gate actually deleted was real speech - a 10 s block holding
 一応、担任の先生とかいるの? … そうなんですよね on the live run, a 9.6 s block of 31 words, three shorter
-lines - with no hallucination among them. `lyrics_reason()` keeps the term: its thresholds were measured
-with it, and nothing has re-measured them.
+lines - with no hallucination among them. The lyrics gate kept the term until it was measured too: over
+the lyrics and rescued windows of a seven-video set (two decodes each) it fired 21 times, on 13 real
+lines (a shout in a rescued stretch, キビトの変身!, whose stretch edge Silero's framing moved onto it in
+some runs; a sung 一撃一撃一撃), 2 garbled fragments, and 6 inventions that the blocklist, the repetition
+test or the stretched-word score refuse anyway.
 
 `build_cues(words, speech, limits)` then trims words outside speech, splits at sentence ends, long
 pauses and `--max-cue-chars`/`--max-cue-seconds`, snaps starts to speech onsets, adds a lead-out into
@@ -173,6 +192,17 @@ there would refuse the stub merges the anti-flicker rule exists for — so piece
 flat exactly as before. The cost is accepted: a short finished sentence (`まじ?`, `うん。`) now stands
 as its own cue for its `min_seconds` instead of riding on a neighbour's row.
 
+After a mark, only a piece that itself ends what it says joins as a row (`finishes()`): a mark of
+its own, a pause of `pause_split` before the next cue, or nothing after it. An unfinished piece
+opens the next sentence; riding on the row before, it left its continuation to start a cue without
+it (`楽しいよ。 / オーナー跳びで遊んでみたくなったら、` then `うちで行ってね。`, and the card mined from the
+second cue lost its head). Refused, it starts the next cue and the usual rules join it to what
+follows. A Whisper segment's end is deliberately no evidence: segments are the decoder's cut and
+run flush into each other (a real decode cut ほんとは into a segment of its own, then 葉っぱを… at the
+same instant). The accepted cost is an unmarked finished line run into the next with no pause, which
+now joins it flat (`住みたいかった待ってギャルと…`): two sentences on one row lose no text, a head
+missing from the mined cue does.
+
 Every cue still carries `seg`, the id of the Whisper segment it came from, and a merge re-stamps
 every cue carrying a swallowed segment's id. Mining does not read it: a segment is a run of speech,
 not a sentence, and rejoining its cues put clauses on a card that were never on screen (see "What a
@@ -206,7 +236,8 @@ displays, while a record written before the field existed loads unchanged and si
 Sung lyrics (P0.3 of the doc): singing over music is no speech to Silero, so `process()` decides
 `wants_lyrics()` after the detector and the language watch: with `--lyrics auto` (default; `off`
 is the switch), less than `LYRICS_MAX_SPEECH_S` (1 s) of detected speech in the window and an
-`rms()` of at least `LYRICS_MIN_RMS` (0.02), and then, that holding, a target-language verdict on
+`rms()` of at least `loudness_floor(Session.talk_rms)` (`LYRICS_MIN_RMS`, 0.02, on an ordinary
+video; see below), and then, that holding, a target-language verdict on
 the window from `Transcriber.sung_in_target()` (the language head over the window's own samples,
 `speech_samples(audio, [[start, end]], start)`, the window's first `LANGUAGE_DETECT_SECONDS` (30 s)
 and, when those are refused and the window is longer, its last 30 s, so a song starting after an
@@ -220,7 +251,7 @@ window is transcribed with `vad_filter=False` and no `vad_parameters`, everythin
 usual. `build_window_cues(..., lyrics=True)` then gates each
 segment with `lyrics_reason(seg, words)` instead of `hallucination_reason()`: "empty"; "unsure" for
 `no_speech_prob > LYRICS_MAX_NO_SPEECH` (0.9), `avg_logprob < LYRICS_MIN_LOGPROB` (-0.8) or a mean
-word probability under `LYRICS_MIN_WORD_PROB` (0.35); "anomaly" (`is_segment_anomaly()`, always);
+word probability under `LYRICS_MIN_WORD_PROB` (0.35); "anomaly" (`is_segment_anomaly()`, always, improbable or stretched words);
 "repetition"; "blocklist" (any phrase, unconditionally, since no VAD evidence can rescue it). The
 thresholds are measured, not guessed, and the doc holds the numbers: a rap verse and an 18-voice
 chorus score `no_speech_prob` 0.59 and 0.80 with every line right, so that gate only refuses what
@@ -235,17 +266,54 @@ lines into one row, and a pause inside a segment never split), and a stranded fi
 beginning a pad before the next word, so the repair slides the head onto that onset as it does on
 the talk path. `process()` passes them as `speech` and stores them in `Session.speech`, so the
 sync's speech list and the cache carry the sung lines (nothing else reads them today; `/clip`
-slices the audio by the times the client sends); the log line gains ` [lyrics]`. A song shares a
-window with the line announcing it (a 歌枠's MC line): `wants_lyrics()` judges the window whole,
-the second of speech sends it the detector's way, and nothing of the singing is decoded, so
-`process()` leaves the `unsung_stretches()` of a talk window (loud, `rms()` at least
-`LYRICS_MIN_RMS`, unheard, `unheard_stretches()` of the window at `LYRICS_MIN_STRETCH_S`, 4 s,
-under both floors) out of `covered` when the window holds `LYRICS_MAX_SPEECH_S` or more of
-detected speech, and only then (a window the head refused, or `--lyrics off`, is covered whole,
-or it would be planned for ever); the planner brings each back as a window of its own, where the
-rule sees next to no speech and judges it alone, and the log line gains
-` [N s heard nothing in, planned again]`. `App.cache_record(s)` is the record `save_cache()`
-writes (`"lyrics"` beside the cues, the covered ranges and the speech), and `retranscribe.py`'s
+slices the audio by the times the client sends); the log line gains ` [lyrics]`. A talk window can hide the same thing beside its speech: a song after the
+line announcing it (a 歌枠's MC line), or a shriek Silero takes for noise. `wants_lyrics()` judges
+the window whole, so the detector's decode used to cut both out, and a line whose onset the
+detector caught late reached Whisper with its head clipped off. `Transcriber.choose_path()`
+decides both paths before the decode (`process()` and `dump_words.py` call it): a window holding
+`LYRICS_MAX_SPEECH_S` or more of detected speech has its `unsung_stretches()` (unheard,
+`unheard_stretches()` of the window at `LYRICS_MIN_STRETCH_S`, 4 s, under both floors; loud, `rms()`
+at least half the window's own detected-speech level, held between `LYRICS_QUIET_RMS`, 0.004, and
+`LYRICS_MIN_RMS`) put to `sung_in_target()` together, their samples concatenated. Only a verdict for
+the target language changes anything: the window is then decoded whole (`transcribe_options(...,
+detector=False)`: `vad_filter=False`, the prompt kept), the stretches join `speech` for the
+prompt-skip retry, the gates, the cue builder and `Session.speech`, and `vouched_segments()` drops a
+segment lying mostly inside a stretch that `lyrics_reason()` refuses, since a stretch counted as
+speech would excuse a sign-off made up over the music; its refusals count in the log's `[dropped …]`. A part of a stretch, 4 s or more, that runs to
+the window's end and holds no cue goes back to the planner as a cut segment does: `new_end` moves to
+its start, and the next window hears it from its own start, verdict carried (below). A part inside
+the window stays covered. It used to be planned again alone, and a 4 s window padded to Whisper's
+30 s is where it invents: a picture book's song tail came back as "おやすみなさい。" or "ご視聴あり
+がとうございました。" in three runs of three, over audio the reference decode holds nothing in, while
+none of nine such windows over two videos gave back a line the whole window had missed. A refused or silent stretch costs nothing beyond the head's pass, and the
+window is decoded and covered as before; a window without such a stretch decodes exactly as before.
+The floor is relative because a quietly mixed video's talk measures 0.016 and its missed lines 0.019,
+under the old absolute 0.02, while ordinary talk measures 0.04 and up and keeps the old floor
+(`loudness_floor()`); a talk window's own speech is its measure. Measured over the first ten
+minutes of 40 cached videos (451 windows): 51 windows hold a stretch at the old floor, 55 at this
+one, and the head accepts 18. A whole-song window has no speech
+of its own, so its floor is `loudness_floor()` of `Session.talk_rms`, the loudest speech level any
+talk window of the session measured (kept in memory, never cached): 0.02 until one has, and 0.02
+for good once any talk reached 0.04, so one whispered window in a loud video lowers nothing. A CPU
+scan of the cache's 284 videos (fixed 30 s windows) finds one window this opens, in a video whose
+talk measures 0.007. A song also runs on past a window's end: a stretch starting inside audio the
+head already vouched for (`Session.sung`, in memory: the stretches it accepted and the lyrics windows
+it passed) needs no verdict. Asked alone, the head hears too little of a fragment to be sure: a
+song's 12 s tail scored 0.62 and 0.66 and two lines were lost. Detected speech is not enough to
+carry: a window the segment rule cut ends inside speech, and a stretch after it may be one the head
+has just refused. Any other stretch of the window sends all of them to the head together, as before,
+and the gates still judge every line; a lyrics window is always asked, since it has thirty seconds
+to judge. A carried stretch is logged as `carries on the target language heard before it`.
+A whole-window decode can write the narration after a sung stretch in kana (わたしはあかずきんです for
+私は赤ずきんです): the music in the same encoder window shifts the decoder, since the same audio with the
+song muted comes out in kanji, and neither the prompt nor `condition_on_previous_text` changes it.
+Over the ten rescued windows of three videos the narration's kanji share is unchanged (0.234 on
+main, 0.233), so it stays: decoding the narration through the detector instead (and filling the
+stretches from a whole decode) brings back what this path fixes, since faster-whisper's VAD glues
+the lines either side of a removed stretch into one (キビタの変身に向けて飛ばす技なんだけど).
+The log line gains ` [N s the detector missed, decoded whole]` and
+` [its last N s left to the next window]`. `App.cache_record(s)` is the record `save_cache()`
+writes (`"lyrics"` and `"unheard_rule"` beside the cues, the covered ranges and the speech), and `retranscribe.py`'s
 `write_results()` writes the same. The language watch is untouched: without speech intervals it
 casts no vote, and the head's verdict in `sung_in_target()` never reaches `language_vote()`, so
 a foreign song never pauses a video. Live streams take the same path (a 歌枠 gets its lyrics).
@@ -353,6 +421,28 @@ The runtime-data invariant in full:
   taken out of `covered` with `subtract_intervals()`; the cues and the rest stay, and the session,
   no longer covered to its end, is fetched and planned again over them). That is not a migration
   and does not date: it is what makes the switch reversible.
+- `"unheard_rule": 2` (`UNHEARD_RULE`) says the covered ranges were made by a server that puts a talk
+  window's loud unheard stretches to the head (`unsung_stretches()`). Records without it are
+  rechecked by `App.old_record_sweep()`, a generator the server's own `App` (`start_app()`, `sweep=True`;
+  never the tools' or the tests') steps once each time the transcriber thread finds no work, so the
+  model stays on that thread and a new sync waits for one step at most. `load_cache()` and the
+  session path are untouched. Each record of the loaded model, `--language` and `CACHE_FORMAT`, not
+  written with `--lyrics off` (that branch gives its stretches back already) or paused, gets its
+  `unheard_ranges()`: every unheard stretch of `LYRICS_MIN_STRETCH_S` or more, widened by
+  `RECHECK_CONTEXT_S` (4 s) into the talk around it with the speech heard there, since alone a quiet
+  stretch would be a window with no speech, held to the absolute `LYRICS_MIN_RMS` a quietly mixed
+  video's missed line does not reach. With none it is rewritten with the marker without reading
+  audio. With some and no audio on disk it is left as it is (a recheck never downloads). Otherwise
+  each range is read from disk (`_decode_range()`), one per step, and put to
+  `Transcriber.choose_path()`, the decision `process()` makes, on a probe `Session` of the sweep's
+  own (its `talk_rms` and `sung` never reach a live one), up to the first it would decode: then
+  the record is deleted and the next open transcribes the video again from the disk audio; else it
+  is rewritten with the marker (tmp file and `os.replace()`). A record whose video has a session by
+  then is left to it: sessions load records under `App.lock`, which the write holds. Measured over
+  this machine's 181 large-v3 Japanese records: 76 marked without audio, 99 read, 33 deleted; 243
+  ranges, 184 head passes, 58 s of idle time once; a step takes 0.23 s at the median and 1.25 s at
+  worst (a 234 s range of a 2.7-hour video); reading every record to skip it takes 0.17 s. A restart
+  sweeps nothing: every record it would look at is marked.
 
 ## The `--lyrics` switch
 

@@ -124,7 +124,7 @@ Apply per segment, before `split_segment()`:
    segments whose VAD overlap is < 0.8. ~15 lines, reuses numbers someone else tuned. Risk: false positives
    on very fast speech (short words score on the `d < 0.133` term); the overlap gate is the safety.
 
-   **Measured, and the risk was the whole gate.** The talk path now scores with `short_term=False`.
+   **Measured, and the risk was the whole gate.** The port now scores without the short-word term.
    Whisper's Japanese words are sub-tokens, usually a single kana, so they are under 133 ms by
    construction: over 15 minutes of video A (a long-form Japanese podcast episode) dumped twice (279 segments at a 40 s window, 202 at
    30 s with an initial prompt) the first-8-words score reaches the threshold for 37 and 34 segments
@@ -173,18 +173,24 @@ good: the head judges the window's first thirty seconds and, when those are refu
 either verdict for the target language sends the window to the lyrics path (a window sung throughout costs
 one pass, a refused one two).
 
-**A song beside the MC line.** `wants_lyrics()` judges a window whole, and the 歌枠 case has both in one
-window: the singer announces the song (a second or two of detected speech), then sings for the rest of it,
-which the detector hears nothing of. The window is talk to the rule, faster-whisper decodes the announcement
-alone, and the singing would be covered with nothing in it, up to `--window` seconds of it at every
-transition, the same at the song's end. So `process()` leaves the loud stretches of a talk window that the
-detector heard nothing in (`unsung_stretches()`: at least `LYRICS_MIN_STRETCH_S`, 4 s, about one sung line,
-no speech interval and no cue touching them, RMS over the floor) out of the covered range, and the planner
-brings each back as a window of its own, where the rule sees next to no speech and judges it alone. Only a
-window that the speech heard in it kept from the lyrics path: one the head refused is covered whole, or it
-would be planned for ever. Under the floor a stretch is a pause with music under it more often than a line,
-and each such window costs a Silero pass and an encoder pass for the head; a silent stretch costs nothing to
-cover and is covered.
+**A song beside the MC line, a shriek beside talk.** `wants_lyrics()` judges a window whole, and the 歌枠
+case has both in one window: the singer announces the song (a second or two of detected speech), then sings
+for the rest of it, which the detector hears nothing of. Talk has the same blind spot: in a quietly mixed
+clip Silero heard nothing of ten seconds of shrieked lines (`rms()` 0.019, the talk around them 0.016) and
+caught the next line 0.7 s late, so the detector's decode lost the shrieks and clipped the line's head.
+`Transcriber.choose_path()` therefore puts a talk window's loud unheard stretches (`unsung_stretches()`: at
+least `LYRICS_MIN_STRETCH_S`, 4 s, about one sung line; loud means half the window's own speech level, held
+between `LYRICS_QUIET_RMS` and `LYRICS_MIN_RMS`) to the head before the decode, and on a target-language
+verdict decodes the window whole, prompt kept, the stretches counted as speech: contiguous audio, so the
+late line arrives in one piece. Inside a stretch the detector has no say, so `vouched_segments()` holds its
+segments to `lyrics_reason()` (a sign-off made up over music otherwise passes as speech), and a stretch part
+the decode left without a cue goes back to the planner as a window of its own, where the lyrics path decodes
+it alone: on one anime pilot the prompted whole-window decode wrote nothing of a 25 s theme song but a
+sign-off; alone, the song came out. This replaced planning every stretch again as its own window, which on a
+talk video with background music put lines out of order and decoded talk under the lyrics gates. A refused
+stretch costs the head's pass and the window is covered; under the floor a stretch is a pause with music
+under it more often than a line; a window without a stretch decodes byte for byte as before (one talk video
+checked whole: same windows, same cues).
 
 **Gates** (`lyrics_reason()`, in place of P0.2's; there is no VAD overlap to excuse a segment with):
 
@@ -198,9 +204,10 @@ cover and is covered.
    refuses what the decoder is all but sure of (Whisper's own `no_speech_threshold` is 0.6 and acts only
    together with a failed log-probability). `avg_logprob` separates better: sung windows −0.14 to −0.58, made-up
    lines −0.49 to −0.91. The word probability catches garbled pieces (それられ at 0.30; genuine lines from 0.48).
-3. "anomaly": `is_segment_anomaly()` unconditionally, and with the short-word term P0.2's talk path has since
-   dropped (these thresholds were measured with it, and nothing has re-measured them). Cost: a very fast
-   sung line can fall to it (ないないない 止めらんないない…, three lines of one song in the sample).
+3. "anomaly": `is_segment_anomaly()` unconditionally, without the short-word term, as in P0.2. With the
+   term it refused 21 segments over the lyrics and rescued windows of a seven-video set: 13 real lines, 2
+   garbled fragments, 6 inventions another gate refuses anyway (earlier: ないないない 止めらんないない…, three
+   lines of one song).
 4. "repetition" as in P0.2.
 5. "blocklist": any phrase, unconditionally. This is what actually stops the instrumental case: over background
    music Whisper's favourite invention is ご視聴ありがとうございました, at scores the other gates accept.

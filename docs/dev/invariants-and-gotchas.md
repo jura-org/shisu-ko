@@ -107,7 +107,7 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   name is refused before its download (`kitsune_runtime_missing()`, `KITSUNE_INSTALL_HINT`).
 - A Kitsune model is Japanese only: `load_kitsune_model()` refuses another `--language`, and the
   model says `detects_language`, `sings` and `takes_prompt` are False. `process()` then skips the
-  language watch, never takes the lyrics path nor leaves unsung stretches uncovered, and
+  language watch, never takes the lyrics path nor decodes a talk window whole, and
   `transcribe_options()` passes no initial prompt, so `retry_prompt_skips()` never decodes twice;
   `dump_words.py` reads the same flags and helper. Quantised weights are unpacked at load (16-bit
   on a GPU, fp32 on the CPU), so every precision runs everywhere and the W8A8 / W4A4 activations stay 16-bit; the
