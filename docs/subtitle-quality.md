@@ -124,7 +124,7 @@ Apply per segment, before `split_segment()`:
    segments whose VAD overlap is < 0.8. ~15 lines, reuses numbers someone else tuned. Risk: false positives
    on very fast speech (short words score on the `d < 0.133` term); the overlap gate is the safety.
 
-   **Measured, and the risk was the whole gate.** The talk path now scores with `short_term=False`.
+   **Measured, and the risk was the whole gate.** The port now scores without the short-word term.
    Whisper's Japanese words are sub-tokens, usually a single kana, so they are under 133 ms by
    construction: over 15 minutes of video A (a long-form Japanese podcast episode) dumped twice (279 segments at a 40 s window, 202 at
    30 s with an initial prompt) the first-8-words score reaches the threshold for 37 and 34 segments
@@ -204,9 +204,10 @@ checked whole: same windows, same cues).
    refuses what the decoder is all but sure of (Whisper's own `no_speech_threshold` is 0.6 and acts only
    together with a failed log-probability). `avg_logprob` separates better: sung windows −0.14 to −0.58, made-up
    lines −0.49 to −0.91. The word probability catches garbled pieces (それられ at 0.30; genuine lines from 0.48).
-3. "anomaly": `is_segment_anomaly()` unconditionally, and with the short-word term P0.2's talk path has since
-   dropped (these thresholds were measured with it, and nothing has re-measured them). Cost: a very fast
-   sung line can fall to it (ないないない 止めらんないない…, three lines of one song in the sample).
+3. "anomaly": `is_segment_anomaly()` unconditionally, without the short-word term, as in P0.2. With the
+   term it refused 21 segments over the lyrics and rescued windows of a seven-video set: 13 real lines, 2
+   garbled fragments, 6 inventions another gate refuses anyway (earlier: ないないない 止めらんないない…, three
+   lines of one song).
 4. "repetition" as in P0.2.
 5. "blocklist": any phrase, unconditionally. This is what actually stops the instrumental case: over background
    music Whisper's favourite invention is ご視聴ありがとうございました, at scores the other gates accept.

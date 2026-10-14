@@ -132,9 +132,9 @@ def test_a_sign_off_phrase_is_rejected_without_any_vad_evidence_to_rescue_it():
 
 
 def test_an_anomalous_segment_is_rejected_whatever_its_scores():
-    # Ten words crammed into a tenth of a second: faster-whisper's own anomaly score, applied
+    # Two words stretched over eight seconds: faster-whisper's own anomaly score, applied
     # unconditionally since there is no VAD overlap to excuse it.
-    ws = words([(c, i * 0.01, (i + 1) * 0.01) for i, c in enumerate("あいうえおかきくけこ")])
+    ws = words([("あいうえお", 0.0, 4.0), ("かきくけこ", 4.0, 8.0)])
     assert server.lyrics_reason(seg("あいうえおかきくけこ", ws), ws) == "anomaly"
 
 
@@ -600,7 +600,9 @@ def test_vouched_segments_judge_what_lies_in_a_rescued_stretch_by_the_lyrics_gat
     sign_off = line("ご視聴ありがとうございました", 10.0, 12.0)
     unsure = line("それられ", 12.0, 13.0, logprob=-1.2)
     outside = line("ご視聴ありがとうございました", 1.0, 3.0)  # heard by the detector: the talk gates' call
-    assert server.vouched_segments([kept, sign_off, unsure, outside], 0.0, speech, stretches) == [kept, outside]
+    drops: dict = {}
+    assert server.vouched_segments([kept, sign_off, unsure, outside], 0.0, speech, stretches, drops) == [kept, outside]
+    assert {k: v for k, v in drops.items() if not k.startswith("_")} == {"blocklist": 1, "unsure": 1}
 
 
 # --------------------------------------------------------------------------- the language verdict

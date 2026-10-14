@@ -111,15 +111,18 @@ midpoint as noise and drops it. The timings go, which is what P1.1 is for; the m
 word that now ends the cue.
 
 Segments go through gates before becoming cues: no words, VAD overlap under 0.5, faster-whisper's own
-word-anomaly score, repetition loops, and a gated phrase blocklist. The talk path scores the anomaly
-without the short-word term (`is_segment_anomaly(words, short_term=False)`): Whisper's Japanese words
+word-anomaly score, repetition loops, and a gated phrase blocklist. The anomaly score is upstream's
+without its short-word term (`word_anomaly_score()`), on both paths: Whisper's Japanese words
 are sub-tokens, usually one kana, so they fall under the 133 ms it penalises whatever the speaker did,
 and the term measured the tokenizer rather than the audio. Over two 15-minute dumps the first-8-words
 score reached the threshold for 37 of 279 segments and 34 of 202 with the term and for 0 and 2 without
 it, and every segment the gate actually deleted was real speech - a 10 s block holding
 一応、担任の先生とかいるの? … そうなんですよね on the live run, a 9.6 s block of 31 words, three shorter
-lines - with no hallucination among them. `lyrics_reason()` keeps the term: its thresholds were measured
-with it, and nothing has re-measured them.
+lines - with no hallucination among them. The lyrics gate kept the term until it was measured too: over
+the lyrics and rescued windows of a seven-video set (two decodes each) it fired 21 times, on 13 real
+lines (a shout in a rescued stretch, キビトの変身!, whose stretch edge Silero's framing moved onto it in
+some runs; a sung 一撃一撃一撃), 2 garbled fragments, and 6 inventions that the blocklist, the repetition
+test or the stretched-word score refuse anyway.
 
 `build_cues(words, speech, limits)` then trims words outside speech, splits at sentence ends, long
 pauses and `--max-cue-chars`/`--max-cue-seconds`, snaps starts to speech onsets, adds a lead-out into
@@ -220,7 +223,7 @@ window is transcribed with `vad_filter=False` and no `vad_parameters`, everythin
 usual. `build_window_cues(..., lyrics=True)` then gates each
 segment with `lyrics_reason(seg, words)` instead of `hallucination_reason()`: "empty"; "unsure" for
 `no_speech_prob > LYRICS_MAX_NO_SPEECH` (0.9), `avg_logprob < LYRICS_MIN_LOGPROB` (-0.8) or a mean
-word probability under `LYRICS_MIN_WORD_PROB` (0.35); "anomaly" (`is_segment_anomaly()`, always);
+word probability under `LYRICS_MIN_WORD_PROB` (0.35); "anomaly" (`is_segment_anomaly()`, always, improbable or stretched words);
 "repetition"; "blocklist" (any phrase, unconditionally, since no VAD evidence can rescue it). The
 thresholds are measured, not guessed, and the doc holds the numbers: a rap verse and an 18-voice
 chorus score `no_speech_prob` 0.59 and 0.80 with every line right, so that gate only refuses what
@@ -248,7 +251,7 @@ the target language changes anything: the window is then decoded whole (`transcr
 detector=False)`: `vad_filter=False`, the prompt kept), the stretches join `speech` for the
 prompt-skip retry, the gates, the cue builder and `Session.speech`, and `vouched_segments()` drops a
 segment lying mostly inside a stretch that `lyrics_reason()` refuses, since a stretch counted as
-speech would excuse a sign-off made up over the music. A part of a stretch, 4 s or more, that the
+speech would excuse a sign-off made up over the music; its refusals count in the log's `[dropped …]`. A part of a stretch, 4 s or more, that the
 decode left without a cue is kept out of `covered`, and the planner brings it back as a window of
 its own, where the lyrics path decodes it alone (a song beside talk the prompted whole-window
 decode wrote nothing of). A refused or silent stretch costs nothing beyond the head's pass, and the
