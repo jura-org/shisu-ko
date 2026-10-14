@@ -222,15 +222,53 @@ def test_a_retry_that_finds_nothing_keeps_the_prompted_result(monkeypatch, tmp_p
     assert s.covered == [[0.0, 20.0]]
 
 
-def test_an_unprompted_segment_overlapping_a_kept_one_is_not_added(monkeypatch, tmp_path):
-    # Its midpoint lies in the skip, but it runs a second into the kept prompted line.
-    straddling = talk("今日もよろしくお願いしますそれでは", 4.5, 11.0)
+def segment(pieces, prob: float = 0.9):
+    """A segment from explicit (text, start, end) words."""
+    ws = [server.Word(t, a, b, prob) for t, a, b in pieces]
+    return SimpleNamespace(text="".join(t for t, _, _ in pieces), start=ws[0].start, end=ws[-1].end, words=ws,
+                           no_speech_prob=0.1, avg_logprob=-0.2, compression_ratio=1.2)
+
+
+def test_an_unprompted_segment_running_into_a_kept_one_gives_only_what_the_prompt_never_said(monkeypatch, tmp_path):
+    # Its tail is the kept line said again; refusing the whole segment for it lost the line it opened with.
+    straddling = segment([("今日も", 4.5, 5.5), ("よろしく", 5.5, 6.5), ("お願いします", 6.5, 8.0),
+                          ("それでは", 9.9, 11.0)])
     worker, model = make_worker(monkeypatch, tmp_path, [LATE], [OPENING[0], straddling], SPEECH)
     s = session()
     worker.process(s, 0.0, 20.0)
     assert len(model.calls) == 2
     text = text_of(s.cues)
-    assert "こんにちは" in text and "よろしく" not in text
+    assert "こんにちは" in text and "今日もよろしくお願いします" in text
+    assert text.count("それでは") == 1 and "それでは始めましょうか" in text
+    for c in s.cues:
+        assert "".join(w["text"] for w in c["words"]) == c["text"]
+
+
+def lines(*segs):
+    return [(seg, server.absolute_words(seg, 0.0)) for seg in segs]
+
+
+def test_unheard_runs_aligns_the_decodes_as_text_not_time():
+    heard = segment([("ということで、", 8.3, 8.7), ("始め", 8.7, 10.5), ("ましょうか", 10.5, 13.0)])
+    # The other decode put the shared words a little earlier, and wrote them without the comma.
+    other = segment([("必要に", 4.5, 6.0), ("なります", 6.0, 7.4), (" と", 7.6, 7.9), ("いうこと", 7.9, 8.28)])
+    assert [(seg, run) for seg, _, run in server.unheard_runs(lines(heard), lines(other))] == [(other, [0, 1])]
+    # A head repair_lead_words() slid away from where both decodes put it is still the same word.
+    late = segment([("結", 9.0, 9.4), ("構急に", 10.2, 11.5), ("寒くなった", 11.5, 13.5)])
+    plain = segment([("今日も", 4.5, 5.5), ("お願いします", 6.5, 8.0), ("結", 9.0, 9.4), ("構急に", 10.0, 11.0)])
+    assert [run for _, _, run in server.unheard_runs(lines(late), lines(plain))] == [[0, 1]]
+    # One shared character is coincidence, not the same words.
+    assert [run for _, _, run in server.unheard_runs(lines(segment([("結論", 1.0, 2.0)])), lines(plain))] == [[0, 1, 2, 3]]
+
+
+def test_splice_segments_takes_no_word_twice_where_the_timings_disagree():
+    speech = [[1.0, 8.0], [8.1, 14.0]]
+    late = segment([("ということで、", 8.3, 8.7), ("始め", 8.7, 10.5), ("ましょうか", 10.5, 13.0)])
+    plain = segment([("今日も", 4.5, 5.5), ("お願いします", 5.5, 7.4), ("という", 7.6, 7.9), ("こと", 7.9, 8.28)])
+    stretches = server.skipped_speech(server.kept_spans([late], 0.0, speech), speech)
+    spliced, added = server.splice_segments([late], [plain], 0.0, speech, stretches)
+    assert added == 1
+    assert [seg.text for seg in spliced] == ["今日もお願いします", "ということで、始めましょうか"]
 
 
 def test_splice_segments_takes_only_what_fills_a_stretch():

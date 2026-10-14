@@ -41,10 +41,23 @@ gates keep it (`gate_segment()`, the one judge `build_window_cues()` also asks) 
 spans `PROMPT_SKIP_MIN_S` of detected speech (`stretched_over_speech()`): that
 line passes every gate, and only its word shows the jump; a last word stretched over the silence after
 an utterance spans no speech and still covers. Only then is the window decoded once more with
-`initial_prompt=None`, everything else the same. `splice_segments()` takes from that decode the
-covering segments whose midpoint lies in a skipped stretch and that overlap no covering prompted
-segment by more than `PROMPT_SPLICE_OVERLAP` (0.2 s), drops a stretched prompted segment an added
-one overlaps, and `build_window_cues()` gets the combined list in time order. One retry at most; a
+`initial_prompt=None`, everything else the same. `splice_segments()` then asks what the prompted
+decode never said, as text: two decodes of one audio disagree on word timings by more than any
+overlap test allows (one put というこ|と a few hundredths of a second before the other's
+ということで、 began; a head `repair_lead_words()` moved sits seconds from where the other decode
+put it), but they agree on the words. `unheard_runs()` aligns the two transcripts' covering lines
+character by character (`difflib.SequenceMatcher`, spaces and punctuation aside); a word is heard
+when any of its characters falls in a shared stretch of `PROMPT_ALIGN_MIN_CHARS` (2) or more, since
+one shared kana is coincidence. Each run of unheard words whose midpoint lies in a skipped stretch
+becomes a copy of its segment holding only those words, so a cue's words still join to its text.
+The old rule refused any segment overlapping a kept one by 0.2 s, and with it the line the segment
+opened with; on identical Whisper output the alignment brought back 早速作業していく…,
+氷のもとを探せば…, そのポイントをひたすら探る練習をするのが必要になります and キーの上にはトラックパッド…
+(where the prompted decode had written ご視聴ありがとうございました over the speech), and the seam echo
+the tolerance let through (ああすごい。 || すごい、…) went. It drops a stretched prompted segment an
+added piece overlaps, and `build_window_cues()` gets the combined list in time order. Its blind
+spot is the window's edge: the prompted text it aligns against is this window's alone, so an
+unprompted run opening on the previous window's last words is new to it. One retry at most; a
 retry that adds nothing leaves the prompted result as it was. The log line gains
 ` [N s skipped with the prompt, K segments from a decode without it]`. Never on a lyrics window or
 with an empty prompt. `dump_words.py` calls the same function, writes the spliced list and marks

@@ -41,6 +41,8 @@ of the venv's own CTranslate2 before anything imports it; to faster-whisper it i
 from __future__ import annotations
 
 import argparse
+import copy
+import difflib
 import errno
 import gc
 import glob
@@ -1609,7 +1611,7 @@ def build_window_cues(segs, offset: float, speech, limits: CueLimits, seg_id: in
 # unprompted decode of the same audio starts on time, so a skip is filled from one.
 PROMPT_SKIP_MIN_S = 3.0      # seconds of detected speech no kept segment reaches before a retry
 PROMPT_SKIP_SLACK = 0.5      # how near a kept segment must come to count as having heard a stretch
-PROMPT_SPLICE_OVERLAP = 0.2  # an unprompted segment overlapping a kept one by more is a duplicate
+PROMPT_ALIGN_MIN_CHARS = 2   # a shorter run of characters both decodes share is coincidence, not the same words
 
 
 def stretched_over_speech(words, speech, min_s: float = PROMPT_SKIP_MIN_S) -> bool:
@@ -1621,15 +1623,21 @@ def stretched_over_speech(words, speech, min_s: float = PROMPT_SKIP_MIN_S) -> bo
     return any(speech_seconds(speech, w.start, w.end) >= min_s for w in words)
 
 
-def kept_spans(segs, offset: float, speech) -> list:
-    """[start, end] on the video's clock of every talk segment that hears what it spans: the gates
-    keep it, as build_window_cues() judges, and no word of it is stretched over speech."""
-    spans = []
+def kept_lines(segs, offset: float, speech) -> list:
+    """[(segment, its words on the video's clock), ...] of every talk segment that hears what it
+    spans: the gates keep it, as build_window_cues() judges, and no word of it is stretched over
+    speech."""
+    lines = []
     for seg in segs:
         words, reason = gate_segment(seg, offset, speech)
         if reason is None and not stretched_over_speech(words, speech):
-            spans.append([words[0].start, words[-1].end])
-    return spans
+            lines.append((seg, words))
+    return lines
+
+
+def kept_spans(segs, offset: float, speech) -> list:
+    """[start, end] on the video's clock of every line kept_lines() keeps."""
+    return [[words[0].start, words[-1].end] for _, words in kept_lines(segs, offset, speech)]
 
 
 def skipped_speech(kept, speech, min_s: float = PROMPT_SKIP_MIN_S, slack: float = PROMPT_SKIP_SLACK) -> list:
@@ -1650,28 +1658,56 @@ def skipped_speech(kept, speech, min_s: float = PROMPT_SKIP_MIN_S, slack: float 
     return [g for g in groups if g[2] >= min_s]
 
 
-def splice_segments(segs, retry, offset: float, speech, stretches,
-                    max_overlap: float = PROMPT_SPLICE_OVERLAP) -> tuple:
-    """(`segs` with the segments of `retry` that fill a skipped stretch, in time order; how many were added).
+def unheard_runs(lines, other) -> list:
+    """[(segment, its words, [word index, ...]), ...]: the runs of words in `other`'s lines that have no
+    counterpart in `lines`' text. Both are kept_lines() of two decodes of the same audio.
 
-    A segment of the unprompted decode is taken when the gates keep it, no word of it is stretched
-    over speech, its midpoint lies inside one of `stretches` and it overlaps no kept segment of
-    `segs` (kept_spans()) by more than `max_overlap`. A segment of `segs` stretched over speech
-    that an added one overlaps goes: it would put its one-character cue across the real lines.
+    The decodes disagree on word timings by more than any overlap test can allow (one put というこ|と
+    a few hundredths of a second before the other's ということで、 began, and a head
+    repair_lead_words() moved sits seconds from where the other decode put it), but they agree on
+    the words. So the transcripts are aligned as text, spaces and punctuation aside, and a word is
+    heard when any of its characters falls in a stretch of PROMPT_ALIGN_MIN_CHARS or more that both
+    share. A word with no characters of its own (a lone mark) goes with the run it sits in.
     """
-    kept = kept_spans(segs, offset, speech)
+    def chars(lines_):
+        return [(ch, li, wi) for li, (_, words) in enumerate(lines_) for wi, w in enumerate(words)
+                for ch in w.word or "" if ch not in PUNCTUATION and not ch.isspace()]
+
+    mine, theirs = chars(lines), chars(other)
+    matcher = difflib.SequenceMatcher(None, [c for c, _, _ in mine], [c for c, _, _ in theirs], autojunk=False)
+    heard = {(li, wi) for i, j, n in matcher.get_matching_blocks() if n >= PROMPT_ALIGN_MIN_CHARS
+             for _, li, wi in theirs[j:j + n]}
+    spelled = {(li, wi) for _, li, wi in theirs}
+    runs = []
+    for li, (seg, words) in enumerate(other):
+        run: list = []
+        for wi in range(len(words) + 1):
+            if wi < len(words) and (li, wi) not in heard:
+                run.append(wi)
+            else:
+                if any((li, w) in spelled for w in run):
+                    runs.append((seg, words, run))
+                run = []
+    return runs
+
+
+def splice_segments(segs, retry, offset: float, speech, stretches) -> tuple:
+    """(`segs` with the pieces of `retry` that fill a skipped stretch, in time order; how many were added).
+
+    A piece is a run of the unprompted decode's words that the prompted one never said
+    (unheard_runs()) and whose midpoint lies inside one of `stretches`: a copy of its segment holding
+    only those words, its text their join. A segment of `segs` stretched over speech that an added
+    piece overlaps goes: it would put its one-character cue across the real lines.
+    """
     added = []
-    for seg in retry:
-        words, reason = gate_segment(seg, offset, speech)
-        if reason is not None or stretched_over_speech(words, speech):
+    for seg, words, run in unheard_runs(kept_lines(segs, offset, speech), kept_lines(retry, offset, speech)):
+        if not any(x <= (words[run[0]].start + words[run[-1]].end) / 2 <= y for x, y, _ in stretches):
             continue
-        a, b = words[0].start, words[-1].end
-        mid = (a + b) / 2
-        if not any(x <= mid <= y for x, y, _ in stretches):
-            continue
-        if any(min(b, y) - max(a, x) > max_overlap for x, y in kept):
-            continue
-        added.append(seg)
+        piece = copy.copy(seg)
+        piece.words = [seg.words[i] for i in run]
+        piece.text = "".join(w.word or "" for w in piece.words)
+        piece.start, piece.end = float(piece.words[0].start), float(piece.words[-1].end)
+        added.append(piece)
     if not added:
         return list(segs), 0
     filled = [[offset + float(seg.start), offset + float(seg.end)] for seg in added]

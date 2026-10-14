@@ -198,6 +198,8 @@ a lyrics window), `build_cues()` and `merge_segments()`. Rules that must not reg
   41-character, 8.1-second cue.
 - A sentence-mark seam never gives way (`ends_sentence()`), in `merge_adjacent()` and
   `merge_segments()`; a merge that cannot give both a row is refused.
+- `splice_segments()` decides what the prompted decode lacks by aligning text (`unheard_runs()`),
+  never by time overlap.
 - `server/tools/cue_stats.py`, `retranscribe.py`, `dump_words.py` and `replay_cues.py` measure a
   change; keep them working (`dump_words.py` decides every window as `process()` does).
 
