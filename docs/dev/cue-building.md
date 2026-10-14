@@ -313,7 +313,7 @@ stretches from a whole decode) brings back what this path fixes, since faster-wh
 the lines either side of a removed stretch into one (キビタの変身に向けて飛ばす技なんだけど).
 The log line gains ` [N s the detector missed, decoded whole]` and
 ` [its last N s left to the next window]`. `App.cache_record(s)` is the record `save_cache()`
-writes (`"lyrics"` beside the cues, the covered ranges and the speech), and `retranscribe.py`'s
+writes (`"lyrics"` and `"unheard_rule"` beside the cues, the covered ranges and the speech), and `retranscribe.py`'s
 `write_results()` writes the same. The language watch is untouched: without speech intervals it
 casts no vote, and the head's verdict in `sung_in_target()` never reaches `language_vote()`, so
 a foreign song never pauses a video. Live streams take the same path (a 歌枠 gets its lyrics).
@@ -421,6 +421,28 @@ The runtime-data invariant in full:
   taken out of `covered` with `subtract_intervals()`; the cues and the rest stay, and the session,
   no longer covered to its end, is fetched and planned again over them). That is not a migration
   and does not date: it is what makes the switch reversible.
+- `"unheard_rule": 2` (`UNHEARD_RULE`) says the covered ranges were made by a server that puts a talk
+  window's loud unheard stretches to the head (`unsung_stretches()`). Records without it are
+  rechecked by `App.old_record_sweep()`, a generator the server's own `App` (`start_app()`, `sweep=True`;
+  never the tools' or the tests') steps once each time the transcriber thread finds no work, so the
+  model stays on that thread and a new sync waits for one step at most. `load_cache()` and the
+  session path are untouched. Each record of the loaded model, `--language` and `CACHE_FORMAT`, not
+  written with `--lyrics off` (that branch gives its stretches back already) or paused, gets its
+  `unheard_ranges()`: every unheard stretch of `LYRICS_MIN_STRETCH_S` or more, widened by
+  `RECHECK_CONTEXT_S` (4 s) into the talk around it with the speech heard there, since alone a quiet
+  stretch would be a window with no speech, held to the absolute `LYRICS_MIN_RMS` a quietly mixed
+  video's missed line does not reach. With none it is rewritten with the marker without reading
+  audio. With some and no audio on disk it is left as it is (a recheck never downloads). Otherwise
+  each range is read from disk (`_decode_range()`), one per step, and put to
+  `Transcriber.choose_path()`, the decision `process()` makes, on a probe `Session` of the sweep's
+  own (its `talk_rms` and `sung` never reach a live one), up to the first it would decode: then
+  the record is deleted and the next open transcribes the video again from the disk audio; else it
+  is rewritten with the marker (tmp file and `os.replace()`). A record whose video has a session by
+  then is left to it: sessions load records under `App.lock`, which the write holds. Measured over
+  this machine's 181 large-v3 Japanese records: 76 marked without audio, 99 read, 33 deleted; 243
+  ranges, 184 head passes, 58 s of idle time once; a step takes 0.23 s at the median and 1.25 s at
+  worst (a 234 s range of a 2.7-hour video); reading every record to skip it takes 0.17 s. A restart
+  sweeps nothing: every record it would look at is marked.
 
 ## The `--lyrics` switch
 

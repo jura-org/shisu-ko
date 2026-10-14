@@ -169,7 +169,12 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   older record whole before reading anything out of it, so a geometry change bumps it. Cue caches
   are reused only when model (compared canonically) and language match. `covered` always means
   "Whisper has seen this"; what a language-paused session only listens to goes into
-  `Session.probed`, which is never written to `covered` or the cache.
+  `Session.probed`, which is never written to `covered` or the cache. One recheck sits beside it:
+  `App.old_record_sweep()`, stepped by the idle transcriber thread of the server's own `App` only,
+  deletes a record without `"unheard_rule"` (`UNHEARD_RULE`) in whose unheard stretches
+  `choose_path()` would now decode speech, read from the audio on disk (never a download), and
+  marks any other; it never touches a record a session holds. Detail: `docs/dev/cue-building.md`,
+  "Runtime data and the cue cache".
 - The phone portal (`portal/`) answers nobody but loopback by default (`--mode local`). `--mode lan`
   answers only devices holding a token from pairing (a one-time code, rate-limited; only the
   token's hash is stored) and is the only mode that may listen on 0.0.0.0; `--mode tailscale` answers

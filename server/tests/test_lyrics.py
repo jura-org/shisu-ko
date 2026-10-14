@@ -966,6 +966,7 @@ def test_save_cache_writes_the_rule_and_its_own_record_reloads_as_covered(monkey
     assert data["lyrics"] == "auto"
     # Every record carries the rule and the current format; an older one is dropped whole.
     assert data["format"] == server.CACHE_FORMAT == 6
+    assert data["unheard_rule"] == server.UNHEARD_RULE  # made under the rule: never rechecked
 
     reloaded = server.Session(video_id=VIDEO, url="u")
     app.load_cache(reloaded)
@@ -975,6 +976,131 @@ def test_save_cache_writes_the_rule_and_its_own_record_reloads_as_covered(monkey
     off = make_app(monkeypatch, tmp_path, lyrics="off")
     off.save_cache(s)
     assert json.loads((tmp_path / f"{VIDEO}.cues.json").read_text(encoding="utf-8"))["lyrics"] == "off"
+
+
+# --------------------------------------------------------------------------- records from before the unheard rule
+
+TALK = 0.016 * math.sqrt(2)  # a quietly mixed video's talk, 0.016 rms
+SHRIEK = 0.019 * math.sqrt(2)  # its missed line, under LYRICS_MIN_RMS but loud next to the talk
+
+
+def quiet_video(shriek: float = SHRIEK) -> np.ndarray:
+    """0-6 s talk, 6-16 s a line the detector missed, 16-22 s talk, then 18 s of silence."""
+    return np.concatenate([tone(6.0, TALK), tone(10.0, shriek), tone(6.0, TALK), silence(18.0)])
+
+
+QUIET_SPEECH = [[0.0, 6.0], [16.0, 22.0]]
+QUIET_CUES = [{"start": 0.2, "end": 5.8, "text": "こんにちは", "seg": 0},
+              {"start": 16.2, "end": 21.8, "text": "ほんとは葉っぱを相手に", "seg": 1}]
+
+
+def test_unheard_ranges_reach_into_the_talk_around_each_stretch():
+    # With the talk beside it, the 10 s stretch is judged against that talk, as its window would.
+    assert server.unheard_ranges([[0.0, 40.0]], QUIET_SPEECH, QUIET_CUES) == [
+        (2.0, 20.0, [[2.0, 6.0], [16.0, 20.0]]), (18.0, 40.0, [[18.0, 22.0]])]
+    assert server.unheard_ranges([[0.0, 15.0]], [[0.0, 6.0], [9.0, 15.0]], []) == []  # a 3 s pause
+
+
+def sweeper(monkeypatch, tmp_path, verdict=("ja", 0.95), audio=None, on_disk=True, **record):
+    """An app whose cache holds one unmarked quiet record and, with `on_disk`, its audio (`audio`,
+    the quiet video by default); its decodes are counted in `app.decodes`."""
+    worker, model = make_worker(monkeypatch, tmp_path, segs=[], verdict=verdict)
+    app = worker.app
+    audio = quiet_video() if audio is None else audio
+    app.decodes = []
+
+    def decode(src, a, b, rate):
+        app.decodes.append((a, b))
+        return (audio[int(a * RATE):int(b * RATE)] * 32768.0).astype(np.int16)
+
+    monkeypatch.setattr(server, "_decode_range", decode)
+    if on_disk:
+        (tmp_path / f"{VIDEO}.webm").write_bytes(b"\x1a\x45\xdf\xa3")
+    write_record(tmp_path, **{"cues": QUIET_CUES, "covered": [[0.0, 40.0]], "speech": QUIET_SPEECH,
+                              "duration": 40.0, "lyrics": "auto", **record})
+    return app, model
+
+
+def record_file(tmp_path):
+    return tmp_path / f"{VIDEO}.cues.json"
+
+
+def stored(tmp_path) -> dict:
+    import json
+
+    return json.loads(record_file(tmp_path).read_text(encoding="utf-8"))
+
+
+def sweep(app) -> int:
+    """Run the sweep to its end; the idle steps it took."""
+    steps = 0
+    for _ in app.old_record_sweep():
+        steps += 1
+    return steps
+
+
+def test_a_record_the_new_rule_rescues_speech_in_is_removed_to_be_transcribed_again(monkeypatch, tmp_path):
+    app, model = sweeper(monkeypatch, tmp_path)
+    assert sweep(app) == 2  # one range, then the verdict: no step longer than one range
+    assert model.detections == 1 and app.decodes == [(2.0, 20.0)]  # the first range that rescues ends it
+    assert not record_file(tmp_path).exists()
+    s = server.Session(video_id=VIDEO, url="u")
+    app.load_cache(s)
+    assert s.cues == [] and s.status == "pending"  # the next open transcribes it from the disk audio
+
+
+def test_a_record_with_nothing_to_rescue_is_marked_and_never_rechecked(monkeypatch, tmp_path):
+    # The head hears no Japanese in the loud stretch (music, say), or the stretch is silent and
+    # never reaches the head: the record is right as it is.
+    for verdict, shriek, heads in ((("en", 0.99), SHRIEK, 1), (("ja", 0.95), 0.0, 0)):
+        app, model = sweeper(monkeypatch, tmp_path, verdict=verdict, audio=quiet_video(shriek))
+        before = stored(tmp_path)
+        sweep(app)
+        assert model.detections == heads and len(app.decodes) == 2
+        assert stored(tmp_path) == {**before, "unheard_rule": server.UNHEARD_RULE}
+        assert sweep(app) == 0 and len(app.decodes) == 2  # a marked record is never read again
+
+
+def test_a_record_without_an_unheard_stretch_is_marked_without_its_audio(monkeypatch, tmp_path):
+    app, model = sweeper(monkeypatch, tmp_path, on_disk=False, covered=[[0.0, 22.0]],
+                         speech=[[0.0, 6.0], [6.0, 22.0]], duration=22.0)
+    sweep(app)
+    assert stored(tmp_path)["unheard_rule"] == server.UNHEARD_RULE and app.decodes == []
+
+
+def test_records_the_sweep_leaves_as_they_are(monkeypatch, tmp_path):
+    # No audio on disk (a recheck never downloads), another rule, another model, a pause.
+    for extra in ({"on_disk": False}, {"lyrics": "off"}, {"model": "small"}, {"language": "en"},
+                  {"language_state": {"foreign_seconds": 90.0, "heard": "en", "paused": True}}):
+        app, model = sweeper(monkeypatch, tmp_path, **extra)
+        before = record_file(tmp_path).read_bytes()
+        sweep(app)
+        assert record_file(tmp_path).read_bytes() == before and model.detections == 0, extra
+        record_file(tmp_path).unlink()
+        (tmp_path / f"{VIDEO}.webm").unlink(missing_ok=True)
+    app, model = sweeper(monkeypatch, tmp_path, lyrics="off")
+    off = make_app(monkeypatch, tmp_path, lyrics="off")
+    before = record_file(tmp_path).read_bytes()
+    sweep(off)
+    assert record_file(tmp_path).read_bytes() == before
+
+
+def test_a_record_a_session_opens_meanwhile_is_left_to_it(monkeypatch, tmp_path):
+    app, model = sweeper(monkeypatch, tmp_path)
+    before = record_file(tmp_path).read_bytes()
+    steps = app.old_record_sweep()
+    next(steps)  # the range is judged: this record would be removed
+    s = app.get_session(VIDEO, "u")  # a viewer opens the video, which loads the record
+    assert list(steps) == []
+    assert record_file(tmp_path).read_bytes() == before
+    assert s.sung == [] and s.talk_rms == 0.0  # the sweep's verdicts stay in its own probe session
+
+
+def test_only_the_server_s_own_app_sweeps(monkeypatch, tmp_path):
+    app, _ = sweeper(monkeypatch, tmp_path)
+    assert next(app.sweep, False) is False  # an App the tools and tests make sweeps nothing
+    import inspect
+    assert inspect.getsource(server.start_app).count("sweep=True") == 2  # both of the server's own
 
 
 # --------------------------------------------------------------------------- --lyrics

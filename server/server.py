@@ -79,7 +79,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.19.0"
+VERSION = "0.19.1"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -2934,6 +2934,26 @@ def unsung_stretches(audio, start: float, end: float, speech,
     return out
 
 
+# A record's "unheard_rule": its covered ranges were made by a server that puts a talk window's loud
+# unheard stretches to the head (unsung_stretches()). App.old_record_sweep() rechecks one without it.
+UNHEARD_RULE = 2
+RECHECK_CONTEXT_S = 4.0  # talk on either side of a rechecked stretch: what its window would hold
+
+
+def unheard_ranges(covered, speech, cues) -> list:
+    """[(start, end, speech)]: every unheard stretch of a record of LYRICS_MIN_STRETCH_S or more,
+    widened by RECHECK_CONTEXT_S into the talk around it and clipped to its covered range, with the
+    speech heard inside, so Transcriber.choose_path() judges it as it would a window holding it.
+    Alone, a quiet stretch would be a window with no speech, held to the absolute LYRICS_MIN_RMS
+    until some talk was measured, which a quietly mixed video's missed line (0.019) does not reach."""
+    covered, out = merge_intervals(covered), []
+    for a, b in unheard_stretches(covered, speech, cues, LYRICS_MIN_STRETCH_S):
+        x, y = next((x, y) for x, y in covered if x <= a and b <= y)
+        lo, hi = max(x, a - RECHECK_CONTEXT_S), min(y, b + RECHECK_CONTEXT_S)
+        out.append((lo, hi, [[max(p, lo), min(q, hi)] for p, q in speech if min(q, hi) > max(p, lo)]))
+    return out
+
+
 def vouched_segments(segs, offset: float, speech, stretches, drops=None) -> list:
     """`segs` less every segment lying mostly inside `stretches` that lyrics_reason() refuses.
 
@@ -3005,7 +3025,8 @@ class Transcriber(threading.Thread):
                     continue
                 picked = self.app.pick_work()
                 if picked is None:
-                    time.sleep(0.15)
+                    if next(self.app.sweep, False) is False:  # idle: one step of the sweep, else rest
+                        time.sleep(0.15)
                     continue
                 self.process(*picked)
             except Exception:  # noqa: BLE001
@@ -3267,7 +3288,8 @@ class Transcriber(threading.Thread):
 # --------------------------------------------------------------------------- application
 
 class App:
-    def __init__(self, args, model, device: str, compute_type: str, model_name: Optional[str] = None):
+    def __init__(self, args, model, device: str, compute_type: str, model_name: Optional[str] = None,
+                 sweep: bool = False):
         self.args = args
         self.model = model
         self.device = device
@@ -3292,6 +3314,7 @@ class App:
         self.lock = threading.Lock()
         self.fetcher = Fetcher(args)
         self.last_evict = time.time()
+        self.sweep = self.old_record_sweep() if sweep else iter(())  # the server's own; tools and tests sweep nothing
         self.transcriber = Transcriber(self)
         self.transcriber.start()
 
@@ -3781,6 +3804,45 @@ class App:
             s.status = "ready"  # nothing left to transcribe, no need to fetch the audio again
         log.info("[%s] loaded %d cached cues", s.video_id, len(s.cues))
 
+    def old_record_sweep(self):
+        """Recheck the cue records written before UNHEARD_RULE, one range per idle step of the
+        transcriber thread, the only thread that touches the model, so a sync waits for one step at
+        most. A record whose unheard_ranges() Transcriber.choose_path(), the decision process()
+        makes, would decode in is deleted: its next open transcribes the video again from the audio
+        on disk. Any other is rewritten with the marker, one with no such range without reading audio.
+        Left as they are: records of another model or language, written with --lyrics off
+        (load_cache() gives those back) or paused, all of them under --lyrics off, one with ranges but
+        no audio on disk (a recheck never downloads), and one whose video a session holds by then."""
+        for path in sorted(CACHE_DIR.glob("*.cues.json")):
+            video_id = path.name[:-len(".cues.json")]
+            try:
+                data, audio = json.loads(path.read_text(encoding="utf-8")), find_cached_audio(video_id)
+                if (data.get("unheard_rule") == UNHEARD_RULE or not self.cache_model_matches(data)
+                        or data.get("language") != self.args.language or "off" in (getattr(self.args, "lyrics", "auto"), data.get("lyrics"))
+                        or data["language_state"].get("paused")):
+                    continue
+                ranges, rescue = unheard_ranges(data["covered"], data["speech"], data["cues"]), False
+                probe = Session(video_id, "")  # what choose_path() learns of the video stays out of live sessions
+                for lo, hi, heard in ranges if audio is not None else ():
+                    samples = _decode_range(audio, lo, hi, rate=SAMPLE_RATE).astype(np.float32) / 32768.0
+                    rescue = self.transcriber.choose_path(probe, samples, heard, lo, hi) != (False, [])
+                    yield
+                    if rescue:
+                        break
+                with self.lock:  # a session loads its record under this lock: one that did keeps it
+                    if video_id in self.sessions or (ranges and audio is None):
+                        continue
+                    if rescue:
+                        path.unlink()
+                    else:
+                        marked = json.dumps({**data, "unheard_rule": UNHEARD_RULE}, ensure_ascii=False)
+                        path.with_suffix(".tmp").write_text(marked, encoding="utf-8")
+                        os.replace(path.with_suffix(".tmp"), path)
+                log.info("[%s] old cue record %s", video_id, "removed: the new rule hears more" if rescue else "marked")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[%s] could not recheck the old cue record (%s); left as it is", video_id, exc)
+            yield
+
     def cache_record(self, s: Session) -> dict:
         """What save_cache() writes for a session (retranscribe.py writes the same shape elsewhere)."""
         with s.lock:
@@ -3793,6 +3855,7 @@ class App:
                 # The rule the covered ranges were made under: without the lyrics rule a sung
                 # window was covered with nothing in it, and load_cache() offers it again.
                 "lyrics": getattr(self.args, "lyrics", "auto"),
+                "unheard_rule": UNHEARD_RULE,
                 # Reopening a foreign video finds it paused instead of hallucinating all over again.
                 "language_state": {"foreign_seconds": round(s.foreign_seconds, 2),
                                    "heard": s.heard, "paused": s.language_paused},
@@ -5114,12 +5177,12 @@ def start_app(args) -> "App":
         log.info("Starting with the model '%s' that the switch asked for", wanted)
         try:
             # No local name for the model: the switch frees it through App alone (see switch_model_if_wanted).
-            return App(args, *load_model(args, wanted, path=download_model_files(wanted)), model_name=wanted)
+            return App(args, *load_model(args, wanted, path=download_model_files(wanted)), model_name=wanted, sweep=True)
         except Exception as exc:  # noqa: BLE001
             log.error("Could not load the model '%s' (%s); starting with '%s'", wanted, exc, args.model)
             failed = (wanted, friendly_model_error(exc, wanted))
     try:
-        app = App(args, *load_model(args))
+        app = App(args, *load_model(args), sweep=True)
     except Exception as exc:  # noqa: BLE001
         log.error("Could not load the model '%s': %s", args.model, exc)
         if ROCM_ACTIVE and args.device != "cpu" and not isinstance(exc, ImportError):
