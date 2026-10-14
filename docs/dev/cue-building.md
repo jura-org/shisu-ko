@@ -11,7 +11,10 @@ inside a covered range, a short `--first-window` (20 s) starts at the playhead; 
 `condition_on_previous_text` false the library drops the initial prompt after the first chunk of a
 call (checked in 1.2.1), so a 40 s window decoded its last ten seconds unprompted.
 A segment touching the end of a window is dropped and the covered range ends where that segment
-began, so the next window re-transcribes it whole. These functions are pure; test them by importing the
+began, so the next window re-transcribes it whole. A gap under 1.5 s gets no window: `plan_window()`
+covers it as it is, and `pick_work()` saves the session then, or the record would stay short of fully
+covered and every load would decode the audio again to find it (39 of 193 records here held only such
+gaps). These functions are pure; test them by importing the
 module (register it in `sys.modules` before `exec_module` because of `from __future__ import annotations`).
 
 Cue building (`docs/subtitle-quality.md` is the rationale and the measurements): the server runs

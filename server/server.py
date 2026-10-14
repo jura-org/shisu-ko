@@ -3684,9 +3684,15 @@ class App:
             if timeout > 0 and now - s.last_sync > timeout:
                 continue  # nobody has synced this video recently (tab closed): do not transcribe ahead for it
             with s.lock:
+                covered = s.covered
                 window = plan_window(s, self.args)
                 if window:
                     return (s, window[0], window[1])
+                tidied = s.covered is not covered  # plan_window() assigns a new list only when it covers
+            if tidied:
+                # plan_window() covered a gap too short for a window. Unsaved, the record would stay
+                # short of fully covered, and every load would decode the audio again to find it.
+                self.save_cache(s)
         return None
 
     def maybe_evict(self) -> None:
