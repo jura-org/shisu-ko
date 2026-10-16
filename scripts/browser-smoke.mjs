@@ -45,7 +45,7 @@ const mediaBytes = (() => {
 })();
 const mediaDataUrl = `data:audio/wav;base64,${mediaBytes.toString("base64")}`;
 const tinyJpeg = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/AYf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/AYf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Aqf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z";
-const anki = { notes: new Map(), media: [], updates: [] };
+const anki = { notes: new Map(), media: [], updates: [], syncs: [] };
 const clipRequests = [];
 async function requestBody(req) {
   let body = "";
@@ -107,6 +107,9 @@ const api = await listen(async (req, res) => {
       result = request.params.filename;
     } else if (request.action === "updateNoteFields") {
       anki.updates.push(request.params.note);
+      result = null;
+    } else if (request.action === "sync") {
+      anki.syncs.push(Date.now());
       result = null;
     } else return json(res, { result: null, error: `unknown action ${request.action}` }, 400);
     return json(res, { result, error: null });
@@ -287,6 +290,10 @@ try {
   assert.equal(found.newNoteId, 101);
   const mediaBefore = anki.media.length;
   const updatesBefore = anki.updates.length;
+  // The sync after a mine waits a minute; the worker's own console shortens it for this run
+  // (ankiSyncTiming is no setting, and nothing outside the worker reaches it).
+  await worker.evaluate(() => { ankiSyncTiming.firstMs = 1500; ankiSyncTiming.repeatMs = 1000; });
+  const minedAt = Date.now();
   const mined = await send({ type: "mine", auto: true, videoId, noteId: 101, cue: { start: 0, end: 1, text: "これはテスト字幕です" }, imageDataUrl: tinyJpeg });
   assert.equal(mined.ok, true, JSON.stringify(mined));
   assert.equal(anki.media.length, mediaBefore + 2);
@@ -296,6 +303,11 @@ try {
   assert.equal(anki.updates.at(-1).id, 101);
   assert.match(anki.updates.at(-1).fields.Picture, /<img src=/);
   assert.match(anki.updates.at(-1).fields.SentenceAudio, /\[sound:/);
+  await poll(() => anki.syncs.length, (count) => count >= 1, 10000);
+  assert.ok(anki.syncs[0] - minedAt >= 1400, `the sync must wait for its delay (came ${anki.syncs[0] - minedAt} ms after the mine)`);
+  await ankiPopup.waitForTimeout(2500);
+  assert.equal(anki.syncs.length, 1, "one mine, one sync");
+  await poll(() => ankiPopup.locator("#anki-sync-status").textContent(), (value) => /^Anki sync: last /.test(value), 5000);
   anki.notes.set(202, { Sentence: { value: "別の字幕です" } });
   const mismatchMedia = anki.media.length;
   const mismatchUpdates = anki.updates.length;
@@ -434,7 +446,7 @@ try {
   await regression.close();
   await regressionPopup.close();
 
-  console.log(`browser smoke passed (syncs=${syncCount}, downloads=${records.length}, ` +
+  console.log(`browser smoke passed (syncs=${syncCount}, anki syncs=${anki.syncs.length}, downloads=${records.length}, ` +
     `${[...syncSeen].map(([id, count]) => `${id}=${count}`).join(" ")})`);
 } finally {
   await context?.close();

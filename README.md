@@ -351,6 +351,16 @@ mining by hand saves the files to Downloads instead (can be turned off).
 **Downloads.** With **Send screenshot and audio to** set to Downloads, the files land in
 `Downloads/shisu-ko-mining/`, ready to drag into any card.
 
+**Sync with AnkiWeb.** A minute after Shisu-ko fills a card, it asks Anki to sync (AnkiConnect's
+`sync`), so the card is on your phone without pressing Sync. Cards made in that minute go with it;
+while you keep mining, the next sync follows 30 s after the one before began, and once 30 s pass
+without a new card it stops. Anki must be signed in to AnkiWeb. A failed sync is tried again after
+1, 2 and then every 5 minutes while cards are waiting; "not signed in" and a full sync Anki wants
+you to confirm wait for your next card instead. The popup's Mining section says when the last sync
+went through, or why it did not; nothing else ever interrupts you. Turn it off with **Sync Anki
+after mining**; the master switch off cancels a planned sync too. The phone portal syncs the same
+way on its own; when both mine at once each may sync, and Anki runs the two one after the other.
+
 DRM-protected videos block screenshots; the audio clip still works. The Shisu-ko server uses
 port 8790 precisely so that AnkiConnect can keep its default 8765.
 
@@ -522,7 +532,11 @@ computer; the subtitles below it centre the line being said and light up its wor
 spoken. Drag the bar above the buttons to move through the video; the list shows the line you will land
 on. Tap a word for its dictionary entry, tap a definition to pick it, and Mine adds the card
 with that sentence, its audio and a picture of the video. The first Mine asks which deck and note
-type to use, and guesses what each field gets from its name; Settings > Anki changes it. The list
+type to use, and guesses what each field gets from its name; Settings > Anki changes it. A minute
+after a card is added, the portal asks Anki to sync with AnkiWeb, on the extension's rule (see
+[Sentence mining](#sentence-mining)); **Sync Anki after mining** in Settings > Anki turns it off,
+and the line under it says how the last sync went (`"auto_sync": false` in
+`~/.shisu-ko/portal.json` fixes the switch off). The list
 of videos remembers how far you got, on every device. How it works, and its security model:
 [docs/dev/portal.md](docs/dev/portal.md).
 
@@ -531,7 +545,7 @@ of videos remembers how far you got, on every device. How it works, and its secu
 ![Popup, dark theme](docs/images/popup-dark.png)
 
 The switch in the header is the master switch. Off means nothing happens on YouTube pages: no
-overlay, no requests to the server, no Anki watching, no word colours and no key handling, until
+overlay, no requests to the server, no Anki watching or syncing, no word colours and no key handling, until
 it is switched on again (Alt+Shift+S flips it too). The status line beside the switch says whether the server
 answers, and with which model and device; while it does not answer, a **Start server** button
 on that line launches it with the server's default options (Firefox and the Chrome Web Store
@@ -561,6 +575,7 @@ age of the daily check, and the line under it keeps the result ("Newest release:
 | Left/Right jump between subtitles | Arrow keys move between cues instead of seeking five seconds |
 | Transcript panel | List of all cues so far, with jump and mine buttons |
 | Auto-attach to new Yomitan cards | Watches AnkiConnect and fills the new card by itself; off means Alt+Shift+M or the pickaxe |
+| Sync Anki after mining | A minute after a card is filled, asks Anki to sync with AnkiWeb, every 30 s while mining goes on; the line under it says how the last sync went. Needs Anki signed in to AnkiWeb, see [Sentence mining](#sentence-mining) |
 | Colour words by their Anki card | Colours each word of a line by the state of its card in the deck below: green learned, yellow learning, orange suspended, red new; green for your known words and, as the three switches under More word colour options say, green for particles and katakana words and blue for names and Latin text; other words keep the text colour. Needs Anki with AnkiConnect, see [Word colours](#word-colours) |
 | Deck | The deck whose cards are looked at. Automatic means the deck your last mined card went to; nothing is looked up before a card was mined or a deck chosen. The hint under it names the deck, or says what stands in the way |
 | Particles, katakana, names, known words | Under More word colour options, closed by default |
@@ -630,8 +645,8 @@ Firefox (addon/)                                 Local server (server/), http://
 |  - screenshot via <canvas>       |  GET /clip  |    windows at the playhead, then ahead of it   |
 +----------------------------------+ ----------> | 4. /clip cuts sentence audio from the source   |
         |                                        +------------------------------------------------+
-        | AnkiConnect (http://127.0.0.1:8765): storeMediaFile + updateNoteFields on the newest card;
-        | findNotes + notesInfo on one deck for the word colours
+        | AnkiConnect (http://127.0.0.1:8765): storeMediaFile + updateNoteFields on the newest card,
+        | sync a minute later; findNotes + notesInfo on one deck for the word colours
         v
       Anki
 ```
