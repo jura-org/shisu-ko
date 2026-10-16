@@ -170,7 +170,8 @@ function loadPopup(answer, runtimeURL = "moz-extension://test/", opts = {}) {
     "({ startFlow, resumeStart, checkServer, startServerFromPopup, startNotUpHint, START_NOT_UP_HINT, START_ELSEWHERE_HINT, OFFLINE_HINT," +
       " START_AVAILABLE, ON_FIREFOX, CHROME_STORE_ID, START_PERMISSION_HINT," +
       " updateFlow, refreshUpdate, updateServerFromPopup, snoozeUpdateFromPopup, checkForUpdatesFromPopup, openReleasePage, relativeTime, renderStatus," +
-      " UPDATE_LOST_HINT, stillOldHint, init, resetStyle, onChange, renderDeckOptions, refreshDecks, DECK_NONE_HINT, HEALTH_REFRESH_MS, DECKS_RETRY_MS })"
+      " UPDATE_LOST_HINT, stillOldHint, init, resetStyle, onChange, renderDeckOptions, refreshDecks, DECK_NONE_HINT, HEALTH_REFRESH_MS, DECKS_RETRY_MS," +
+      " ankiSyncLine, refreshAnkiSync })"
   ).runInContext(sandbox);
   // What the background's storage.local write of the settings looks like from the popup.
   const fireStorage = (settings) => {
@@ -416,6 +417,8 @@ function updateBackground(state) {
       }
       case "startServerStatus":
         return { starting: false };
+      case "ankiSyncStatus":
+        return state.ankiSync || null;
       case "updateStatus": {
         const health = msg.health;
         const server = health ? { version: typeof health.version === "string" ? health.version : null, launcher: typeof health.launcher === "boolean" ? health.launcher : null } : null;
@@ -1107,6 +1110,31 @@ test("the particle switch loads unchecked by default, sits above the katakana on
   assert.match(HTML, /<input type="checkbox" id="particlesKnown">\s*<span>Particles count as known<\/span>/);
   assert.ok(HTML.indexOf('id="particlesKnown"') < HTML.indexOf('id="katakanaKnown"'));
   assert.doesNotMatch(HTML, /particles green/);
+});
+
+// The Anki sync: on for a viewer who never touched it, beside the other mining switch, and its
+// outcome one quiet line under it.
+test("the Anki sync switch loads checked, sits in the Mining section, saves when unticked, and its line says how the last sync went", async () => {
+  const at = new Date(2026, 0, 1, 12, 4).getTime();
+  const state = { health: offline, settings: {}, ankiSync: { on: true, running: false, last: { at, ok: true } } };
+  const { popup, saves } = await openForm(state);
+  const box = popup.el("ankiAutoSync");
+  assert.equal(box.type, "checkbox");
+  assert.equal(box.checked, true);
+  const mining = HTML.slice(HTML.indexOf("<h2>Mining</h2>"), HTML.indexOf("</section>", HTML.indexOf("<h2>Mining</h2>")));
+  assert.match(mining, /<input type="checkbox" id="ankiAutoSync">\s*<span>Sync Anki after mining<\/span>/);
+  assert.match(popup.el("anki-sync-status").textContent, /^Anki sync: last 12.04/);
+  box.checked = false;
+  box.dispatch("input");
+  await wait(200);
+  assert.deepEqual(saves(), [{ ankiAutoSync: false }]);
+
+  assert.equal(popup.ankiSyncLine(null), "");
+  assert.equal(popup.ankiSyncLine({ on: false, last: { at, ok: true } }), "", "nothing with the switch off");
+  assert.equal(popup.ankiSyncLine({ on: true, last: null }), "", "nothing before the first sync");
+  assert.equal(popup.ankiSyncLine({ on: true, running: true, last: null }), "Anki sync: syncing…");
+  assert.equal(popup.ankiSyncLine({ on: true, last: { at, ok: false, error: "not signed in to AnkiWeb" } }),
+    "Anki sync failed: not signed in to AnkiWeb");
 });
 
 // The name switch: off for a viewer who never touched it, a checkbox like any other, after the
