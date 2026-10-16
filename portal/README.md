@@ -19,7 +19,8 @@ Options (`portal.py --help`):
 | `--config PATH` | `~/.shisu-ko/portal.json` | card settings that override the page's (optional) |
 | `--server`, `--yomitan`, `--anki` | `127.0.0.1:8790`, `:19633`, `:8765` | where the services are |
 
-A `portal.json` that fixes the card setup, for example:
+A `portal.json` that fixes the card setup, for example (add `"auto_sync": false` to fix the sync
+after mining off):
 
 ```json
 {

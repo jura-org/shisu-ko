@@ -118,7 +118,9 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   still find one), no known word marked (Alt+Shift+K, `markKnown()`, would find one in them too and
   write the setting), no status badge switched (Alt+Shift+H), no `cardStatus` asks for the word
   colours' deck index (`wordColoursOn()` in `content.js` includes `enabled`, and the poll runs
-  from `syncTick()`), so no request reaches Anki from a YouTube tab. Only the toggle command
+  from `syncTick()`), so no request reaches Anki from a YouTube tab, and no Anki sync
+  (`ankiSyncOn()` in `background.js` includes `enabled`; switching it off clears a planned sync and
+  its alarm). Only the toggle command
   itself keeps working: the command listener in `content.js` returns for every other command
   while `enabled` is false.
 - The overlay lives in the page's DOM, where any script on youtube.com can dispatch events on
