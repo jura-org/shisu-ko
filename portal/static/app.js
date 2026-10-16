@@ -1692,6 +1692,7 @@
     bindSwitch("set-sweep", "sweep");
     $("settings-backdrop").addEventListener("click", closeSettings);
     $("set-anki").addEventListener("click", openAnkiSetup);
+    $("set-anki-sync").addEventListener("change", saveAnkiSync);
     bindAnkiSetup();
     makeDraggable($("settings"), $("settings").querySelector(".sheet-scroll"), closeSettings);
     applySettings();
@@ -1700,6 +1701,7 @@
   function openSettings() {
     renderDevices();
     renderAnkiRow();
+    renderAnkiSync();
     closeSheet();
     renderServerStatus();
     $("settings").classList.add("open");
@@ -2025,6 +2027,29 @@
   function renderAnkiRow() {
     const card = state.info && state.info.card;
     $("set-anki-text").textContent = card ? `${card.deck} · ${card.note_model}` : S.setupAnki;
+  }
+
+  // ---- Settings > Anki: the sync after mining, kept on the computer like the card setup
+
+  function paintAnkiSync(info) {
+    const box = $("set-anki-sync");
+    box.checked = !!(info && info.auto_sync);
+    box.disabled = !info || info.locked;
+    const line = info && info.locked ? S.ankiSyncFixed(info.override_file) : "";
+    const text = [line, L.ankiSyncText(info)].filter(Boolean).join(" ");
+    $("set-anki-sync-status").textContent = text;
+    $("set-anki-sync-status").hidden = !text;
+  }
+
+  async function renderAnkiSync() {
+    const res = await getJSON("/api/anki/sync").catch(() => null);
+    paintAnkiSync(res && res.status === 200 ? res.data : null);
+  }
+
+  async function saveAnkiSync(ev) {
+    const res = await api("/api/anki/sync", { auto_sync: ev.target.checked }).catch(() => null);
+    if (res && res.status === 200) paintAnkiSync(res.data);
+    else renderAnkiSync();
   }
 
   // ---- Settings > Paired devices (lan mode, or a device paired in tailscale mode)
