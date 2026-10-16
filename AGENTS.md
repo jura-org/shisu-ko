@@ -138,7 +138,14 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
 - `enabled` is the master switch (popup header toggle, Alt+Shift+S). Off means nothing happens on
   YouTube pages: no `/sync`, no overlay, no native-caption hiding, no arrow keys, no Anki polling,
   no mining, no known word marked, no status badge switched, no `cardStatus` ask
-  (`wordColoursOn()` includes `enabled`). Only the toggle command keeps working.
+  (`wordColoursOn()` includes `enabled`), no Anki sync (`ankiSyncOn()` includes `enabled`; turning
+  it off cancels a planned one). Only the toggle command keeps working.
+- A sync follows mining: a card `addToAnki()` wrote into, or a note `/api/mine` added in the
+  portal, makes AnkiConnect's `sync` run 60 s later, then 30 s after each sync began while cards
+  keep coming, one at a time (`ANKI_SYNC_FIRST_MS` / `ANKI_SYNC_REPEAT_MS` in `background.js`,
+  `SYNC_FIRST_DELAY` / `SYNC_REPEAT` in `portal.py`, the same rule twice). A failure is never a
+  toast or a dialog, only the popup's line under **Sync Anki after mining** (`ankiAutoSync`) or
+  Settings > Anki's. `alarms` stays a required permission: a timer dies with a stopped event page.
 - Overlay handlers (`onMineClick`, `onTranscriptClick`, `onSubtitleEnter`, `onSubtitleLeave`, the
   transcript's close button) act only on `ev.isTrusted` events. Server text reaches Anki's HTML
   fields only through `escapeHtml()` in `background.js`; the overlay shows it through `textContent`.
@@ -244,7 +251,9 @@ Yomitan just created; `addToAnki()` refuses a note whose sentence does not match
 A mined card gets exactly the cue on screen: `sentenceForCue(cue)` in `content.js` is the one
 place that decides it, and cues are never rejoined by `seg`. `SHISUKO_MATCH` (`addon/match.js`)
 scores cards against cues; `premined` in `background.js` holds frames and clips captured while a
-line played.
+line played. `noteAnkiCard()` hands a written card to the Anki sync; `ankiSyncCommit()` is the one
+writer of its record (`storage.session`) and its timer and alarm, `runAnkiSync()` the one caller of
+`sync`.
 
 **Word colours** (`docs/dev/word-colours.md`). `addon/words.js` (`SHISUKO_WORDS`, pure) parses
 fields and marks words (`buildIndex()`, `markWords()`); `cardStatus()` / `fetchDeckIndex()` in
