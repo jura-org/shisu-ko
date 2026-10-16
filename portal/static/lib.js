@@ -146,6 +146,11 @@
     ankiLoadFailed: "Anki is not answering. Start Anki with AnkiConnect, then open this again.",
     ankiNoDecks: "Anki has no decks yet.",
     ankiOverride: (keys, file) => `${file} sets ${keys}; those choices are fixed here.`,
+    ankiSync: "Sync Anki after mining",
+    ankiSyncRunning: "Anki sync: syncing…",
+    ankiSyncLast: (when) => `Anki sync: last ${when}`,
+    ankiSyncFailed: (why) => `Anki sync failed: ${why}`,
+    ankiSyncFixed: (file) => `${file} sets this switch.`,
     fieldEmpty: "Empty",
     fieldCustom: "Custom template…",
     groupPortal: "From the video",
@@ -548,6 +553,17 @@
     return parts;
   }
 
+  // The line under Settings > Anki's sync switch: when the last sync went through, or why it
+  // did not; "" before the first one and with the switch off. `clock(ms)` writes the time.
+  function ankiSyncText(info, clock = (at) => new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })) {
+    const S = STRINGS;
+    if (!info || !info.auto_sync) return "";
+    if (info.running) return S.ankiSyncRunning;
+    const last = info.last;
+    if (!last) return "";
+    return last.ok ? S.ankiSyncLast(clock(last.at)) : S.ankiSyncFailed(last.error);
+  }
+
   function hasKanji(text) {
     return /[㐀-鿿豈-﫿々]/.test(String(text || ""));
   }
@@ -559,6 +575,7 @@
     SCHEDULES, backoffDelay, isTransient, withRetry, retryLeft,
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
+    ankiSyncText,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.PortalLib = api;

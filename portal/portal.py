@@ -141,13 +141,30 @@ def validate_card(data, partial: bool = False) -> dict:
     return card
 
 
-def read_card_file(path: Path):
-    """~/.shisu-ko/portal.json as a (partial) card override, or None when there is no file."""
+# portal.json keys that are not about the card.
+CONFIG_KEYS = ("auto_sync",)
+
+
+def read_config_file(path: Path):
+    """~/.shisu-ko/portal.json as (a partial card override, auto_sync or None), or (None, None)
+    when there is no file. `auto_sync` fixes the Settings > Anki switch of the same name."""
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return None
-    return validate_card(json.loads(text), partial=True)
+        return None, None
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("the card setup must be a JSON object")
+    data = dict(data)
+    auto_sync = data.pop("auto_sync", None)
+    if auto_sync is not None and not isinstance(auto_sync, bool):
+        raise ValueError("bad value for 'auto_sync' (true or false)")
+    return validate_card(data, partial=True), auto_sync
+
+
+def read_card_file(path: Path):
+    """~/.shisu-ko/portal.json as a (partial) card override, or None when there is no file."""
+    return read_config_file(path)[0]
 
 
 # ---------------------------------------------------------------- services
@@ -583,6 +600,131 @@ def add_note_once(note: dict, first_field: str, sentence_field: str, call=anki, 
     raise AssertionError("unreachable")
 
 
+# ---------------------------------------------------------------- the Anki sync
+#
+# A mined note reaches AnkiWeb, and so the phone's Anki, without anyone pressing Sync:
+# AnkiConnect's `sync` runs Anki's own. The first note after a quiet spell waits SYNC_FIRST_DELAY,
+# and notes mined in that minute ride along. A note mined after a sync began goes with the next
+# one, SYNC_REPEAT after that start (at once when that has passed), so steady mining syncs every
+# 30 s; once a sync's 30 s pass with no new note, the round is over. One sync at a time. The
+# extension runs the same rule on its own (addon/background.js); Anki serialises the two.
+
+SYNC_FIRST_DELAY = 60.0
+SYNC_REPEAT = 30.0
+# A failed sync is tried again while its notes are unsynced, later each time, never later than
+# the last step; one only the user can mend (no AnkiWeb login, a full sync to confirm) waits for
+# the next note.
+SYNC_BACKOFF = (60.0, 120.0, 300.0)
+SYNC_TIMEOUT = 120.0  # a sync uploads; a large collection takes its time
+
+
+def sync_failure(exc: Exception) -> tuple[str, bool]:
+    """(what went wrong, in words for Settings; whether retrying can help nobody until a new note)."""
+    message = str(exc).removeprefix("Anki: ")
+    if isinstance(exc, UpstreamError) and exc.status >= 500:
+        return ("Anki did not answer in time" if "Timeout" in message else "Anki is not running"), False
+    if re.search(r"auth not configured|not logged in|login", message, re.I):
+        return "not signed in to AnkiWeb", True
+    if re.search(r"sync status", message, re.I):
+        return "Anki asks for a full sync; press Sync in Anki once", True
+    return message[:160] or "unknown error", False
+
+
+class AnkiSync:
+    """The sync scheduler. `sync()` runs one sync and raises on failure; `enabled()` is the
+    setting; `clock` is monotonic seconds, `wall` the time shown in Settings. tick() runs a sync
+    that is due; run_forever() is the thread that calls it."""
+
+    def __init__(self, sync, enabled=lambda: True, clock=time.monotonic, wall=time.time,
+                 first: float = SYNC_FIRST_DELAY, repeat: float = SYNC_REPEAT, backoff=SYNC_BACKOFF):
+        self.sync, self.enabled, self.clock, self.wall = sync, enabled, clock, wall
+        self.first, self.repeat, self.backoff = first, repeat, tuple(backoff)
+        self.cond = threading.Condition()
+        self.due = None  # clock time of the next sync, None: none planned
+        self.running = False
+        self.started = None  # clock time the last sync began
+        self.cards = 0  # notes no sync has taken yet
+        self.in_flight = 0  # notes the running sync carries
+        self.failures = 0
+        self.halted = False
+        self.last = None  # {"at": ms, "ok": bool, "error": str}
+
+    def card_added(self) -> None:
+        with self.cond:
+            if not self.enabled():
+                return
+            self.cards += 1
+            self.halted = False
+            if self.running or self.due is not None:
+                return
+            now = self.clock()
+            repeat = None if self.started is None else self.started + self.repeat
+            self.due = repeat if repeat is not None and now < repeat else now + self.first
+            self.cond.notify_all()
+
+    def stop(self) -> None:
+        """The setting off: nothing planned, nothing owed. A sync under way runs out."""
+        with self.cond:
+            self.due, self.cards, self.failures, self.halted = None, 0, 0, False
+            self.cond.notify_all()
+
+    def tick(self) -> bool:
+        """Run the sync if one is due; True when it ran."""
+        with self.cond:
+            if self.running or self.due is None or self.clock() < self.due:
+                return False
+            if not self.enabled():
+                self.due, self.cards, self.failures, self.halted = None, 0, 0, False
+                return False
+            self.running, self.started = True, self.clock()
+            self.in_flight, self.cards, self.due = self.cards, 0, None
+            carried = self.in_flight
+        log.info("anki sync: %d new note(s), syncing", carried)
+        error = None
+        try:
+            self.sync()
+        except Exception as exc:  # noqa: BLE001 - a failed sync is reported and retried, never raised
+            error = exc
+        with self.cond:
+            now = self.clock()
+            self.running = False
+            if error is None:
+                self.failures, self.in_flight = 0, 0
+                self.last = {"at": int(self.wall() * 1000), "ok": True}
+                self.due = max(now, self.started + self.repeat) if self.cards else None
+                log.info("anki sync: done in %.1f s", now - self.started)
+            else:
+                text, halt = sync_failure(error)
+                self.cards += self.in_flight
+                self.in_flight = 0
+                self.failures += 1
+                self.halted = halt
+                self.last = {"at": int(self.wall() * 1000), "ok": False, "error": text}
+                if halt:
+                    self.due = None
+                    log.info("anki sync failed: %s; not retried until the next note", text)
+                else:
+                    wait = self.backoff[min(self.failures, len(self.backoff)) - 1]
+                    self.due = now + wait
+                    log.info("anki sync failed: %s; trying again in %d s", text, wait)
+            if not self.enabled():
+                self.due, self.cards, self.failures, self.halted = None, 0, 0, False
+            self.cond.notify_all()
+        return True
+
+    def status(self) -> dict:
+        with self.cond:
+            return {"running": self.running, "halted": self.halted, "last": self.last,
+                    "due_in": None if self.due is None else max(0.0, self.due - self.clock())}
+
+    def run_forever(self) -> None:
+        while True:
+            with self.cond:
+                while self.due is None or self.running or self.clock() < self.due:
+                    self.cond.wait(None if self.due is None or self.running else max(0.0, self.due - self.clock()))
+            self.tick()
+
+
 class Services:
     """The state the portal keeps between requests: caches and the owner allowlist."""
 
@@ -609,6 +751,8 @@ class Services:
         self.pair_total: list[float] = []
         self.jobs: dict[str, tuple[float, dict]] = {}
         self.job_locks: dict[str, threading.Lock] = {}
+        self.sync_override = None  # portal.json's auto_sync, read at start
+        self.anki_sync = AnkiSync(lambda: anki("sync", timeout=SYNC_TIMEOUT), enabled=self.auto_sync)
 
     # ---- who may use the portal
     #
@@ -993,6 +1137,7 @@ class Services:
                 "options": {"allowDuplicate": bool(body.get("force")), "duplicateScope": card["duplicate_scope"]}}
         note_id = add_note_once(note, card["first_field"], card["sentence_field"])
         log.info("mined %s (note %s)%s", term, note_id, f" warnings: {warnings}" if warnings else "")
+        self.anki_sync.card_added()
         return {"ok": True, "note": note_id, "word": term, "warnings": warnings}
 
     def health(self) -> dict:
@@ -1045,6 +1190,27 @@ class Services:
         return {"ok": True, "card": self.card(), "saved": self.state.card(),
                 "overrides": sorted(self.card_file or {}), "override_file": str(self.args.config),
                 "sources": PORTAL_SOURCES, "markers": YOMITAN_MARKERS, "defaults": CARD_DEFAULTS}
+
+    # ---- the Anki sync after mining (Settings > Anki)
+
+    def auto_sync(self) -> bool:
+        return self.sync_override if self.sync_override is not None else self.state.auto_sync()
+
+    def sync_info(self) -> dict:
+        return {"ok": True, "auto_sync": self.auto_sync(), "locked": self.sync_override is not None,
+                "override_file": str(self.args.config), **self.anki_sync.status()}
+
+    def save_sync(self, body: dict) -> dict:
+        on = body.get("auto_sync")
+        if not isinstance(on, bool):
+            raise UpstreamError("auto_sync: true or false", 400)
+        if self.sync_override is not None:
+            raise UpstreamError(f"{self.args.config} sets auto_sync; change it there", 409)
+        self.state.set_auto_sync(on)
+        if not on:
+            self.anki_sync.stop()
+        log.info("anki sync after mining: %s", "on" if on else "off")
+        return self.sync_info()
 
     def save_card(self, body: dict) -> dict:
         """The setup made in the page. The note type's own field order decides the first field."""
@@ -1505,7 +1671,8 @@ def atomic_write_json(path: Path, data) -> None:
 
 class PortalState:
     """Everything the portal keeps on this machine, in one JSON file shared by every device:
-    where each video was left, the card setup made in the page, and the paired devices."""
+    where each video was left, the card setup made in the page, the Anki sync switch, and the
+    paired devices."""
 
     def __init__(self, path: Path = STATE_PATH):
         self.path = path
@@ -1572,6 +1739,17 @@ class PortalState:
     def set_card(self, card: dict) -> None:
         with self.lock:
             self.load()["card"] = card
+            self.save()
+
+    # ---- the Anki sync switch, on unless switched off in the page
+
+    def auto_sync(self) -> bool:
+        with self.lock:
+            return self.load().get("auto_sync") is not False
+
+    def set_auto_sync(self, on: bool) -> None:
+        with self.lock:
+            self.load()["auto_sync"] = bool(on)
             self.save()
 
     # ---- paired devices (lan mode): only a hash of each device's token is kept
@@ -1780,6 +1958,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200, self.services.info())
             if path == "/api/card":
                 return self.json(200, self.services.card_info())
+            if path == "/api/anki/sync":
+                return self.json(200, self.services.sync_info())
             if path == "/api/anki/options":
                 return self.json(200, {"ok": True, "decks": sorted(anki("deckNames", timeout=8)),
                                        "models": sorted(anki("modelNames", timeout=8))})
@@ -1924,6 +2104,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.answer(200, b'{"ok": true}', "application/json", {"Set-Cookie": cookie})
             if path == "/api/card":
                 return self.json(200, self.services.save_card(body))
+            if path == "/api/anki/sync":
+                return self.json(200, self.services.save_sync(body))
             if path == "/api/devices/forget":
                 device_id = body.get("id")
                 if not isinstance(device_id, str) or not re.fullmatch(r"[0-9a-f]{8}", device_id):
@@ -2124,14 +2306,17 @@ def main(argv=None) -> int:
         log.error("%s", problem)
         return 2
     try:
-        services.card_file = read_card_file(args.config)
+        services.card_file, services.sync_override = read_config_file(args.config)
     except (OSError, ValueError) as exc:
         log.error("%s: %s", args.config, exc)
         return 2
     card = services.card()
     log.info("card: %s", f"deck {card['deck']}, note type {card['note_model']}" if card else "not set up yet (the page asks)")
-    if services.card_file:
-        log.info("%s overrides: %s", args.config, ", ".join(sorted(services.card_file)))
+    if services.card_file or services.sync_override is not None:
+        keys = sorted(services.card_file or {}) + (["auto_sync"] if services.sync_override is not None else [])
+        log.info("%s overrides: %s", args.config, ", ".join(keys))
+    log.info("anki sync after mining: %s", "on" if services.auto_sync() else "off")
+    threading.Thread(target=services.anki_sync.run_forever, daemon=True, name="anki-sync").start()
 
     status = tailscale_status(args.tailscale_bin) if args.mode == "tailscale" else {}
     if args.mode == "tailscale":
