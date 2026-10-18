@@ -1156,6 +1156,10 @@ python -m pytest server/tests
 node --test addon/tests/*.test.js
 ```
 
+The server suite runs on up to eight processes at once (pytest-xdist); `-n 0` runs it in one, and
+so does a command line that names single test files. The one test that opens console windows, a
+real `start` in `test_native_host.py`, runs on CI and locally only with `SHISUKO_TEST_CONSOLES=1`.
+
 The browser smoke test uses a local fixture page and does not open a real video. The shared
 development commands are `npm ci`, `npm test`, `npm run build`, `npm run watch`, and
 `npm run test:browser`. Before the first browser test, run `npx playwright install chromium`
