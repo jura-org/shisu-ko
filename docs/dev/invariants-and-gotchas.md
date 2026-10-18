@@ -193,12 +193,12 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   and `scripts/launcher-smoke.sh` runs `setup.sh` with an `amd_setup.py` that fails.
 - The tests never touch the real `~/.shisu-ko`. `server.py` fixes every path at import, so
   `server/tests/_serverlib.py` (`isolate_home()`) points `SHISUKO_HOME` at a fresh temporary folder
-  before the import unless the caller set one, and `conftest.py` calls it before any test module
-  is collected, so the child processes the tests start inherit it; `conftest.py` also lists the
-  real folder before the session and fails the run when it changed (`server.log` and
-  `server-<port>.lock` left out: the viewer's own server writes them). `load_server()` imports
-  `server.py` with `SHISUKO_ENGINE=default`, so an AMD engine installed on the machine never
-  changes what the tests see.
+  before the import unless the caller set one (each pytest-xdist worker gets one of its own), and
+  `conftest.py` calls it before any test module is collected, so the child processes the tests start
+  inherit it; `conftest.py` also lists the real folder before the session and fails the run when it
+  changed (`server.log` and `server-<port>.lock` left out: the viewer's own server writes them).
+  `load_server()` imports `server.py` with `SHISUKO_ENGINE=default`, so an AMD engine installed on
+  the machine never changes what the tests see.
 - No absolute personal paths, no secrets and no `.env` in tracked files. `.env` is machine-specific
   and ignored; `.env.example` documents it.
 - Line endings: LF everywhere, CRLF only for `*.cmd` (`.gitattributes` enforces this).

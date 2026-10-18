@@ -27,6 +27,8 @@ from pathlib import Path
 
 _MODULE_NAME = "shisuko_server"
 _SERVER_PATH = Path(__file__).resolve().parent.parent / "server.py"
+# The folder isolate_home() made last, in this process or the one that started it.
+_MADE_HOME = "SHISUKO_TESTS_HOME"
 _temporary_homes: list[str] = []
 
 
@@ -34,13 +36,16 @@ def isolate_home() -> Path:
     """SHISUKO_HOME for this process: the caller's, else a fresh temporary folder set in os.environ.
 
     An empty SHISUKO_HOME counts as unset, as it does in server.py (`or` falls back to the real
-    folder). The temporary folder is removed when the interpreter exits (remove_temporary_homes()).
+    folder). So does a folder another test process made: a pytest-xdist worker inherits its
+    controller's, and makes one of its own, so that tests running at once never share a cache, a
+    config.json or an instance lock. The temporary folder is removed when the interpreter exits
+    (remove_temporary_homes()).
     """
     current = os.environ.get("SHISUKO_HOME")
-    if current:
+    if current and (current in _temporary_homes or current != os.environ.get(_MADE_HOME)):
         return Path(current)
     folder = tempfile.mkdtemp(prefix="shisuko-tests-")
-    os.environ["SHISUKO_HOME"] = folder
+    os.environ["SHISUKO_HOME"] = os.environ[_MADE_HOME] = folder
     _temporary_homes.append(folder)
     return Path(folder)
 
@@ -50,6 +55,11 @@ def remove_temporary_homes() -> None:
     """Deletes the folders isolate_home() made; conftest.py calls it itself before its os._exit() on CI."""
     while _temporary_homes:
         shutil.rmtree(_temporary_homes.pop(), ignore_errors=True)
+
+
+def loaded_server():
+    """server.py if load_server() has imported it in this process, else None (and nothing is imported)."""
+    return sys.modules.get(_MODULE_NAME)
 
 
 def load_server():

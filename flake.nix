@@ -34,6 +34,7 @@
           av
           numpy
           pytest
+          pytest-xdist
         ]);
 
         # yt-dlp needs a JS runtime for YouTube; nvidia-smi picks the compute type from free VRAM.

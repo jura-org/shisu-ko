@@ -58,15 +58,18 @@ it manually.
 
 ## Server tests
 
-`python -m pytest server/tests` needs only `server/requirements-test.txt` (pytest and numpy): the
-tests fake faster-whisper, CTranslate2 and yt-dlp where they need them. CI runs them on Ubuntu
-with Python 3.10, 3.12 and 3.13 and on Windows with 3.12, none of them with a GPU.
+`python -m pytest server/tests` needs only `server/requirements-test.txt` (pytest, pytest-xdist and
+numpy): the tests fake faster-whisper, CTranslate2, PyTorch and yt-dlp where they need them. CI
+runs them on Ubuntu with Python 3.10, 3.12 and 3.13 and on Windows with 3.12, none of them with a
+GPU.
 
 They never touch the real data folder. `server.py` fixes `APP_DIR` and every path under it (the
 cache, `config.json`, `next-model`, `rocm-starts`, the instance locks) at import, from
 `SHISUKO_HOME`, else the real `~/.shisu-ko`. So `_serverlib.isolate_home()` sets `SHISUKO_HOME` to
 a fresh temporary folder (`shisuko-tests-*`) for the whole process unless the caller set one (an
-empty value counts as unset, as it does in `server.py`), and an `atexit` hook
+empty value counts as unset, as it does in `server.py`; so does a folder another test process
+made, which `SHISUKO_TESTS_HOME` names: a pytest-xdist worker inherits its controller's and makes
+its own, "Parallel runs" below), and an `atexit` hook
 (`remove_temporary_homes()`) deletes it again; `conftest.py` calls that hook itself before its
 `os._exit()` on CI. `load_server()` calls `isolate_home()` before the import, and `conftest.py`
 calls it before any test module is collected, so the child processes the tests start inherit the
@@ -84,7 +87,8 @@ counts by its mtime too. `server.log` and `server-<port>.lock` are left out: the
 server, which may run while the tests do, writes those. After every test and fixture teardown
 (`pytest_sessionfinish`, `trylast`) it lists the folder again, and a change fails a run that
 passed, with a "real ~/.shisu-ko changed" section naming each new, removed or modified entry. It
-only lists and stats; no file there is opened.
+only lists and stats; no file there is opened. Under xdist the controller makes that check, once
+every worker has finished; a worker's exit status is not the run's, so the workers skip it.
 
 `server/tests/test_rocm.py` covers `server.py`'s side of the AMD engine (`server-runtime.md`, "How
 the AMD engine works"): `rocm_engine_state()` and `rocm_engine()` fed tmp paths and dict
@@ -114,3 +118,54 @@ under `~/.cache`, then `pip install -r server/requirements-test.txt`), and pytes
 checkout under `/mnt/c/...` with `python -m pytest -p no:cacheprovider server/tests`, so that
 pytest writes no cache folder into the Windows tree. The real-folder check there watches the
 distribution's own `~/.shisu-ko`.
+
+### Parallel runs
+
+With pytest-xdist installed, `conftest.py` (`pytest_cmdline_main()`, run before the plugin's own
+hook) runs a whole folder on one worker per core, at most `XDIST_WORKERS` (8), unless the command
+line names a count: `-n 0` runs everything in one process, `-n auto` on every core, and
+`PYTEST_XDIST_AUTO_NUM_WORKERS` is taken as it stands. A command line that names only files or
+test ids (`names_a_folder()`) runs in one process, where the workers would cost more than they
+save: one file took 0.3 s alone and 6.7 s on 8 workers. `--pdb` keeps one process, and without
+the plugin (or with `-p no:xdist`) the suite runs as it always did. Workers are pytest processes
+of their own that load `conftest.py` again with `PYTEST_XDIST_WORKER` set, which keeps them from
+starting workers in turn. Why at most 8: xdist starts its workers one after another, about half a
+second each on Windows, and hands out no test before every one has collected (some 4 s). On 24
+cores (Windows, Python 3.12, 2026-10-18) the suite took 74 s in one process, 27 s on 4 workers,
+22-23 s on 8 to 12 and 32-35 s on 24. CI's runners have four cores, so four workers.
+
+Every `server.App` starts a `Transcriber` thread (`App.__init__`) whose loop never ends. Left
+alone, the thread went on picking work from its finished test's sessions while later tests ran,
+with whatever those had patched into `server.py` (`CACHE_DIR`, `detect_speech`, ...): over a
+hundred tests left one, about a dozen of them with a session still to transcribe. In one process
+the order of the tests was always the same and nothing showed; xdist changes the order from run
+to run, and `test_declared_language.py` then failed now and again on a pause a stray thread had
+lifted. The autouse fixture `stop_transcribers` in `conftest.py` is set up before any other
+fixture of a test, so it is torn down after them all, its monkeypatch included. It hands every
+`Transcriber` thread the test started a `StoppedApp` (no model to switch, no work, no sweep) and
+waits, up to 10 s, until the thread has looked at it once: from then on the thread only sleeps.
+It ends no thread, since pytest reports an exception that ends one, `SystemExit` included. The
+leftover threads had slowed the run in one process as well: 108 s before, 74 s after.
+
+`run_check()` (`--check`) prints a line about the Kitsune models' runtime
+(`kitsune_runtime_line()`), which imports torch and transformers wherever they are installed and
+asks the CUDA driver for its GPU. The `--check` tests of `test_setup_model.py` and `test_rocm.py`
+put stand-ins for both in `sys.modules`, as they do for CTranslate2: on a Windows machine with
+both installed, the two real imports took over a minute and made one test 57 s of a 172 s run.
+CI has neither, so it never noticed. `test_kitsune.py`'s package test, which needs the real
+torch and safetensors (`importorskip`), still imports them: some 10 s on that machine.
+
+One test opens windows: `test_launch_on_windows_runs_the_launcher_from_a_path_cmd_would_split` in
+`test_native_host.py` runs a real `start` three times, and each one opens a console window, in
+Windows Terminal on Windows 11, in front of whatever the viewer is doing. Nothing the test could
+pass hides it: `cmd.exe` makes that console, and one handed over hidden (`SW_HIDE` in the
+`STARTUPINFO`) was dropped by Windows Terminal before `run.cmd` ran. It runs on CI (`CI=true`) and
+locally with `SHISUKO_TEST_CONSOLES=1` (`opens_consoles`). Every other process the tests start
+shares the console pytest runs in, whose window is the terminal's own or none.
+
+## Extension tests
+
+`npm test` runs `addon/tests` and `scripts/tests` in one `node --test`, which starts one process
+per test file and runs up to one file per core at a time. `addon/tests/popup.test.js` waits on
+real timers (the 150 ms save debounce, `wait(200)`) and takes some 12 s alone, every other file
+under 2.5 s, so it sets the length of the run. CI runs the two folders in separate steps.

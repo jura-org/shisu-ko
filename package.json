@@ -11,7 +11,7 @@
     "watch": "node scripts/build.mjs --watch",
     "refresh-icons": "node scripts/refresh-icons.mjs",
     "test:build": "node --test scripts/tests/*.test.mjs",
-    "test": "node --test addon/tests/*.test.js && npm run test:build",
+    "test": "node --test addon/tests/*.test.js scripts/tests/*.test.mjs",
     "test:browser": "npm run build:chrome && node scripts/browser-smoke.mjs"
   },
   "devDependencies": {

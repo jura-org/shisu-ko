@@ -170,8 +170,8 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   match, and the tests hold it. `amd_setup.py` is stdlib only, never imports `server.py`, and
   without `--yes` / `--probe` always exits 0: setup never fails on it.
 - The tests never touch the real `~/.shisu-ko`: `_serverlib.isolate_home()` points `SHISUKO_HOME`
-  at a temporary folder before `server.py` is imported, and `conftest.py` fails the run when the
-  real folder changed.
+  at a temporary folder (one per pytest-xdist worker) before `server.py` is imported, and
+  `conftest.py` fails the run when the real folder changed.
 - The cue cache is forever. `CACHE_FORMAT` (6) is the only migration: `load_cache()` drops every
   older record whole before reading anything out of it, so a geometry change bumps it. Cue caches
   are reused only when model (compared canonically) and language match. `covered` always means
@@ -339,6 +339,13 @@ node --test addon/tests/*.test.js
 python -m pytest portal/tests && node --test portal/tests/lib.test.js
 ```
 
+`python -m pytest server/tests` runs on up to 8 pytest-xdist workers (`conftest.py`,
+`XDIST_WORKERS`; `-n 0` for one process); a command line naming only files or test ids runs in one
+process. The one test that opens console windows (a real `start`, `test_native_host.py`) runs on
+CI or with `SHISUKO_TEST_CONSOLES=1`; keep any new one behind `opens_consoles`. `npm test` runs
+`addon/tests` and `scripts/tests` in one `node --test`. Detail: `docs/dev/build-and-test.md`,
+"Parallel runs".
+
 Test `server.py`'s pure functions by importing the module; register it in `sys.modules` before
 `exec_module` because of `from __future__ import annotations` (`server/tests/_serverlib.py` does).
 When adding a new setting or a new pure helper, add a matching test rather than only exercising
@@ -359,6 +366,13 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
   the one before, and the store refuses the same version twice (a draft holding it is submitted by
   hand in the Developer Dashboard).
 - Windows command lines are limited to about 32 KB. Put long scripts in files.
+- Every `server.App` starts a `Transcriber` thread that never ends. Left running after its test,
+  it picked work from that test's sessions with the next tests' monkeypatches in place, and
+  `test_declared_language.py` failed now and again under xdist; `conftest.py`'s autouse
+  `stop_transcribers` hands each test's threads a `StoppedApp` at its teardown.
+- `run_check()` imports torch and transformers where they are installed
+  (`kitsune_runtime_line()`): a `--check` test puts stand-ins for them in `sys.modules`, as for
+  CTranslate2, or it costs a minute on Windows and asks the CUDA driver for a GPU.
 - Hugging Face's xet backend stalled on Windows; the server sets `HF_HUB_DISABLE_XET=1`, plus
   `HF_HUB_VERBOSITY=error` and `HF_HUB_DISABLE_SYMLINKS_WARNING=1` before the import.
 - yt-dlp needs a JavaScript runtime (Deno preferred, Node 20+ works) for YouTube.

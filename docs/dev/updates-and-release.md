@@ -158,12 +158,12 @@ file is its listed one). It tells the two apart by name: AMO names its file
 `fetch` exits 3 while AMO has not signed the version and 4 (`NO_FILE_EXIT`) when AMO has no file
 for it; `amo-xpi.yml` asks `status` which: `missing` is a warning, `disabled` fails the run.
 
-`server/tests/conftest.py` ends the pytest process with the session's own exit status once the
-report is written, on CI only (`CI=true`): the native libraries faster-whisper brings can abort
-the interpreter's shutdown with "terminate called without an active exception" (exit 134) after
-every test has passed, as CI's Python 3.10 did once. It removes the tests' temporary data
-folders first (`remove_temporary_homes()`, `build-and-test.md`), since `os._exit()` skips the
-`atexit` hook that does it otherwise.
+`server/tests/conftest.py` ends the pytest process (and each pytest-xdist worker) with the
+session's own exit status once the report is written, on CI only (`CI=true`): the native libraries
+faster-whisper brings can abort the interpreter's shutdown with "terminate called without an active
+exception" (exit 134) after every test has passed, as CI's Python 3.10 did once. It removes the
+tests' temporary data folders first (`remove_temporary_homes()`, `build-and-test.md`), since
+`os._exit()` skips the `atexit` hook that does it otherwise.
 
 So every release has an `.xpi` on GitHub without waiting for a listing review, and its signed
 one as soon as AMO has signed it. The public
