@@ -680,7 +680,9 @@ makes up over silence and music: segments without words, segments that barely ov
 speech, repetition loops and a short blocklist of known hallucinated phrases. Whisper's word
 timestamps then split the rest into subtitle-sized cues at sentence ends, long pauses and a
 character and duration limit; starts snap to the onset of speech, ends get a short lead-out into
-the following silence, fragments are merged and gaps under half a second are closed. Singing is
+the following silence, fragments are merged and gaps under half a second are closed. Characters
+that belong to no text are dropped, cached cues included: Whisper now and then spells a private-use
+code point out of raw bytes, which Firefox showed as a small box with a hex code in it. Singing is
 not speech to the voice-activity detector, so a window in which it hears next to nothing (under a
 second of speech) but the audio is not silent (a song, a 歌枠) is transcribed without it once
 Whisper hears Japanese in it, under stricter gates on Whisper's own confidence: music videos get

@@ -131,6 +131,24 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   (read through `wrappedJSObject`, Firefox only), never on `video.currentTime`, which restarts at
   an arbitrary point on every page load. Every place the content script reads or seeks the
   playhead goes through `playhead()` / `seekPlayhead()`.
+- Model text reaches a cue only through `absolute_words()`, which runs every word through
+  `clean_model_text()` and drops a word left with nothing, so the time it spanned is a gap that
+  `punctuate_words()` reads as a pause. Gone are the private use areas (Co), code points with no
+  character (Cn, by the running Python's Unicode tables, and the noncharacters), lone surrogates
+  (Cs), controls (Cc), the line and paragraph separators (Zl, Zp), the format controls (Cf) and
+  U+FFFD. Whisper spells a character its tokenizer has no token for in UTF-8 bytes, and the bytes
+  can make one no font has: large-v3 wrote U+F7ED (171 253 255) into s1UVis0tPiE three times,
+  faster-whisper's word splitter passed it on as a word (it only waits out U+FFFD), and Firefox
+  drew a box reading F7 ED. A control is a box as well, and a `"\n"` is a row break, which only
+  the cue builder writes; a format control draws nothing but sits in the text Yomitan scans and on
+  the card, and a bidi override reverses what follows it. The gates judge `segment_text()`, the
+  segment's text cleaned the same way, so a sign-off with such a character inside still meets the
+  blocklist. `unheard_runs()` counts the cleaned word list, so `splice_segments()` takes a piece's
+  words from `cleaned_words()`, never by index from `seg.words`. A cached cue is cleaned in
+  `load_cache()` (`clean_cached_cue()`: its own `"\n"` kept, its words cut to match, a cue left
+  empty dropped) on every load, and nothing is written back from there: the file changes when the
+  session is saved, which a record covered to its end may never be. Never by a `CACHE_FORMAT`
+  bump, which drops every record whole (`cue-building.md`, "Model text").
 - Runtime data: see `cue-building.md`, "Runtime data and the cue cache". The experimental AMD
   engine adds to it (`server-runtime.md`, "Where it lives"): `rocm/`, its side folder, with the
   marker `shisuko-rocm.json` that names the CTranslate2 and ROCm versions, the Python tag and the

@@ -74,6 +74,13 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   and the default response never changes (`without_words()`). Their texts join to the cue's text
   exactly or the cue carries none; the field is optional in the cache, never a reason to bump
   `CACHE_FORMAT`. Detail: `docs/dev/cue-building.md`, "Word timings".
+- Model text reaches a cue only through `absolute_words()`, which cleans every word
+  (`clean_model_text()`: Co, Cn (by the running Python's Unicode tables), Cs, Cc, Cf, Zl, Zp and
+  U+FFFD go; a word left empty goes, its time a gap); the gates judge `segment_text()`, cleaned the
+  same way. An index into that list counts
+  `cleaned_words()`, never `seg.words` (`splice_segments()`). Only the cue builder writes a `"\n"`.
+  Cached cues are cleaned in `load_cache()` (`clean_cached_cue()`, a cue's own `"\n"` kept), never
+  by a `CACHE_FORMAT` bump. Detail: `docs/dev/cue-building.md`, "Model text".
 - A failed audio fetch is retried by the server with exponential backoff (`retry_delay()`: 2 s
   doubling, harder after a 429, never longer than `--retry-after`, with jitter) only while a client
   syncs the video, and only when `fetch_error_kind()` calls it transient. A permanent error (private,

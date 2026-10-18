@@ -66,6 +66,34 @@ retry that adds nothing leaves the prompted result as it was. The log line gains
 with an empty prompt. `dump_words.py` calls the same function, writes the spliced list and marks
 the record `"prompt_retry": true`, so `replay_cues.py` builds on what the server built on.
 
+Model text. Every word is cleaned as it comes onto the video's clock, before anything judges it.
+Whisper's tokenizer has no token of its own for most of Unicode and spells such a character with
+tokens for pieces of its UTF-8 bytes (a full-width ！ is 171 120 223, a token a byte), so the
+decoder can also spell one no font has: at 3:27
+and 3:39 of s1UVis0tPiE large-v3 wrote 171 253 255 (EF 9F AD), U+F7ED of the private use area,
+three times, each where a sentence mark belongs (励ましたい U+F7ED 励まされている U+F7ED, 裏切り
+U+F7ED いや、). Those bytes are valid UTF-8, so faster-whisper's word splitter, which only waits out
+an unfinished character (U+FFFD), passed it on as a word, and the overlay showed Firefox's box
+reading F7 ED; no version had filtered characters. `clean_model_text()` drops every character of a
+`MODEL_TEXT_DROP` category, and U+FFFD: the private use areas (Co); code points with no character
+(Cn: unassigned, by the running Python's Unicode tables, and the noncharacters); lone surrogates
+(Cs, which `save_cache()` could not even encode); controls (Cc, boxes as well); the line and
+paragraph separators (Zl, Zp); and the format controls (Cf). Cf was a choice: a zero-width space, a
+byte order mark, a bidi override and the joiner of an emoji sequence draw no box, but they sit in
+the text Yomitan scans and on the card, and an override reverses what follows it on screen. The
+price is an emoji sequence shown as its parts, and no cue in the cache holds one. A `"\n"` is a row
+break, which only the cue builder writes, at the seams of its merges (`merge_adjacent()`,
+`merge_segments()`), so model text keeps none and a cached cue keeps its own (`keep_newline`). `absolute_words()` cleans every word a segment brings (through
+`cleaned_words()`), whichever backend wrote it, and drops a word left with nothing, so the time it
+spanned reaches the cue builder as the gap it was: on the 3:27 line `punctuate_words()` then
+writes the mark where the U+F7ED stood (励ましたい。, on made-up timings in `test_model_text.py`).
+The gates judge the segment's text cleaned the same way (`segment_text()`), so a sign-off with such
+a character inside still meets the blocklist, and `splice_segments()` takes a piece's words from
+`cleaned_words()`, the list `unheard_runs()` counts, not from `seg.words`. Cached cues are cleaned
+when they load (see "Runtime data and the cue cache"). This machine's 317 cue records (23,714 cues)
+held four such characters: those three, and a U+FFFD in a record of an old format, where a looping
+decode ended inside a character (の地域の地域…の地 U+FFFD).
+
 `repair_lead_words()` runs first, before the gates. faster-whisper anchors a segment's first word to
 the segment's own start, and segment starts run flush with the previous segment's end, so one or two
 characters end up stranded in the previous utterance, seconds ahead of the sentence they open
@@ -421,6 +449,18 @@ The runtime-data invariant in full:
   taken out of `covered` with `subtract_intervals()`; the cues and the rest stay, and the session,
   no longer covered to its end, is fetched and planned again over them). That is not a migration
   and does not date: it is what makes the switch reversible.
+- A cue's text is cleaned when it loads. A record written before `clean_model_text()` holds what
+  the model wrote (s1UVis0tPiE's carries U+F7ED three times, in two cues), so `load_cache()` puts
+  every cue through `clean_cached_cue()`: the same cleaning with the row break kept, the text
+  stripped as `word_text()` strips a fresh one, its `words` cleaned and cut to match by
+  `cue_words()`, or dropped when they no longer spell the text, as `settle_words()` drops them. A
+  cue left with nothing goes and the ids are renumbered as always; a cue with nothing to clean is
+  the record's own dict, untouched. Nothing is written back from the load: the file changes when
+  something saves the session (`save_cache()` writes the cleaned `s.cues`), and a record covered
+  to its end may never be saved again, so its file keeps what the model wrote (which the cache
+  tools then read) and every load cleans it again, for microseconds and a log line. Not a
+  migration either, and no `CACHE_FORMAT` bump: a bump drops every record whole, which would
+  throw away every cached transcript for three characters of one video.
 - `"unheard_rule": 2` (`UNHEARD_RULE`) says the covered ranges were made by a server that puts a talk
   window's loud unheard stretches to the head (`unsung_stretches()`). Records without it are
   rechecked by `App.old_record_sweep()`, a generator the server's own `App` (`start_app()`, `sweep=True`;
