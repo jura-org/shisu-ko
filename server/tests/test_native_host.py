@@ -1,9 +1,10 @@
 """server/native_host.py: the native-messaging host behind the popup's "Start server" button.
 
 The protocol is driven through in-memory streams, the launcher through a recorded
-subprocess.Popen (and, on Windows, a real `start` on stub checkouts), and the registration into
-a temp home with a recorded winreg. Nothing here touches the real registry, Firefox or the real
-checkout's launchers: the checkout's wrappers are run for `status` only, which starts nothing.
+subprocess.Popen (and, on Windows, a real `start` on stub checkouts: on CI, or with
+SHISUKO_TEST_CONSOLES=1), and the registration into a temp home with a recorded winreg. Nothing
+here touches the real registry, Firefox or the real checkout's launchers: the checkout's wrappers
+are run for `status` only, which starts nothing.
 """
 from __future__ import annotations
 
@@ -28,6 +29,13 @@ ROOT = SERVER_DIR.parent
 WINDOWS = sys.platform == "win32"
 windows_only = pytest.mark.skipif(not WINDOWS, reason="Windows launch and registry")
 posix_only = pytest.mark.skipif(WINDOWS, reason="POSIX launch and manifest folder")
+# A real `start` opens a console window, in Windows Terminal on Windows 11, in front of whatever
+# the viewer is doing, and nothing the test could pass hides it: cmd.exe makes that console, and
+# one handed over hidden is dropped by Windows Terminal before run.cmd runs. CI runs it; a local
+# run does with SHISUKO_TEST_CONSOLES=1.
+opens_consoles = pytest.mark.skipif(
+    os.environ.get("CI") != "true" and os.environ.get("SHISUKO_TEST_CONSOLES") != "1",
+    reason="opens console windows; runs on CI, or with SHISUKO_TEST_CONSOLES=1")
 
 
 def load_host():
@@ -292,6 +300,7 @@ def test_launch_on_windows_retries_without_breakaway_when_the_job_forbids_it(tmp
 
 
 @windows_only
+@opens_consoles
 def test_launch_on_windows_runs_the_launcher_from_a_path_cmd_would_split(tmp_path, monkeypatch):
     """A real `start` in checkouts named like `R&D space`: the argv above is what makes them work."""
     import time
