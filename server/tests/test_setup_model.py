@@ -3,8 +3,8 @@ and writes ~/.shisu-ko/config.json, which parse_args() reads as the --model defa
 
 faster_whisper and huggingface_hub are fakes in sys.modules (a snapshot_download() that records
 its keyword arguments and writes model.bin into the directory it returns), so nothing here
-downloads or loads a model, and run_check() sees stand-ins for ctranslate2, yt-dlp and the
-registry as well, so it never initialises a GPU driver. The backend is faked too: the download
+downloads or loads a model, and run_check() sees stand-ins for ctranslate2, PyTorch, yt-dlp and
+the registry as well, so it never initialises a GPU driver. The backend is faked too: the download
 follows resolve_device("auto"), so cuda_available() and mlx_available() are pinned rather than
 asked, and the machine the tests run on cannot change what they assert. The launchers are checked
 as text, like run.cmd / run.sh in test_update_endpoint.py.
@@ -733,16 +733,26 @@ def no_registry(*args):
     raise OSError("no such key")
 
 
+def fake_pytorch(monkeypatch):
+    """torch and transformers for kitsune_runtime_line(), installed and without a CUDA GPU."""
+    monkeypatch.setattr(server, "kitsune_runtime_missing", lambda: None)
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(__version__="0", cuda=SimpleNamespace(is_available=lambda: False)))
+    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(__version__="0"))
+
+
 def stand_in_libraries(monkeypatch, tmp_path):
     """Everything run_check() imports or looks up, as a stand-in.
 
     It imports ctranslate2 (which would initialise the CUDA driver where the library is installed:
-    the venv, nix run .#tests), faster_whisper and yt_dlp, and loads native_host.py to look the
-    launcher up in the registry and in the browsers' folders (under the home, and on Linux under
+    the venv, nix run .#tests), faster_whisper, torch and transformers (kitsune_runtime_line(),
+    where PyTorch is installed: torch asks the CUDA driver for its GPU, and on Windows the two
+    imports took over a minute) and yt_dlp, and loads native_host.py to look the launcher up in
+    the registry and in the browsers' folders (under the home, and on Linux under
     CHROME_CONFIG_HOME or XDG_CONFIG_HOME).
     """
     fake_hub(monkeypatch, tmp_path)
     monkeypatch.setitem(sys.modules, "ctranslate2", SimpleNamespace(__version__="0", get_cuda_device_count=lambda: 0))
+    fake_pytorch(monkeypatch)
     version = SimpleNamespace(__version__="0")
     monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(version=version))
     monkeypatch.setitem(sys.modules, "yt_dlp.version", version)
@@ -758,6 +768,7 @@ def test_run_check_names_the_default_model(monkeypatch, tmp_path, capsys):
     server.run_check()
     out = capsys.readouterr().out
     assert "CTranslate2 0: 0 CUDA device(s)" in out and "faster-whisper 0" in out and "yt-dlp 0" in out
+    assert "Kitsune models: PyTorch 0, transformers 0, no CUDA GPU (CPU only)" in out
     assert "Start button launcher: not registered" in out
     assert "Default model: large-v3 (built-in default)" in out
     launcher = "run.cmd" if os.name == "nt" else "run.sh"

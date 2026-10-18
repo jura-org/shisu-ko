@@ -2140,6 +2140,9 @@ def check_stand_ins(monkeypatch, tmp_path, devices=1):
     alias_table(monkeypatch)
     monkeypatch.setitem(sys.modules, "ctranslate2", SimpleNamespace(__version__="4.8.2",
                                                                     get_cuda_device_count=lambda: devices))
+    monkeypatch.setattr(server, "kitsune_runtime_missing", lambda: None)
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(__version__="0", cuda=SimpleNamespace(is_available=lambda: False)))
+    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(__version__="0"))
     version = SimpleNamespace(__version__="0")
     monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(version=version))
     monkeypatch.setitem(sys.modules, "yt_dlp.version", version)
