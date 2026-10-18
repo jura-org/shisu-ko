@@ -61,6 +61,7 @@ import sys
 import sysconfig
 import threading
 import time
+import unicodedata
 import uuid
 import wave
 import zlib
@@ -79,7 +80,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.19.1"
+VERSION = "0.19.2"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -856,12 +857,55 @@ LYRICS_MIN_STRETCH_S = 4.0   # a talk window's loud stretch the detector heard n
                              # head from this length: about one sung line, and each costs an encoder pass
 
 
+# What no transcript holds. Whisper's tokenizer has no token of its own for most of Unicode and
+# spells such a character with tokens for pieces of its UTF-8 bytes (a full-width ！ is 171 120 223,
+# a token a byte), so the decoder can also spell one no font has: in s1UVis0tPiE large-v3 wrote
+# 171 253 255 (EF 9F AD), U+F7ED of the private use area, three times, each where a sentence mark belongs
+# (励ましたい\uf7ed励まされている\uf7ed). Those bytes are valid UTF-8, so faster-whisper's word
+# splitter, which only waits out an unfinished character (U+FFFD), passed it on as a word, and
+# Firefox drew a box reading F7 ED. Dropped: the private use area (Co); code points with no
+# character (Cn: unassigned, and the noncharacters); lone surrogates (Cs, which save_cache() could
+# not even encode); controls (Cc, drawn as boxes too, and a "\n" is a row break, which only the cue
+# builder writes); the line and paragraph separators (Zl, Zp), row breaks as well; the format
+# controls (Cf: a zero-width space, a byte order mark, a bidi override, the joiner inside an emoji
+# sequence), invisible, yet in the text Yomitan scans and on the card, and an override reverses
+# what follows it; and U+FFFD, bytes that never made a character (a decode cut off inside one).
+MODEL_TEXT_DROP = frozenset({"Cc", "Cf", "Cn", "Co", "Cs", "Zl", "Zp"})
+
+
+def clean_model_text(text: str, keep_newline: bool = False) -> str:
+    """`text` less every character of a MODEL_TEXT_DROP category and U+FFFD. `keep_newline` keeps
+    "\\n", the row break the cue builder puts between a cue's two rows, which a cached cue holds."""
+    return "".join(ch for ch in text
+                   if (keep_newline and ch == "\n")
+                   or (ch != "\ufffd" and unicodedata.category(ch) not in MODEL_TEXT_DROP))
+
+
+def cleaned_words(seg) -> list:
+    """[(word, its text cleaned), ...]: the segment's own word objects, in order, each that keeps
+    any text once clean_model_text() has been over it. absolute_words() puts these on the clock,
+    so an index into its list is an index into this one."""
+    out = []
+    for w in getattr(seg, "words", None) or []:
+        text = clean_model_text(w.word or "")
+        if text:
+            out.append((w, text))
+    return out
+
+
 def absolute_words(seg, offset: float) -> list:
-    """The segment's words shifted onto the video's timeline."""
-    return [
-        Word(w.word, offset + float(w.start), offset + float(w.end), float(getattr(w, "probability", 1.0) or 0.0))
-        for w in (getattr(seg, "words", None) or [])
-    ]
+    """The segment's words shifted onto the video's timeline, their text cleaned (cleaned_words()).
+
+    A word left with no text goes, so the time it spanned reaches the cue builder as the gap it
+    was, and punctuate_words() reads it as a pause: each U+F7ED of s1UVis0tPiE stood where a
+    sentence mark belongs."""
+    return [Word(text, offset + float(w.start), offset + float(w.end), float(getattr(w, "probability", 1.0) or 0.0))
+            for w, text in cleaned_words(seg)]
+
+
+def segment_text(seg) -> str:
+    """The segment's own text as the gates judge it: cleaned as its words are, and stripped."""
+    return clean_model_text(getattr(seg, "text", "") or "").strip()
 
 
 PUNCTUATION = set("\"'“¿([{-。！？、，,.!?:：;；)]}、…～~ー'\"")
@@ -930,7 +974,7 @@ def has_repetition(text: str) -> bool:
 
 def hallucination_reason(seg, words, speech):
     """Name of the gate that rejects this segment, or None when it passes. See P0.2 of the doc."""
-    text = (getattr(seg, "text", "") or "").strip()
+    text = segment_text(seg)
     if not words or not text or JUNK_RE.match(text):
         return "empty"
 
@@ -958,7 +1002,7 @@ def lyrics_reason(seg, words):
     The detector heard nothing here, so there is no VAD overlap to excuse a segment with: the
     decoder's own confidence stands in ("unsure"), and every other gate applies on its own.
     """
-    text = (getattr(seg, "text", "") or "").strip()
+    text = segment_text(seg)
     if not words or not text or JUNK_RE.match(text):
         return "empty"
     mean_prob = sum(w.probability for w in words) / len(words)
@@ -1298,6 +1342,30 @@ def settle_words(cues) -> list:
 def without_words(cue: dict) -> dict:
     """The cue as /sync sends it to a client that did not ask for word timings."""
     return {k: v for k, v in cue.items() if k != "words"} if "words" in cue else cue
+
+
+def clean_cached_cue(cue: dict) -> Optional[dict]:
+    """A cache record's cue cleaned as fresh words are (clean_model_text(), keeping the cue's own row
+    break): the cue itself when there is nothing to clean, a cleaned copy, or None when nothing of
+    it is left.
+
+    A record written before the cleaning holds what the model wrote, and the cache is forever;
+    bumping CACHE_FORMAT would throw away every cached transcript for three characters of one video.
+    The text is stripped as word_text() strips a fresh one and its words cut to match by cue_words();
+    words that no longer spell the text go, as settle_words() drops them.
+    """
+    text = cue.get("text")
+    if not isinstance(text, str) or clean_model_text(text, keep_newline=True) == text:
+        return cue
+    out = dict(cue, text=clean_model_text(text, keep_newline=True).strip())
+    if not out["text"]:
+        return None
+    if isinstance(cue.get("words"), list):
+        texts = [(w, clean_model_text(w["text"], keep_newline=True)) for w in cue["words"]]
+        out["words"] = cue_words([Word(t, w["start"], w["end"]) for w, t in texts if t])
+        if not out["words"] or "".join(w["text"] for w in out["words"]) != out["text"]:
+            del out["words"]
+    return out
 
 
 def merge_adjacent(cues, limits: CueLimits, max_gap: float, only_short: bool) -> list:
@@ -1722,7 +1790,9 @@ def splice_segments(segs, retry, offset: float, speech, stretches) -> tuple:
         if not any(x <= (words[run[0]].start + words[run[-1]].end) / 2 <= y for x, y, _ in stretches):
             continue
         piece = copy.copy(seg)
-        piece.words = [seg.words[i] for i in run]
+        # `run` counts the words absolute_words() kept, not seg.words: a word left empty is not among them.
+        own = [w for w, _ in cleaned_words(seg)]
+        piece.words = [own[i] for i in run]
         piece.text = "".join(w.word or "" for w in piece.words)
         piece.start, piece.end = float(piece.words[0].start), float(piece.words[-1].end)
         added.append(piece)
@@ -3767,7 +3837,14 @@ class App:
             return  # cues from another model are not reused, the title is
         if data.get("format") != CACHE_FORMAT:
             return  # older caches have no segment ids, so they are transcribed again
-        s.cues = [c for c in data.get("cues", []) if isinstance(c, dict)]
+        # Cleaned here on every load (clean_cached_cue()) and never written back from here: a later save
+        # of the session writes the cleaned cues, and a record covered to its end may never get one.
+        stored = [c for c in data.get("cues", []) if isinstance(c, dict)]
+        cleaned = [clean_cached_cue(c) for c in stored]
+        s.cues = [c for c in cleaned if c is not None]
+        dirty = sum(1 for a, b in zip(stored, cleaned) if a is not b)
+        if dirty:
+            log.info("[%s] %d cached cues held characters no transcript holds; cleaned", s.video_id, dirty)
         for i, c in enumerate(s.cues):
             c["id"] = i
         s.seg_next = max((int(c.get("seg", -1)) for c in s.cues), default=-1) + 1
