@@ -506,18 +506,104 @@ test("the extension asks only the server: no request leaves the machine", async 
   for (const call of mock.calls) assert.match(call.url, /^http:\/\/127\.0\.0\.1:8790\//, call.url);
 });
 
-test("the browser starting asks the server's /health once and sets the badge, without a notification", async () => {
+test("the browser starting asks the server's /health, sets the badge and notifies once per release", async () => {
   const storage = makeMemoryStorage(seenCheck());
   const mock = updateFetch({ health: healthOf("0.8.0", true) });
   const bg = loadBackground({ storage, fetch: mock.fetch, extensionVersion: "0.9.0" });
   await bg.startup();
   assert.equal(mock.count("health"), 1);
   assert.deepEqual(plain(bg.badge), [["color", "#5b6fb8"], ["text", "1"]]);
-  assert.equal(bg.sandbox.browser.notifications, undefined);
-  // The badge is set once: the same verdict again calls nothing.
+  assert.equal(bg.notifications.length, 1);
+  const shown = bg.notifications[0];
+  assert.equal(shown.id, "shisuko-update");
+  assert.equal(shown.type, "basic");
+  assert.equal(shown.title, "Shisu-ko 0.9.0 is available", "the release the server's check found");
+  assert.equal(shown.message, "The server runs 0.8.0. Click to update it now.");
+  assert.equal(shown.iconUrl, "moz-extension://test/icons/icon-128.png");
+  // Once per release and browser session: the extension installed again says nothing more, and
+  // the badge, set once, is not set again; a restarted event page in the same session neither.
   await bg.startup(true);
-  assert.equal(mock.count("health"), 2);
+  assert.equal(bg.notifications.length, 1);
   assert.deepEqual(plain(bg.badge), [["color", "#5b6fb8"], ["text", "1"]]);
+  const restarted = loadBackground({ storage, session: bg.session, fetch: mock.fetch, extensionVersion: "0.9.0" });
+  await restarted.startup();
+  assert.equal(restarted.notifications.length, 0);
+  assert.deepEqual(plain(restarted.badge), [["color", "#5b6fb8"], ["text", "1"]]);
+});
+
+test("only a server that can update itself right now gets the notification", async () => {
+  const cases = [
+    ["docker", healthOf("0.8.0", false)],
+    ["0.8.0, no launcher flag", healthOf("0.8.0", null)],
+    ["current", healthOf("0.9.0", true)],
+    ["no check reported", healthOf("0.8.0", true, null)],
+  ];
+  for (const [name, health] of cases) {
+    const bg = loadBackground({ storage: makeMemoryStorage(seenCheck()), fetch: updateFetch({ health }).fetch, extensionVersion: "0.9.0" });
+    await bg.startup();
+    assert.equal(bg.notifications.filter((n) => !n.cleared).length, 0, name);
+  }
+  // Offline, with only the extension behind: the badge, and nothing to click, since its update is AMO's.
+  const extension = loadBackground({ storage: makeMemoryStorage(seenCheck()), fetch: updateFetch({}).fetch, extensionVersion: "0.8.0" });
+  await extension.startup();
+  assert.deepEqual(plain(extension.badge.at(-1)), ["text", "1"]);
+  assert.equal(extension.notifications.length, 0);
+});
+
+test("clicking the notification updates the server and the background follows it to the end", async () => {
+  let health = healthOf("0.8.0", true);
+  const mock = updateFetch({ health: () => health, update: () => {
+    health = healthOf("0.9.0", true); // the launcher's restart, seen by the very next poll
+    return jsonResponse(200, { ok: true, restarting: true });
+  } });
+  const bg = loadBackground({ storage: makeMemoryStorage(seenCheck()), fetch: mock.fetch, extensionVersion: "0.9.0", ...instantTimers });
+  await bg.clickNotification("some-other-notification");
+  assert.equal(mock.count("update"), 0);
+  await bg.clickNotification("shisuko-update");
+  assert.equal(mock.count("update"), 1);
+  await settle();
+  assert.ok(bg.notifications.some((n) => n.id === "shisuko-update" && n.cleared), "the clicked notification is cleared");
+  const told = bg.notifications.find((n) => n.id === "shisuko-updated");
+  assert.equal(told.title, "Shisu-ko updated to 0.9.0", "the background polled /health and saw the new version");
+  assert.equal((await bg.session.get("serverUpdate")).serverUpdate, null);
+});
+
+// The click asked for something and no popup is open to show the result.
+test("a notification click whose request fails says so in a notification of its own", async () => {
+  const cases = [
+    { handlers: {}, error: "Server unreachable" },
+    { handlers: { health: healthOf("0.8.0", false), update: jsonResponse(409, { ok: false, error: "the server was not started by run.cmd / run.sh" }) }, error: "the server was not started by run.cmd / run.sh" },
+  ];
+  for (const { handlers, error } of cases) {
+    const mock = updateFetch(handlers);
+    const bg = loadBackground({ storage: makeMemoryStorage(seenCheck()), fetch: mock.fetch, extensionVersion: "0.9.0", ...instantTimers });
+    await bg.clickNotification("shisuko-update");
+    await settle();
+    const failed = bg.notifications.filter((n) => n.id === "shisuko-update-failed");
+    assert.equal(failed.length, 1, error);
+    assert.equal(failed[0].title, "Shisu-ko could not update the server");
+    assert.equal(failed[0].message, error);
+    // Its own id: a click on the failure posts nothing.
+    const posted = mock.count("update");
+    await bg.clickNotification("shisuko-update-failed");
+    assert.equal(mock.count("update"), posted);
+  }
+  // A server updated another way meanwhile: the click clears it and says nothing.
+  const done = loadBackground({ storage: makeMemoryStorage(), fetch: updateFetch({ health: healthOf("0.9.0", true) }).fetch, extensionVersion: "0.9.0", ...instantTimers });
+  await done.clickNotification("shisuko-update");
+  await settle();
+  assert.ok(!done.notifications.some((n) => n.id === "shisuko-update-failed"));
+});
+
+test("the popup's status clears the notification once the server is seen at the release", async () => {
+  let health = healthOf("0.8.0", true);
+  const bg = loadBackground({ storage: makeMemoryStorage(seenCheck()), fetch: updateFetch({ health: () => health }).fetch, extensionVersion: "0.9.0" });
+  await bg.startup();
+  assert.equal(bg.notifications.filter((n) => n.id === "shisuko-update").length, 1);
+  await bg.dispatch({ type: "updateStatus", health: null });
+  assert.ok(!bg.notifications.some((n) => n.cleared), "offline: it may come back at the old version");
+  await bg.dispatch({ type: "updateStatus", health: { version: "0.9.0", launcher: true, latest: serverLatest() } });
+  assert.ok(bg.notifications.some((n) => n.id === "shisuko-update" && n.cleared));
 });
 
 test("a server that cannot update itself, or none, still gets the badge", async () => {
@@ -802,6 +888,80 @@ test("the message switch routes the three update messages, and no longer a check
   assert.equal((await dispatch({ type: "updateServer" })).restarting, true);
   assert.equal(mock.count("update"), 1);
   assert.equal(dispatch({ type: "checkForUpdate", force: true }), undefined, "the extension checks nothing itself");
+});
+
+// ------------------------------------------------------------------ the no-Anki fallback
+
+const FRAME = "data:image/jpeg;base64," + Buffer.from("jpeg-bytes").toString("base64");
+const CUE = { start: 12.5, end: 15 };
+
+// /clip as the server answers it: the clip's bytes with its type, or an error status.
+function clipFetch(answer) {
+  const calls = [];
+  const fetch = async (url) => {
+    calls.push(String(url));
+    if (answer instanceof Error) throw answer;
+    if (answer.status) return { ok: false, status: answer.status, headers: { get: () => null } };
+    return { ok: true, status: 200, headers: { get: (name) => (name === "Content-Type" ? answer.mime : null) }, arrayBuffer: async () => Buffer.from(answer.body) };
+  };
+  return { fetch, calls };
+}
+
+test("saveMine saves the line's frame and clip to Downloads through object URLs (Firefox)", async () => {
+  const clip = clipFetch({ mime: "audio/mpeg", body: "mp3-bytes" });
+  const storage = makeMemoryStorage({ settings: { clipPaddingMs: 200, clipFormat: "mp3" } });
+  const bg = loadBackground({ storage, fetch: clip.fetch });
+  const res = await bg.dispatch({ type: "saveMine", videoId: "abcdef1234", cue: CUE, frame: FRAME });
+  assert.deepEqual(plain(res), { ok: true, message: "No Anki to mine into: saved the picture and the audio to Downloads/shisu-ko-mining" });
+  // The clip is the cue with the padding around it, from the server alone.
+  assert.deepEqual(clip.calls, ["http://127.0.0.1:8790/clip?video_id=abcdef1234&start=12.300&end=15.200&format=mp3"]);
+  assert.deepEqual(plain(bg.downloads.map((d) => d.filename)), ["shisu-ko-mining/shisuko_abcdef1234_12500.jpg", "shisu-ko-mining/shisuko_abcdef1234_12500.mp3"]);
+  for (const d of bg.downloads) {
+    assert.match(d.url, /^blob:test\//, "never a data: URL on Firefox");
+    assert.equal(d.saveAs, false);
+    assert.equal(d.conflictAction, "uniquify");
+  }
+  assert.equal(Buffer.from(await bg.objectUrls.made[0].blob.arrayBuffer()).toString(), "jpeg-bytes");
+  assert.equal(bg.objectUrls.made[1].blob.type, "audio/mpeg");
+  assert.equal(Buffer.from(await bg.objectUrls.made[1].blob.arrayBuffer()).toString(), "mp3-bytes");
+});
+
+test("saveMine takes data: URLs where there is no URL.createObjectURL (Chrome's service worker)", async () => {
+  const bg = loadBackground({ fetch: clipFetch({ mime: "audio/wav", body: "wav-bytes" }).fetch, objectUrl: false });
+  const res = await bg.dispatch({ type: "saveMine", videoId: "abcdef1234", cue: CUE, frame: FRAME });
+  assert.equal(res.ok, true);
+  assert.deepEqual(plain(bg.downloads.map((d) => [d.filename, d.url])), [
+    ["shisu-ko-mining/shisuko_abcdef1234_12500.jpg", FRAME],
+    ["shisu-ko-mining/shisuko_abcdef1234_12500.wav", "data:audio/wav;base64," + Buffer.from("wav-bytes").toString("base64")],
+  ]);
+});
+
+test("saveMine saves what it has, says what is missing, and refuses what it cannot name", async () => {
+  // A DRM video gives no frame: the audio alone.
+  const noFrame = loadBackground({ fetch: clipFetch({ mime: "audio/mpeg", body: "x" }).fetch });
+  const audioOnly = await noFrame.dispatch({ type: "saveMine", videoId: "abcdef1234", cue: CUE, frame: null });
+  assert.equal(audioOnly.ok, true);
+  assert.match(audioOnly.message, /saved the audio to Downloads\/shisu-ko-mining \(no picture/);
+  // The server gone as well: the picture alone.
+  const noClip = loadBackground({ fetch: clipFetch(new TypeError("NetworkError")).fetch });
+  const pictureOnly = await noClip.dispatch({ type: "saveMine", videoId: "abcdef1234", cue: CUE, frame: FRAME });
+  assert.match(pictureOnly.message, /saved the picture .*\(no audio \(the server is unreachable\)\)/);
+  // Neither: nothing saved, and why.
+  const neither = loadBackground({ fetch: clipFetch({ status: 503 }).fetch });
+  const none = await neither.dispatch({ type: "saveMine", videoId: "abcdef1234", cue: CUE, frame: "data:text/html;base64,PGI+" });
+  assert.equal(none.ok, false);
+  assert.match(none.error, /^Nothing saved: no picture .*no audio \(the server answered HTTP 503\)/);
+  assert.equal(neither.downloads.length, 0);
+  // A video id or a cue it cannot put in a file name is never asked for.
+  const strict = clipFetch({ mime: "audio/mpeg", body: "x" });
+  const bg = loadBackground({ fetch: strict.fetch });
+  assert.equal((await bg.dispatch({ type: "saveMine", videoId: "../../etc", cue: CUE, frame: FRAME })).ok, false);
+  assert.equal((await bg.dispatch({ type: "saveMine", videoId: "abcdef1234", cue: { start: 5, end: 2 }, frame: FRAME })).ok, false);
+  assert.deepEqual(strict.calls, []);
+  assert.equal(bg.downloads.length, 0);
+  // A browser that refuses the download says so.
+  const refused = loadBackground({ fetch: clipFetch({ mime: "audio/mpeg", body: "x" }).fetch, download: async () => { throw new Error("Download canceled"); } });
+  assert.deepEqual(plain(await refused.dispatch({ type: "saveMine", videoId: "abcdef1234", cue: CUE, frame: FRAME })), { ok: false, error: "Saving failed: Download canceled" });
 });
 
 // ------------------------------------------------------------------ word colours

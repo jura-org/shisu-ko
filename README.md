@@ -182,8 +182,11 @@ release (an anonymous request; a restart within the day asks nothing, and a fail
 again after 15 minutes, then an hour, then six). `--update-check off` or `SHISUKO_NO_UPDATE_CHECK=1`
 turns that off. The extension reads the answer from the server. When the server you are running is
 older, the toolbar icon gets a badge and the popup shows a banner with an **Update** button
-(**Not now** hides it until Firefox restarts); the line at the bottom of the popup's *Anki, clips
-and server* drawer says what the server found and when. Update makes the server exit and its
+(**Not now** hides it until Firefox restarts). A system notification says so too, once per
+browser session, from the browser's start, and only when the server is already running then and
+can update itself; clicking it updates the server. The line at the bottom of the popup's *Anki, clips
+and server* drawer says what the server found and when. Update, or a click on the notification,
+makes the server exit and its
 launcher take over: `run.cmd` / `run.sh` run `update.py` (a git clone is fast-forwarded, a zip
 install is replaced with the newest release) and start the server again, while the popup's
 status line reads "Updating server" until the new version answers, which can take up to two
@@ -236,9 +239,9 @@ moves on to the first listed version newer than its own (a release published the
 its number plus `.1`, the same code). Regular Firefox only keeps signed
 add-ons; Firefox Developer Edition, Nightly and ESR can instead load the unsigned zip with
 `xpinstall.signatures.required` set to `false` in `about:config`. The popup says when a newer
-release is out (see [Updates](#1-start-the-server)). Since 0.24.0 the extension no longer asks
-for "Display notifications to you" (0.9.0 to 0.23.0 did): the badge on its toolbar icon took the
-notification's place.
+release is out (see [Updates](#1-start-the-server)). Since 0.9.0 the extension needs
+"Display notifications to you", for that news at Firefox start; opening a newer `.xpi` over an
+older version from before 0.9.0 lists it in the install prompt.
 
 On Chrome, install [Shisu-ko from the Chrome Web Store](https://chromewebstore.google.com/detail/shisu-ko/ecenifonpkaiccmmknpbllbebbfigjnm).
 Every release goes to the store by itself, and Chrome updates the install by itself once the store
@@ -353,8 +356,12 @@ either. `--mine-picture off` attaches the audio alone, and `--mine off` stops th
 to Anki at all (see [Server options](#server-options)). A live stream's card gets its audio and no
 picture.
 
-Without Anki there is nothing to mine into: the Downloads folder fallback of earlier versions is
-gone, and with it the extension's `downloads` permission.
+Without Anki there is nothing to mine into, so a mine you ask for (Alt+Shift+M or a line's
+pickaxe) saves the line instead: when the server says Anki is not running, or mines nothing
+(`--mine off`, or the Docker image without `--anki-url`), the line's audio (from the server, with
+the popup's padding and format) and a screenshot of the video taken as you mined go to
+`Downloads/shisu-ko-mining`, and the toast says so. A DRM-protected video gives no screenshot,
+only the audio.
 
 **Sync with AnkiWeb.** The server watches Anki and asks it to sync (AnkiConnect's `sync`) a
 minute after a new card appears, so the card is on your phone without pressing Sync. It does not
@@ -1084,8 +1091,8 @@ server does not send).
 | The banner or **Update** says the server cannot update itself | The server was not started by `run.cmd` / `run.sh` (Docker, Nix, `python server.py` by hand: it has no launcher to run `update.py` after the exit), was started with `--no-update` or `SHISUKO_NO_UPDATE`, or is a 0.8.0 server, which predates the button. The banner names the first of those causes whatever the actual one, because the server only reports that it cannot. Update it the way it was started: `docker compose build`, `nix run` with the new revision, or a plain restart of `run.cmd` / `run.sh`, which updates before every start. A `run.sh` that updated itself from before 0.9.0 keeps running its old loop, so its first server is refused too; restart `run.sh` once by hand (`run.cmd` reads its new loop as soon as it has updated and needs no restart). |
 | "The server restarted but still runs X; look at its window: update.py said why" | The launcher ran `update.py` but it could not update: local changes git would overwrite, a diverged branch, a detached HEAD, no network, or a release zip that could not be downloaded. Its message is in the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS); fix that and click **Update** again, or update by hand (`git pull`, or unpack the release). |
 | **Update** ends with "No answer from the server 120 s after the update" | The server exited for the update but nothing answered within two minutes: the new version is still loading its model (a CPU load takes minutes, and a new default model is downloaded first), or it did not start (the new version crashed, or `update.py` could not reinstall the requirements). Look at the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS). A server that is still loading answers by itself in a while and the popup's status line follows; otherwise fix what the log says and click **Start server**, which is back on the status line. |
-| No badge or banner although GitHub has a newer release | The server finds releases, once a day: the line at the bottom of the popup's *Anki, clips and server* drawer says what it found and when, or why its check failed (offline, or GitHub's limit of sixty unauthenticated requests an hour per address, shared with everything else on your connection that asks GitHub's API; it tries again after 15 minutes, an hour, then every six hours). An empty line means the server reported no check: it was started with `--update-check off` or `SHISUKO_NO_UPDATE_CHECK=1`, it is older than 0.24.0, or it started a moment ago. A release published since the server's last check shows up within a day; restarting the server does not hurry it, since the day's answer is kept in `~/.shisu-ko/update-check.json`. **Not now** hides the banner until Firefox restarts, and the toolbar badge stays either way. |
-| Firefox keeps the old extension after an update, or its menu button shows a notice that Shisu-ko requires new permissions | Firefox holds an update that adds a permission until you approve it: open the notice on the application menu (≡) or Add-ons and themes. 0.9.0 to 0.23.0 asked for "Display notifications to you"; 0.24.0 drops it, and an update that only drops a permission asks nothing. A `.xpi` opened by hand asks in its install dialog instead. |
+| No badge or banner although GitHub has a newer release | The server finds releases, once a day: the line at the bottom of the popup's *Anki, clips and server* drawer says what it found and when, or why its check failed (offline, or GitHub's limit of sixty unauthenticated requests an hour per address, shared with everything else on your connection that asks GitHub's API; it tries again after 15 minutes, an hour, then every six hours). An empty line means the server reported no check: it was started with `--update-check off` or `SHISUKO_NO_UPDATE_CHECK=1`, it is older than 0.24.0, or it started a moment ago. A release published since the server's last check shows up within a day; restarting the server does not hurry it, since the day's answer is kept in `~/.shisu-ko/update-check.json`. The notification comes only from Firefox's start, and only when the server is already running then, started by `run.cmd` / `run.sh` and able to update itself; with the usual order, Firefox first and the server later, there is none, but the badge and the banner are. **Not now** hides the banner until Firefox restarts, and the toolbar badge stays either way. |
+| Firefox keeps the old extension after an update, or its menu button shows a notice that Shisu-ko requires new permissions | Firefox holds an update that adds a permission until you approve it: open the notice on the application menu (≡) or Add-ons and themes and allow it. 0.9.0 added "Display notifications to you"; 0.24.0 brings back "Download files and read and modify the browser's download history", which 0.22.0 and 0.23.0 lacked, for the no-Anki fallback. A `.xpi` opened by hand asks in its install dialog instead. |
 | Server says "Another server is already starting or running on port 8790 (it holds ~/.shisu-ko/server-8790.lock). Stop it first." and stops (exit code 2) | A second server was started while one is loading or running: `run.cmd` double-clicked twice, or a start by hand while a server the popup launched is still in its update check (the **Start server** button itself looks at the lock first and reports a loading server as already starting). Close the window and let the first one finish; it holds the lock until it exits, and the file needs no cleaning up. If no server is running and the message persists, a stale `server.py` process still holds it; end that process (Task Manager, `pkill -f server.py`). |
 | First start sits at "Loading Whisper model" for a long time | A model that setup did not download (large-v3 is 3 GB) is fetched at your connection speed, without a progress bar in the server window; `setup.cmd` / `setup.sh` and `server.py --download-model NAME` show one. Hugging Face's xet transfer mode is disabled because it stalled on Windows; set `HF_HUB_DISABLE_XET=0` to try it. |
 | "Loading model X…" stays on the video for a long time | A model picked in the popup is downloaded first, at your connection speed (large-v3 is 3 GB, small about 500 MB); the current model keeps subtitling meanwhile, and the transcript starts over once the new one is in. The popup's status line follows along. |
@@ -1133,7 +1140,8 @@ Planned: a distilled, smaller Japanese model that could eventually run in the br
 addon/                Firefox extension (Manifest V3, plain JS, no build step)
   content.js          overlay, sync loop, hover-pause, transcript, live clock, mine requests in /sync
   background.js       server proxy, settings, server start, the server's release check (from
-                      /health) and the badge, the server's update, the word colours' rows from /sync
+                      /health), badge and notification, the server's update, the no-Anki
+                      fallback's downloads, the word colours' rows from /sync
   settings.js         the one place settings and their defaults are declared
   words.js            the word colours' matcher (finding words in a line), for content.js and the
                       phone portal; its note reading has a twin in server.py, held equal by the
@@ -1236,7 +1244,7 @@ the two no-update switches, the 409s, the answer followed by the exit with code 
 `main()`, the origin rule that admits the extension and no page, and the launchers' `:update`
 label, variable and code-4 lines. The extension
 suite runs `background.js` and the helpers of `content.js` in a Node `vm` sandbox that stands in
-for the WebExtension APIs: settings storage, the server, AnkiConnect and Downloads proxying,
+for the WebExtension APIs: settings storage, the server proxy, the no-Anki fallback's downloads,
 sentence mining, the live clock and the master switch. `content.test.js` also covers the model
 name sent with every sync, the restart on a new session token, the model status and error
 messages and the font stack; `popup-copies.test.js` keeps the popup's copies of the font and
@@ -1250,8 +1258,8 @@ and `/health`'s `latest`; `background.test.js` feeds `/health` answers carrying 
 version helpers, `decideUpdate` and the badge, the `/update` request with its record, and the
 `/health` polls that end it; `popup.test.js` walks the banner through every verdict, Update to
 "Updated to 0.9.0", the old version coming back, the 120 s deadline and Not now;
-`settings.test.js` holds that `addon/` makes no request beyond the server and asks for no
-`notifications`. The word colours are
+the notification at start and its click; `settings.test.js` holds that `addon/` makes no request
+beyond the server and that only `saveMine()` saves files. The word colours are
 covered in `words.test.js` (reading a note's fields and pitch accent, the card states, the
 conjugation matcher with its boundaries and the words it must not colour), `background.test.js`
 (the rows a /sync brings, a delta, a deck change, the server's verdicts, the deck list, and a grep

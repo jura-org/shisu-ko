@@ -2374,16 +2374,45 @@
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
   }
 
+  // One canvas for every frame read back. A DRM-protected video taints it for good, so a failed
+  // read lets it go and the next one starts afresh.
+  let frameCanvas = null;
+
+  // The video's current frame as a JPEG data: URL (1280 px wide at most), or null when there is
+  // no frame or the video cannot be read back (DRM).
+  function captureFrame(video) {
+    const w = video && video.videoWidth;
+    const h = video && video.videoHeight;
+    if (!w || !h) return null;
+    try {
+      const scale = Math.min(1, 1280 / w);
+      const canvas = frameCanvas || (frameCanvas = document.createElement("canvas"));
+      canvas.width = Math.round(w * scale);
+      canvas.height = Math.round(h * scale);
+      canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL("image/jpeg", 0.85);
+    } catch (err) {
+      frameCanvas = null;
+      return null;
+    }
+  }
+
+  // The server's answers that mean there is no Anki to mine into: AnkiConnect did not answer, or
+  // the server mines nothing. The line then goes to Downloads (saveMine in background.js).
+  const NO_ANKI = new Set(["unreachable", "off"]);
+
   // The viewer's own mine: this cue into the newest Anki card. The server does the work; the next
   // /sync carries the request, and every /sync after it until the answer's `mined` reports it
-  // (takeMined), so a lost answer costs a resend, never a second card.
+  // (takeMined), so a lost answer costs a resend, never a second card. The frame is taken now,
+  // while the video still shows the line, for the case the answer says there is no Anki.
   function mineCue(cue) {
     if (!cue || !state.videoId || !state.settings.enabled) return;
     if (state.mining) {
       showToast("Still mining the last line…", "info");
       return;
     }
-    state.mining = { cue_id: cue.id, nonce: newNonce(), session: state.serverSession, at: Date.now(), generation: state.cueGeneration };
+    state.mining = { cue_id: cue.id, nonce: newNonce(), session: state.serverSession, at: Date.now(), generation: state.cueGeneration,
+      cue: { start: cue.start, end: cue.end }, videoId: state.videoId, frame: captureFrame(state.video) };
     showToast("Mining…", "info", 15000);
     resumeAfterMining(state.video);
     sync();
@@ -2418,6 +2447,11 @@
     for (const event of Array.isArray(data.mined) ? data.mined : []) {
       if (!event || typeof event !== "object") continue;
       const own = !!state.mining && event.nonce === state.mining.nonce;
+      if (own && !event.ok && NO_ANKI.has(event.status)) {
+        saveMine(state.mining);
+        state.mining = null;
+        continue;
+      }
       if (own) state.mining = null;
       // An automatic attach that went wrong is the server log's business, not a toast's.
       if (own || (event.ok && !event.nonce)) {
@@ -2426,6 +2460,12 @@
         else showToast(own && event.status === "error" ? "Mining failed: " + text : text, "warn", 6000);
       }
     }
+  }
+
+  async function saveMine(m) {
+    const res = await sendMessage({ type: "saveMine", videoId: m.videoId, cue: m.cue, frame: m.frame });
+    if (res && res.ok) showToast(String(res.message || "Saved to Downloads"), "ok", 6000);
+    else showToast(String((res && res.error) || "Saving failed"), "error", 6000);
   }
 
   function resumeAfterMining(video) {

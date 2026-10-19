@@ -4981,7 +4981,8 @@ class Miner:
         try:
             ids = self.call("findNotes", {"query": "added:1"}, ANKI_REQUEST_TIMEOUT)
         except Exception as exc:  # noqa: BLE001
-            return self.outcome(s, nonce, "error", anki_error_text(exc))
+            # "unreachable": no Anki at all, which the extension answers by saving to Downloads.
+            return self.outcome(s, nonce, "unreachable" if isinstance(exc, AnkiUnreachable) else "error", anki_error_text(exc))
         ids = [i for i in ids if isinstance(i, int)] if isinstance(ids, list) else []
         if not ids:
             return self.outcome(s, nonce, "no_note", "No card was added today. Create the card with Yomitan first, then mine.")

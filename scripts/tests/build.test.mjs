@@ -92,14 +92,14 @@ test("the Chrome package is one the Chrome Web Store takes at upload", async () 
   }
 });
 
-// The permissions are pinned. A new permission or host permission sends a release to the Chrome
-// Web Store's manual review, as "alarms" held 0.21.0 there, so the owner's rule is: never add one,
-// and remove one that falls out of use. These are the 0.19.1 lists less `downloads`, which went in
-// 0.22.0 with the Downloads fallback when mining moved to the server, and less `notifications`,
-// which went in 0.24.0 when the update check moved to the server and its nudge became the badge. A change to them must be a
-// deliberate edit of this allowlist, never a side effect of a feature.
+// The permissions are pinned to the set the Chrome Web Store has published, 0.19.1's. Any change
+// in either direction, a permission added or one removed, sends a release to the store's manual
+// review ("alarms" held 0.21.0 there), so this list must equal the published one and must not
+// change either way without the owner's decision. Each permission kept needs a real use, since
+// reviewers flag unused ones: `downloads` is the no-Anki fallback (saveMine() in background.js),
+// `notifications` the update notification. Never a side effect of a feature.
 const ALLOWED_PERMISSIONS = Object.freeze({
-  permissions: ["storage", "tabs"],
+  permissions: ["storage", "downloads", "tabs", "notifications"],
   optional_permissions: ["nativeMessaging"],
   host_permissions: ["*://www.youtube.com/*", "*://m.youtube.com/*", "*://youtube.com/*", "http://127.0.0.1/*", "http://localhost/*"],
   optional_host_permissions: undefined,

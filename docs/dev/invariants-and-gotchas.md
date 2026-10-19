@@ -63,8 +63,9 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   sentence: `grow_sentence()` replaces a fragment of the matched cue (Yomitan cuts at 。！？) with
   the cue's row, Yomitan's `<b>` kept, and leaves any other text alone (see `mining.md`); the viewer's
   own mine reaches it as `/sync`'s `mine`, so mining added no endpoint. `addon/tests/settings.test.js`
-  holds that no file in `addon/` names `updateNoteFields`, `storeMediaFile`, `addNote` or
-  `browser.downloads`.
+  holds that no file in `addon/` names `updateNoteFields`, `storeMediaFile` or `addNote`, and
+  that `browser.downloads` is called from `downloadBytes()` alone, for `saveMine()`: the no-Anki
+  fallback (`mining.md`, "The no-Anki fallback").
 - The server reads Anki; the extension makes no AnkiConnect call (0.23.0). The word colours' deck
   is `DeckIndexes` in `server.py`, sent as rows with `/sync`'s opt-in `deck`; the extension lost
   its AnkiConnect client, its permission dialog, its deck caches and the `ankiUrl` setting, and
@@ -72,11 +73,15 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   reading is a port of words.js's (`plainWord()` ... `statusOf()`) and must stay equal to it: the
   golden test and the random-field run in `test_deck_index.py` hold that. The matcher and the
   particle ruling stay in words.js alone (see `word-colours.md`).
-- The extension's permissions are pinned to the 0.19.1 lists less `downloads` (gone in 0.22.0 with the Downloads fallback) by `ALLOWED_PERMISSIONS` in
-  `scripts/tests/build.test.mjs`, for both built manifests, host permissions and content-script
-  matches included. A new permission or host permission sends a release to the Chrome Web Store's
-  manual review; the owner's rule is to add none and to remove one that falls out of use. A change
-  to the list is a deliberate edit, with the `docs/amo/` texts changed to match.
+- The extension's permissions are pinned to the set the Chrome Web Store has published, 0.19.1's
+  (`storage`, `downloads`, `tabs`, `notifications`; optional `nativeMessaging`), by
+  `ALLOWED_PERMISSIONS` in `scripts/tests/build.test.mjs`, for both built manifests, host
+  permissions and content-script matches included. A change in either direction, a permission
+  added or one removed, sends a release to the store's manual review: never add or remove one
+  without the owner's decision. Each needs a real use, since reviewers flag unused ones:
+  `downloads` is `saveMine()`, `notifications` the update notification. 0.22.0 to 0.23.0
+  shipped without `downloads`, which was wrong; 0.24.0 has it back. The `docs/amo/` texts list
+  the same set.
 - The add-on never installs itself: no `update_url` in the manifest, no `.xpi` download or
   install (`addon/tests/settings.test.js` enforces the manifest); its updates come from
   addons.mozilla.org. The extension makes no remote request: its one `fetch()` is
@@ -87,8 +92,8 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   `https://api.github.com/repos/Multysquid/shisu-ko/releases/latest`, at most once a day, never
   with a token, cookie or identifier, and nothing else; `/health` reports it as `latest`, and
   the server never downloads or installs from it (the launcher's `update.py` does, through
-  `POST /update`). The extension holds no `notifications` permission: a newer release is the
-  toolbar badge and the popup's banner. The privacy policy, description and reviewer notes in
+  `POST /update`). The extension tells of a newer release with the toolbar badge, one
+  notification at browser start and the popup's banner, all fed from `latest`. The privacy policy, description and reviewer notes in
   `docs/amo/` state exactly this, so a change here changes them too. On Chrome, the package carries no
   `update_url` and no `key`: the Chrome Web Store keeps the item's own key, and refuses a key on
   a new item and one that is not the item's own on an update (`scripts/tests/build.test.mjs`
@@ -331,9 +336,12 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
 - GitHub allows sixty unauthenticated API requests an hour per address, shared with everything
   else on the connection: hence the server's one check a day, cached in
   `~/.shisu-ko/update-check.json` so restarts ask nothing, and a backoff after a failure (15 min,
-  1 h, 6 h). Never add a token. The extension asks GitHub nothing and needs no `notifications`
-  permission (0.9.0 to 0.23.0 held it for a start-up notification); the badge, which needs none,
-  took its place in 0.24.0.
+  1 h, 6 h). Never add a token. The extension asks GitHub nothing.
+- `notifications` is a required permission, not an optional one: the update notification is
+  created from the start-up check, where no popup is open to ask for a grant.
+- `browser.downloads.download()` refuses `data:` URLs in Firefox (bug 1622986): `downloadBytes()`
+  builds a Blob and passes `URL.createObjectURL()` from the background page, revoked two minutes
+  later. Chrome's service worker has no `URL.createObjectURL` and takes the `data:` URL.
 - Regular Firefox only keeps signed add-ons; unsigned builds are temporary installs only.
 - An update or reload kills Firefox's content script without running another line of it, then
   injects a fresh one into the open tabs. The dead instance's overlay stays in the player, frozen

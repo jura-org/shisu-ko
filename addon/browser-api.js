@@ -77,11 +77,21 @@
       if (chromeApi.windows[name]) browser.windows[name] = promiseMethod(chromeApi.windows, name);
     }
   }
-  // The update nudge: the toolbar badge. Only where Chrome offers it (the background and the
-  // popup); background.js does without it.
+  // The update nudges: the toolbar badge and the system notification. Only where Chrome offers
+  // them (the background and the popup); background.js does without either.
   if (chromeApi.action) {
     browser.action = Object.create(chromeApi.action);
     for (const name of ["setBadgeText", "setBadgeBackgroundColor"]) browser.action[name] = promiseMethod(chromeApi.action, name);
+  }
+  if (chromeApi.notifications) {
+    browser.notifications = Object.create(chromeApi.notifications);
+    for (const name of ["create", "clear"]) browser.notifications[name] = promiseMethod(chromeApi.notifications, name);
+    browser.notifications.onClicked = chromeApi.notifications.onClicked;
+  }
+  // The no-Anki fallback's save (saveMine in background.js).
+  if (chromeApi.downloads) {
+    browser.downloads = Object.create(chromeApi.downloads);
+    browser.downloads.download = promiseMethod(chromeApi.downloads, "download");
   }
   if (chromeApi.permissions) {
     browser.permissions = Object.create(chromeApi.permissions);

@@ -59,7 +59,11 @@ function deckAnswer(asked) {
   return { token, status: "ok", deck: "Smoke::Mining", automatic: !asked.name, full: false, notes: [...ids].map((id) => deck.rows.get(id)), removed: [] };
 }
 // The fixture server's mining log, as server.py's /sync answers it: one entry per mine asked for.
-const mining = { bodies: [], log: [] };
+// `noAnki` plays a server whose AnkiConnect does not answer: the mine comes back `unreachable`.
+const mining = { bodies: [], log: [], noAnki: false, clips: [] };
+// What the fixture /health says about the server itself; the end of the run makes it an old one
+// started by its launcher, for the update notification.
+const serverSelf = {};
 async function requestBody(req) {
   let body = "";
   for await (const chunk of req) body += chunk;
@@ -88,7 +92,7 @@ const api = await listen(async (req, res) => {
     healthCount++;
     // The popup's deck list comes from the server too (/health?decks=1).
     const decks = url.searchParams.get("decks") === "1" ? { anki_decks: { ok: true, decks: ["Default", "Smoke::Mining"], seen: "Smoke::Mining" } } : {};
-    return json(res, { model: "smoke", device: "cpu", compute_type: "test", latest: LATEST, ...decks });
+    return json(res, { model: "smoke", device: "cpu", compute_type: "test", latest: LATEST, ...serverSelf, ...decks });
   }
   if (url.pathname === "/sync") {
     syncCount++;
@@ -100,8 +104,11 @@ const api = await listen(async (req, res) => {
     if (body.deck) deck.bodies.push(body.deck);
     // A mine is answered once per nonce, the way the server dedupes the resends.
     if (body.mine && !mining.log.some((entry) => entry.nonce === body.mine.nonce)) {
-      mining.log.push({ seq: mining.log.length, nonce: body.mine.nonce, ok: true, status: "attached", note: 404,
-        message: "Added Picture + SentenceAudio to the newest Anki card" });
+      mining.log.push(mining.noAnki
+        ? { seq: mining.log.length, nonce: body.mine.nonce, ok: false, status: "unreachable", note: null,
+          message: "Anki is not running or AnkiConnect is not installed" }
+        : { seq: mining.log.length, nonce: body.mine.nonce, ok: true, status: "attached", note: 404,
+          message: "Added Picture + SentenceAudio to the newest Anki card" });
     }
     const since = typeof body.mined_since === "number" ? body.mined_since : null;
     const minedLog = { mined: since === null ? [] : mining.log.filter((entry) => entry.seq >= since), mined_next: mining.log.length };
@@ -119,6 +126,11 @@ const api = await listen(async (req, res) => {
     ];
     const cues = body.since ? [] : id === regressionVideoId ? regressionCues : [{ id: 1, start: 0, end: 3600, text: "これはテスト字幕です", seg: 1 }];
     return json(res, { ...head, cues });
+  }
+  if (url.pathname === "/clip") {
+    mining.clips.push(Object.fromEntries(url.searchParams));
+    res.writeHead(200, { "content-type": "audio/wav", "access-control-allow-origin": "*" });
+    return res.end(mediaBytes);
   }
   if (url.pathname === "/anki") {
     const request = req.method === "POST" ? await requestBody(req) : {};
@@ -299,6 +311,20 @@ try {
   await page.waitForTimeout(2500);
   assert.equal(mining.bodies.filter((entry) => entry.mine && entry.mine.nonce === nonce).length, resent, "an answered mine is not sent again");
 
+  // No Anki to mine into: the server answers `unreachable`, and the line goes to Downloads, the
+  // frame the tab drew at the mine plus the server's /clip.
+  mining.noAnki = true;
+  await page.locator(".shisuko-line-mine").first().click({ force: true });
+  await poll(() => page.locator(".shisuko-toast").textContent(), (value) => value === "No Anki to mine into: saved the picture and the audio to Downloads/shisu-ko-mining", 10000);
+  assert.deepEqual(mining.clips.map((clip) => [clip.video_id, clip.format]), [[videoId, "mp3"]]);
+  const saved = await poll(() => worker.evaluate(() => new Promise((resolve) => chrome.downloads.search({}, resolve))),
+    (items) => items.length === 2 && items.every((item) => item.state === "complete"), 10000);
+  // Playwright keeps a download under a name of its own, so the file names are background.test.js's
+  // to hold; here the types and the bytes.
+  assert.deepEqual(saved.map((item) => item.mime).sort(), ["audio/wav", "image/jpeg"]);
+  assert.ok(saved.every((item) => item.fileSize > 0), "both files have bytes");
+  mining.noAnki = false;
+
   // The popup's Anki settings reach the server inside /sync; the extension itself writes nothing.
   const cdp = await context.newCDPSession(page);
   const ankiPopup = await context.newPage();
@@ -430,6 +456,14 @@ try {
   await poll(() => regression.locator(".shisuko-toast").textContent(), (value) => value.includes("Added Picture + SentenceAudio"), 10000);
   await regression.close();
   await regressionPopup.close();
+
+  // The update notification, fed from the server's check: an old server its launcher started,
+  // and the browser starting, which the worker's own start-up check plays.
+  Object.assign(serverSelf, { version: "0.1.0", launcher: true });
+  const lastWorker = context.serviceWorkers().find((candidate) => candidate.url().startsWith(`chrome-extension://${extensionId}/`));
+  await lastWorker.evaluate(() => startupCheck());
+  const shown = await poll(() => lastWorker.evaluate(() => new Promise((resolve) => chrome.notifications.getAll(resolve))), (all) => "shisuko-update" in all, 5000);
+  assert.ok(shown["shisuko-update"]);
 
   assert.deepEqual(anki.actions, [], `the extension called AnkiConnect: ${anki.actions.join(", ")}`);
   // The log sees the worker: every /health went out from it.

@@ -140,7 +140,9 @@ dropped, when the server is unreachable, and after `MINE_TIMEOUT_MS` (90 s; a se
 
 What the server did goes into the session's log (`Miner.record()`: `Session.mined`, the last
 `MINE_LOG_KEEP` entries of the last `MINE_LOG_SECONDS`, each `{seq, nonce, ok, status, message,
-note}`; `status` is `attached`, `no_note`, `no_cue`, `no_fields`, `filled`, `off` or `error`). A
+note}`; `status` is `attached`, `no_note`, `no_cue`, `no_fields`, `filled`, `off`, `unreachable` (no
+AnkiConnect answered the mine's `findNotes`) or `error`; on `off` and `unreachable` the
+extension saves the line to Downloads instead, see "The no-Anki fallback"). A
 body carrying `anki` or `mined_since` is answered `mined` (the entries from the cursor on) and
 `mined_next`. A cursor of `null` asks only where the log stands, so a fresh page replays nothing;
 one past `mined_next` is from before a server restart and reads the whole log. The answer is read
@@ -229,8 +231,24 @@ is older than `FRAME_FRESH` (120 s) has expired: one fresh resolve, and that ans
 live stream gets no picture: its past frames are not there to seek to. `--mine-picture off`
 builds the miner without a grabber, and nothing is resolved.
 
-The extension's frame capture (`captureFrame()`, the pre-mined frames and clips held in the
-background's `premined`) is gone with it; `downloads` and the Downloads fallback went too.
+The extension's pre-mined frames and clips (the background's `premined`) are gone with it.
+
+### The no-Anki fallback
+
+With no Anki to mine into, the viewer's mine (Alt+Shift+M or a line's pickaxe) saves the line
+to `Downloads/shisu-ko-mining` instead, as 0.21 did. `mineCue()` in `content.js` draws the
+playing video onto a shared canvas when the viewer mines (`captureFrame()`: 1280 px wide at most,
+JPEG 0.85; null for a DRM-tainted canvas or a video with no frame yet) and keeps it in
+`state.mining`. When the server's answer for that nonce is `unreachable` (no AnkiConnect
+answered its `findNotes`) or `off` (the server mines nothing), `takeMined()` sends `saveMine`
+`{videoId, cue: {start, end}, frame}` to the background, and the toast says what was saved.
+`saveMine()` in `background.js` refuses a video id outside `^[A-Za-z0-9_-]{6,20}$` or a cue that
+is not a forward span, asks the server's `/clip` for the cue plus `clipPaddingMs` on each side in
+`clipFormat` (`fetchClip()`, 20 s), and saves `shisuko_<video>_<start ms>.jpg` and `.mp3` /
+`.wav` through `downloadBytes()`: a Blob and an object URL in Firefox (which refuses `data:` URLs
+there), revoked after two minutes, a `data:` URL in Chrome's service worker, which has no
+`URL.createObjectURL`. What it saves it saves; what is missing it names. This is the only use of
+`downloads`, which stays a permission because the published set holds it.
 
 ### Switches
 
@@ -250,8 +268,10 @@ works"). 0.20.0 and 0.21.0 ran a scheduler here, kept alive across a stopped eve
 `alarms` permission; that permission held 0.21.0 at the Chrome Web Store's review, and the
 add-on is a thin client of the server. `addon/tests/settings.test.js` holds that no file in
 `addon/` names the action `sync`, `alarms` or the old `ankiAutoSync` setting, which a viewer's
-storage may still hold and nothing reads, and that none names `updateNoteFields`,
-`storeMediaFile`, `addNote`, `browser.downloads`, `mineTarget`, `mineFallbackDownload` or the old
-matcher. The browser smoke test runs with that stale setting stored, mines through its fixture
-server's `/sync`, and sees no write and no `sync` reach its fixture AnkiConnect; the attach
+storage may still hold and nothing reads, that none names `updateNoteFields`,
+`storeMediaFile`, `addNote`, `mineTarget`, `mineFallbackDownload` or the old matcher, and that
+`browser.downloads` is `saveMine()`'s alone. The browser smoke test runs with that stale setting stored, mines through its fixture
+server's `/sync`, and sees no write and no `sync` reach its fixture AnkiConnect; with its
+fixture answering a mine `unreachable`, it waits for the fallback's toast and two complete
+downloads (a JPEG and the fixture's WAV from `/clip`); the attach
 itself is tested in `server/tests/test_mining.py`.

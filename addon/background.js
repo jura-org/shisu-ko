@@ -5,15 +5,16 @@
  *  1. Proxy API calls from content scripts to the local Whisper server.
  *  2. Own the settings object in browser.storage.local.
  *  3. Sentence mining is the server's (Miner in server.py): it attaches the audio and the picture
- *     to the note Yomitan made, and takes the viewer's own mine through /sync.
+ *     to the note Yomitan made, and takes the viewer's own mine through /sync. With no Anki to
+ *     write to, the viewer's mine saves the line's audio and a frame to Downloads (saveMine).
  *  4. Start the server for the popup: an extension cannot spawn a process, so the request goes
  *     to the "shisuko" native host (server/native_host.py), which runs the project's launcher.
  *  5. Updates: read the newest release from the server's /health (the server asks GitHub once a
  *     day; the extension makes no request beyond the viewer's machine), tell the viewer (toolbar
- *     badge, the popup's banner) and, on request, ask the server to update itself: POST /update
- *     makes it exit so that run.cmd / run.sh run update.py and start it again. The extension
- *     never installs itself; its updates come from addons.mozilla.org (a Chrome Web Store
- *     install, from the store; an unpacked Chrome build, only from the viewer).
+ *     badge, one system notification, the popup's banner) and, on request, ask the server to
+ *     update itself: POST /update makes it exit so that run.cmd / run.sh run update.py and start
+ *     it again. The extension never installs itself; its updates come from addons.mozilla.org
+ *     (a Chrome Web Store install, from the store; an unpacked Chrome build, only from the viewer).
  *  6. Word colours: the server reads the Anki deck; the rows it sends with /sync are kept here
  *     and handed to the content script as [word, status, pitch] entries, which colours the words
  *     of every line by them. The extension makes no AnkiConnect call.
@@ -42,6 +43,7 @@ const START_KEY = "startServer";
 const LAUNCHER_HINT = "Run server\\setup.cmd (Windows) or bash server/setup.sh once, or start the server by hand once: run.cmd / run.sh register the launcher";
 const NATIVE_PERMISSION_HINT = "Allow Shisu-ko to talk to its launcher when the browser asks";
 const UPDATE_RUNNING_HINT = "The launcher restarts the server itself once update.py is done";
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Every message from a content script used to re-read storage; at one sync tick and one Anki poll
 // per second per tab that is two cross-process reads a second for a value that changes when the
@@ -366,11 +368,18 @@ const UPDATE_WINDOW_MS = 120000;
 // popup that asked closes with any click outside it, and nobody polls while it is closed. popup.js
 // keeps a copy for its own verdict (addon/tests/popup-copies.test.js keeps the two equal).
 const UPDATE_SHUTDOWN_MS = 10000;
+// The notification path has no popup polling /health for it; the background polls at this pace
+// itself, until the record ends or the window passes.
+const UPDATE_POLL_MS = 3000;
 // storage.local: the last `latest` a server reported, null for one that reported none. It decides
 // while the server is offline, and its presence says a server has answered this profile before.
 const LATEST_KEY = "serverLatest";
 const UPDATE_KEY = "serverUpdate"; // storage.session: {requestedAt, from, to, deadline, down}
 const SNOOZE_KEY = "updateSnoozed"; // storage.session: the version "Not now" was clicked for
+const NOTIFIED_KEY = "notifiedVersion"; // storage.session: the version the notification was shown for
+const UPDATE_NOTIFICATION = "shisuko-update";
+const UPDATED_NOTIFICATION = "shisuko-updated";
+const UPDATE_FAILED_NOTIFICATION = "shisuko-update-failed"; // its own id: a click on it must not post again
 // The badge is a nudge, not an alarm: the popup's accent, dulled, and never the alert red.
 const BADGE_COLOR = "#5b6fb8";
 
@@ -525,9 +534,8 @@ function decisionFor(health, check) {
 
 let badgeOn = null; // what the badge shows, null until this event page set it once
 
-// The toolbar badge is a nudge the popup does not need, so a browser (or the test sandbox)
-// without the API loses nothing; the guards keep every path from throwing. It needs no
-// permission: the action belongs to the extension.
+// The toolbar badge and the notifications are nudges the popup does not need, so a browser (or
+// the test sandbox) without the API loses nothing; the guards keep every path from throwing.
 async function setBadge(on) {
   const api = browser.action;
   if (!api || typeof api.setBadgeText !== "function" || on === badgeOn) return;
@@ -544,6 +552,36 @@ async function setBadge(on) {
 // server can do anything about it, or newer than the extension.
 function applyBadge(decision) {
   return setBadge(["newer", "cannot", "behind"].includes(decision.server) || decision.extension === "newer");
+}
+
+async function notify(id, title, message) {
+  const api = browser.notifications;
+  if (!api || typeof api.create !== "function") return false;
+  try {
+    await api.create(id, { type: "basic", iconUrl: browser.runtime.getURL("icons/icon-128.png"), title, message });
+    return true;
+  } catch (err) {
+    console.debug("Shisu-ko: notification failed:", err);
+    return false;
+  }
+}
+
+async function clearNotification(id) {
+  const api = browser.notifications;
+  if (!api || typeof api.clear !== "function") return;
+  try {
+    await api.clear(id);
+  } catch (err) {
+    /* already gone */
+  }
+}
+
+// One notification per release and browser session: the version it was shown for sits in
+// storage.session, which the browser clears when it closes, so the next session asks once more.
+async function notifyNewer(latest, serverVersion) {
+  if ((await sessionGet(NOTIFIED_KEY)) === latest) return false;
+  await sessionSet(NOTIFIED_KEY, latest);
+  return notify(UPDATE_NOTIFICATION, `Shisu-ko ${latest} is available`, `The server runs ${serverVersion}. Click to update it now.`);
 }
 
 let lastUpdate; // the update under way; undefined until storage.session has been read once
@@ -583,7 +621,12 @@ async function noteHealth(data) {
     const server = serverInfo(data);
     if (!server || !server.version) return;
     const updated = record.to ? compareVersions(server.version, record.to) >= 0 : server.version !== record.from;
-    if (updated || record.down || Date.now() - record.requestedAt >= UPDATE_SHUTDOWN_MS) await rememberUpdate(null);
+    if (updated) {
+      await rememberUpdate(null);
+      await notify(UPDATED_NOTIFICATION, `Shisu-ko updated to ${server.version}`, "The server restarted with the new version.");
+    } else if (record.down || Date.now() - record.requestedAt >= UPDATE_SHUTDOWN_MS) {
+      await rememberUpdate(null);
+    }
   } catch (err) {
     console.debug("Shisu-ko: could not follow the update:", err);
   }
@@ -603,6 +646,9 @@ async function updateStatus(msg) {
   const check = (await currentCheck(health)) || { latest: null, checkedAt: null, error: null };
   const decision = decisionFor(health, check);
   await applyBadge(decision);
+  // A server seen at the release no longer needs the update the notification offers; a viewer
+  // who restarted run.cmd by hand would otherwise find the offer still up.
+  if (decision.server === "current") await clearNotification(UPDATE_NOTIFICATION);
   const snoozed = await sessionGet(SNOOZE_KEY);
   return {
     latest: check.latest || null,
@@ -622,17 +668,23 @@ async function snoozeUpdate(version) {
   return { ok: true };
 }
 
-let updateInFlight = null; // the request under way, shared by overlapping clicks
+let updateInFlight = null; // the request under way, shared by the popup and the notification
 
 // Ask the server to update itself, once: overlapping requests share one answer, and a request
 // while an update is under way is answered from its record. Resolves {ok: true, restarting: true,
 // from, to, requestedAt, deadline} or {ok: false, error, refused, offline}; it never rejects.
 // `refused` marks the server's own verdict (409: not started by the launcher, or --no-update).
-function updateServer() {
+function updateServer(opts) {
   if (!updateInFlight) {
     updateInFlight = requestUpdate().finally(() => {
       updateInFlight = null;
     });
+    if (opts && opts.watch) {
+      updateInFlight.then((res) => {
+        if (res.ok && !res.already) return watchUpdate();
+        return undefined;
+      }).catch(() => {});
+    }
   }
   return updateInFlight;
 }
@@ -648,8 +700,8 @@ async function requestUpdate() {
   const to = check && check.latest ? check.latest.version : null;
   const server = serverInfo(health);
   const from = server ? server.version : null;
-  // A popup open since before the server was updated another way: nothing to post, and nothing
-  // failed either, which `upToDate` tells apart from a refusal.
+  // The notification can be clicked long after the server was updated another way: nothing to
+  // post, and nothing failed either, which `upToDate` tells the click apart from a refusal.
   if (from && to && compareVersions(from, to) >= 0) return { ok: false, upToDate: true, error: `the server already runs ${from}` };
   const res = await apiRequest("/update", {});
   if (!res.ok) {
@@ -659,18 +711,33 @@ async function requestUpdate() {
   const requestedAt = Date.now();
   const record = { requestedAt, from, to, deadline: requestedAt + UPDATE_WINDOW_MS, down: false };
   await rememberUpdate(record);
+  await clearNotification(UPDATE_NOTIFICATION);
   return { ok: true, restarting: true, from, to, requestedAt, deadline: record.deadline };
 }
 
+// Poll /health for an update nobody watches from a popup; noteHealth() ends the record. Best
+// effort: the browser may end an idle event page first, and the next popup catches up.
+async function watchUpdate() {
+  for (let i = 0; i < UPDATE_WINDOW_MS / UPDATE_POLL_MS; i++) {
+    await sleep(UPDATE_POLL_MS);
+    if (!(await pendingUpdate())) return;
+    await apiRequest("/health");
+  }
+}
+
 // The browser starting, or the extension installed or updated: one /health to the server, whose
-// answer sets the badge (noteHealth()); offline, the last check a server reported decides alone.
-// A profile no server has answered yet asks nothing: its first /health is the popup's, which
-// every viewer opens to set the server up. The extension's own update comes from its store, so
-// a profile whose server is never started still learns of it there.
+// answer sets the badge; offline, the last check a server reported decides alone. When the
+// server could update itself right now, one notification says so. A profile no server has
+// answered yet asks nothing: its first /health is the popup's, which every viewer opens to set
+// the server up. The extension's own update comes from its store, so a profile whose server is
+// never started still learns of it there.
 async function startupCheck() {
   try {
     if ((await storedCheck()) === undefined) return;
-    await apiRequest("/health");
+    const status = await updateStatus({});
+    if (status.decision.server === "newer" && status.latest && status.server) {
+      await notifyNewer(status.latest.version, status.server.version);
+    }
   } catch (err) {
     console.debug("Shisu-ko: update check at start failed:", err);
   }
@@ -683,6 +750,106 @@ for (const event of [browser.runtime.onStartup, browser.runtime.onInstalled]) {
 // The extension once asked GitHub itself and kept the answer under this key (0.23.0 and before).
 if (browser.runtime.onInstalled && typeof browser.runtime.onInstalled.addListener === "function") {
   browser.runtime.onInstalled.addListener(() => browser.storage.local.remove("updateCheck").catch(() => {}));
+}
+
+if (browser.notifications && browser.notifications.onClicked && typeof browser.notifications.onClicked.addListener === "function") {
+  browser.notifications.onClicked.addListener((id) => {
+    if (id !== UPDATE_NOTIFICATION) return undefined;
+    clearNotification(id);
+    // The click asked for something and has no popup to answer in, so a request that did not
+    // get through says so here: the notification would otherwise just vanish as if it had
+    // worked. A server already at the release (updated another way while the notification sat
+    // there) is no failure: the stale notification is gone with the clear above, and that is
+    // all there was to do.
+    return updateServer({ watch: true })
+      .then((res) => (res.ok || res.upToDate ? undefined : notify(UPDATE_FAILED_NOTIFICATION, "Shisu-ko could not update the server", String(res.error || "the server gave no answer"))))
+      .catch(() => {});
+  });
+}
+
+// ------------------------------------------------------------------ the no-Anki fallback
+
+// The viewer's mine with no Anki to write to (the server answered `unreachable`, or mines
+// nothing: `off`) saves the line instead, as 0.21 did: its audio from the server's /clip and the
+// frame the tab drew when the viewer mined, in Downloads/shisu-ko-mining.
+const SAVE_FOLDER = "shisu-ko-mining";
+const CLIP_TIMEOUT_MS = 20000;
+// Long past any local download: an object URL revoked sooner could cut the file short.
+const OBJECT_URL_TTL_MS = 120000;
+const VIDEO_ID_RE = /^[A-Za-z0-9_-]{6,20}$/;
+const FRAME_PREFIX = "data:image/jpeg;base64,";
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}
+
+// Firefox refuses data: URLs in downloads.download (bug 1622986) and takes an object URL made
+// here, in the background page that owns it. Chrome's service worker has no
+// URL.createObjectURL, and takes the data: URL.
+async function downloadBytes(bytes, mime, filename) {
+  const options = { filename, conflictAction: "uniquify", saveAs: false };
+  if (typeof URL === "undefined" || typeof URL.createObjectURL !== "function") {
+    return browser.downloads.download({ ...options, url: `data:${mime};base64,${bytesToBase64(bytes)}` });
+  }
+  const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+  setTimeout(() => URL.revokeObjectURL(url), OBJECT_URL_TTL_MS);
+  return browser.downloads.download({ ...options, url });
+}
+
+// The line's clip as {bytes, mime, ext}, or {error}.
+async function fetchClip(settings, videoId, start, end) {
+  const base = normalizeBase(settings.serverUrl, DEFAULT_SETTINGS.serverUrl);
+  const format = settings.clipFormat === "wav" ? "wav" : "mp3";
+  const path = `/clip?video_id=${videoId}&start=${start.toFixed(3)}&end=${end.toFixed(3)}&format=${format}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CLIP_TIMEOUT_MS);
+  try {
+    const res = await fetch(base + path, { signal: controller.signal });
+    if (!res.ok) return { error: `the server answered HTTP ${res.status}` };
+    const mime = (res.headers.get("Content-Type") || "audio/mpeg").split(";")[0].trim();
+    return { bytes: new Uint8Array(await res.arrayBuffer()), mime, ext: mime === "audio/wav" ? "wav" : "mp3" };
+  } catch (err) {
+    return { error: err && err.name === "AbortError" ? "the server timed out" : "the server is unreachable" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// {ok, message} or {ok: false, error}; never rejects. `frame` is the tab's JPEG data: URL, or
+// null where the video would not be drawn (DRM taints the canvas).
+async function saveMine(msg) {
+  const cue = msg && msg.cue;
+  if (!cue || !Number.isFinite(cue.start) || !Number.isFinite(cue.end) || cue.end <= cue.start) return { ok: false, error: "No line to save" };
+  if (typeof msg.videoId !== "string" || !VIDEO_ID_RE.test(msg.videoId)) return { ok: false, error: "No video to save from" };
+  const settings = await getSettings();
+  const pad = Math.max(0, Math.min(2000, Number(settings.clipPaddingMs) || 0)) / 1000;
+  const name = `${SAVE_FOLDER}/shisuko_${msg.videoId}_${Math.round(cue.start * 1000)}`;
+  const saved = [];
+  const missing = [];
+  try {
+    if (typeof msg.frame === "string" && msg.frame.startsWith(FRAME_PREFIX)) {
+      const binary = atob(msg.frame.slice(FRAME_PREFIX.length));
+      const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+      await downloadBytes(bytes, "image/jpeg", `${name}.jpg`);
+      saved.push("the picture");
+    } else {
+      missing.push("no picture (the video cannot be drawn)");
+    }
+    const clip = await fetchClip(settings, msg.videoId, Math.max(0, cue.start - pad), cue.end + pad);
+    if (clip.bytes) {
+      await downloadBytes(clip.bytes, clip.mime, `${name}.${clip.ext}`);
+      saved.push("the audio");
+    } else {
+      missing.push(`no audio (${clip.error})`);
+    }
+  } catch (err) {
+    return { ok: false, error: "Saving failed: " + String((err && err.message) || err) };
+  }
+  if (!saved.length) return { ok: false, error: "Nothing saved: " + missing.join("; ") };
+  const note = missing.length ? ` (${missing.join("; ")})` : "";
+  return { ok: true, message: `No Anki to mine into: saved ${saved.join(" and ")} to Downloads/${SAVE_FOLDER}${note}` };
 }
 
 // ------------------------------------------------------------------ word colours
@@ -861,6 +1028,8 @@ browser.runtime.onMessage.addListener((msg, sender) => {
       return updateStatus(msg);
     case "updateServer":
       return updateServer();
+    case "saveMine":
+      return saveMine(msg);
     case "snoozeUpdate":
       return snoozeUpdate(msg.version);
     case "cardStatus":

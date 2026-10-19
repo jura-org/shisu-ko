@@ -72,7 +72,9 @@ def test_a_mine_answers_why_nothing_was_attached(rig):
     assert rig.miner.mine_now(s, s.anki, mine("d", cue=99))["status"] == "no_cue"
     assert rig.miner.mine_now(s, s.anki, mine("e", session="old-token"))["status"] == "no_cue"
     rig.anki.down = True
-    assert rig.miner.mine_now(s, s.anki, mine("f"))["message"] == "Anki is not running or AnkiConnect is not installed"
+    down = rig.miner.mine_now(s, s.anki, mine("f"))
+    assert down["message"] == "Anki is not running or AnkiConnect is not installed"
+    assert down["status"] == "unreachable", "the extension saves to Downloads on this status"
     assert [e["nonce"] for e in s.mined] == list("abcdef")
 
 

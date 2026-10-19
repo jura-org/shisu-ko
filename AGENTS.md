@@ -100,8 +100,8 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   request log). The server's daily anonymous `GET` of GitHub's `releases/latest` (`UpdateChecker`,
   reported as `/health`'s `latest`; `--update-check off`, `SHISUKO_NO_UPDATE_CHECK`) is the only
   update check, never with a token, cookie or identifier, and it downloads nothing. The extension
-  holds no `notifications` permission: a newer release is the toolbar badge and the popup's
-  banner. `docs/amo/` states exactly this, so a change here changes them too. On Chrome, the package carries no `key` or
+  tells of a newer release with the toolbar badge, one start-up notification and the popup's
+  banner, all fed from that `latest`. `docs/amo/` states exactly this, so a change here changes them too. On Chrome, the package carries no `key` or
   `update_url` (`scripts/tests/build.test.mjs`), a Web Store install is updated by the store
   (`CHROME_STORE_ID` in `popup.js`) and an unpacked build (the release's zip, `dist/chrome`) only
   by the viewer loading a newer one; this has no counterpart in `docs/amo/`, which is the AMO
@@ -174,7 +174,9 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   。！？) becomes the cue's row, escaped, with Yomitan's `<b>` kept and never past the newline
   seam; any other text stays. A field that changed between the first read and the write is never
   written. The viewer's own mine reaches it as `/sync`'s `mine`. `addon/tests/settings.test.js` holds that no file in `addon/` names `updateNoteFields`,
-  `storeMediaFile`, `addNote` or `browser.downloads`. `--mine auto|off` decides it, off by default
+  `storeMediaFile` or `addNote`, and that `browser.downloads` is used by `saveMine()` alone: the
+  no-Anki fallback, which saves the line's `/clip` audio and the frame the tab drew at the mine to
+  `Downloads/shisu-ko-mining` when the server's mine answer is `unreachable` or `off`. `--mine auto|off` decides it, off by default
   in the container unless `--anki-url` is given. Detail: `docs/dev/mining.md`.
 - The server reads Anki; the extension makes no AnkiConnect call, has no AnkiConnect address and
   no permission dialog. The word colours' deck is `DeckIndexes` in `server.py` (on except in the
@@ -185,12 +187,13 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   change to one is a change to both. The matcher (`buildIndex()`, `markWords()`, the particle
   ruling) stays in words.js alone; the server never marks a line. `background.test.js` greps
   `addon/` for AnkiConnect's port and actions. Detail: `docs/dev/word-colours.md`.
-- The extension's permissions are pinned: `ALLOWED_PERMISSIONS` in `scripts/tests/build.test.mjs`
-  holds both built manifests to the 0.19.1 lists less `downloads`, which went in 0.22.0 with the
-  Downloads fallback, and less `notifications`, which went in 0.24.0 with the update check
-  (`storage`, `tabs`; optional `nativeMessaging`; the YouTube and loopback hosts). Never add a
-  permission or host permission: a new one sends a release to the Chrome Web Store's manual review
-  (`alarms` held 0.21.0 there). Remove one that falls out of use, and edit the list on purpose.
+- The extension's permissions are pinned to the set the Chrome Web Store has published, 0.19.1's:
+  `ALLOWED_PERMISSIONS` in `scripts/tests/build.test.mjs` holds both built manifests to it
+  (`storage`, `downloads`, `tabs`, `notifications`; optional `nativeMessaging`; the YouTube and
+  loopback hosts). Never add or remove a permission or host permission: a change in either
+  direction sends a release to the store's manual review (`alarms` held 0.21.0 there), and only
+  the owner decides one. Each permission needs a real use, since reviewers flag unused ones
+  (`downloads`: `saveMine()`; `notifications`: the update notification).
 - Overlay handlers (`onMineClick`, `onTranscriptClick`, `onSubtitleEnter`, `onSubtitleLeave`, the
   transcript's close button) act only on `ev.isTrusted` events. Server text reaches Anki's HTML
   fields only through `escape_html()` in `server.py`; the overlay shows it through `textContent`.
@@ -484,8 +487,12 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
 - `data_collection_permissions` in the manifest requires `strict_min_version` 140 or later.
 - GitHub allows sixty unauthenticated API requests an hour per address, hence the server's one
   check a day, kept in `~/.shisu-ko/update-check.json` so a restart asks nothing, with a backoff
-  after a failure. Never add a token. The extension asks GitHub nothing and needs no
-  `notifications` permission: the badge, which needs none, took the notification's place.
+  after a failure. Never add a token. The extension asks GitHub nothing.
+- `notifications` is required, not optional: the start-up notification has no popup to ask for
+  a grant.
+- `browser.downloads.download()` refuses `data:` URLs in Firefox. Build a `Blob`, pass
+  `URL.createObjectURL()` from the background page, revoke it later; Chrome's service worker has
+  no `createObjectURL` and takes the `data:` URL (`downloadBytes()`).
 - Regular Firefox only keeps signed add-ons; unsigned builds are temporary installs only.
 - Firefox kills an updated or reloaded extension's content script without running its code; its
   overlay stays in the page, so `ensureOverlay()` removes every `.shisuko-root` and

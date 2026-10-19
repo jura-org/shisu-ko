@@ -63,15 +63,46 @@ function loadBackground(overrides = {}) {
   // storage.session outlives an event page but not the browser; a test hands the same store to a
   // second loadBackground to play a restarted page, or null for a browser without the area.
   const session = overrides.session === null ? undefined : overrides.session || makeMemoryStorage();
-  const listeners = { onMessage: [], onCommand: [], onChanged: [], onTabRemoved: [], onStartup: [], onInstalled: [],
+  const listeners = { onMessage: [], onCommand: [], onChanged: [], onTabRemoved: [], onStartup: [], onInstalled: [], onNotificationClicked: [],
     onTabActivated: [], onWindowFocusChanged: [] };
-  // What the update nudge did: the badge calls, in order. A test passes null for `action` to play
-  // a browser (or a service worker) without the API. There is no notifications API: the manifest
-  // asks for none, and a call to one would throw here.
+  // What the update nudges did: the badge calls and the notifications, in order. A test passes
+  // null for `action` or `notifications` to play a browser (or a service worker) without the API.
   const badge = [];
+  const notifications = [];
+  // The no-Anki fallback's saves: {url, filename, ...}, with the object URLs made and revoked.
+  const downloads = [];
+  const objectUrls = { made: [], revoked: [] };
   const action = overrides.action === null ? undefined : {
     setBadgeText: async (details) => badge.push(["text", details.text]),
     setBadgeBackgroundColor: async (details) => badge.push(["color", details.color]),
+  };
+
+  const notificationsApi = overrides.notifications === null ? undefined : {
+    create: async (id, options) => {
+      notifications.push({ id, ...options });
+      return id;
+    },
+    clear: async (id) => {
+      notifications.push({ id, cleared: true });
+      return true;
+    },
+    onClicked: { addListener: (fn) => listeners.onNotificationClicked.push(fn) },
+  };
+  const downloadsApi = {
+    download: overrides.download || (async (options) => {
+      downloads.push(options);
+      return downloads.length;
+    }),
+  };
+  // Firefox's event page has URL.createObjectURL; Chrome's service worker has none, which a test
+  // plays with `objectUrl: false`.
+  const urlApi = overrides.objectUrl === false ? undefined : {
+    createObjectURL: (blob) => {
+      const url = `blob:test/${objectUrls.made.length}`;
+      objectUrls.made.push({ url, blob });
+      return url;
+    },
+    revokeObjectURL: (url) => objectUrls.revoked.push(url),
   };
 
   const sandbox = {
@@ -79,6 +110,10 @@ function loadBackground(overrides = {}) {
     setTimeout: overrides.setTimeout || setTimeout,
     clearTimeout,
     AbortController,
+    Blob,
+    atob,
+    btoa,
+    URL: urlApi,
     fetch: overrides.fetch || (async () => {
       throw new Error("fetch() was not mocked for this test");
     }),
@@ -113,6 +148,8 @@ function loadBackground(overrides = {}) {
         onFocusChanged: { addListener: (fn) => listeners.onWindowFocusChanged.push(fn) },
       },
       action,
+      notifications: notificationsApi,
+      downloads: downloadsApi,
     },
   };
   sandbox.globalThis = sandbox;
@@ -130,7 +167,7 @@ function loadBackground(overrides = {}) {
     "globalThis.DEFAULT_SETTINGS = DEFAULT_SETTINGS; globalThis.REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_MS;" +
       " globalThis.NATIVE_TIMEOUT_MS = NATIVE_TIMEOUT_MS; globalThis.LAUNCHER_HINT = LAUNCHER_HINT;" +
       " globalThis.START_WINDOW_MS = START_WINDOW_MS;" +
-      " globalThis.UPDATE_WINDOW_MS = UPDATE_WINDOW_MS;" +
+      " globalThis.UPDATE_WINDOW_MS = UPDATE_WINDOW_MS; globalThis.UPDATE_POLL_MS = UPDATE_POLL_MS;" +
       " globalThis.SERVER_TOO_OLD_TEXT = SERVER_TOO_OLD_TEXT; globalThis.deckState = () => deckState;" +
       " globalThis.HOLD_TIMEOUT_MS = HOLD_TIMEOUT_MS; globalThis.FOCUS_STALE_MS = FOCUS_STALE_MS;" +
       " globalThis.syncers = syncers; globalThis.activeTabs = activeTabs;",
@@ -159,6 +196,10 @@ function loadBackground(overrides = {}) {
     return Promise.all(fns.slice().map((fn) => fn(installed ? { reason: "update" } : undefined)));
   }
 
+  function clickNotification(id) {
+    return Promise.all(listeners.onNotificationClicked.slice().map((fn) => fn(id)));
+  }
+
   // The clock as background.js reads it (Date.now in the context, which is the sandbox's own
   // realm): a test moves it to play a restart that took longer than a poll interval.
   const setNow = new vm.Script("(at) => { Date.now = () => at; }", { filename: SOURCE_PATH }).runInContext(sandbox);
@@ -173,7 +214,7 @@ function loadBackground(overrides = {}) {
     return Promise.all(listeners.onWindowFocusChanged.slice().map((fn) => fn(windowId)));
   }
 
-  return { sandbox, storage, session, listeners, dispatch, closeTab, badge, startup, setNow,
+  return { sandbox, storage, session, listeners, dispatch, closeTab, badge, notifications, downloads, objectUrls, startup, clickNotification, setNow,
     activateTab, focusWindow };
 }
 

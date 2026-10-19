@@ -67,7 +67,10 @@ the popup's deck list and hint must come from the server. The fixture AnkiConnec
 call, the stored settings name it under 0.22.0's `ankiUrl`, and the run fails on any request to
 it (the 0.22.0 extension fails there). Since 0.24.0 the fixture `/health` carries `latest`, the
 server's update check, naming a release far ahead: the popup's banner and result line and the
-toolbar badge must show it. The run also logs every request the browser makes, the service
+toolbar badge must show it, and at the end, with the fixture `/health` an old server its
+launcher started, the worker's `startupCheck()` must raise the `shisuko-update` notification. A
+mine the fixture answers `unreachable` must end in the no-Anki fallback's toast and two complete
+downloads. The run also logs every request the browser makes, the service
 worker's included (it must see a `/health`), and fails on any host but 127.0.0.1 and the routed
 YouTube page. The attach
 itself is the server's and is tested in `server/tests/test_mining.py` and `test_mining_sync.py`.

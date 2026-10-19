@@ -15,7 +15,8 @@ popup dictionaries such as Yomitan can scan them. Sentence mining is the server'
 extension passes the user's Anki field names and clip settings to it inside the same request, and
 the viewer's Alt+Shift+M as a field of the next one; the server writes the line's audio and a
 frame of the video into Anki through the AnkiConnect add-on (http://127.0.0.1:8765). The
-extension never writes to Anki, never contacts AnkiConnect and saves no files. Two further
+extension never writes to Anki, never contacts AnkiConnect, and saves files only when there is
+no Anki to mine into (downloads, below). Two further
 options, off by default, colour the words of a line that have a card by the card's state and draw
 an overbar in the colour of the card's pitch accent; the server reads that deck from Anki and
 sends each card's word, state and pitch accent back with the cues. The text stays text nodes,
@@ -158,9 +159,24 @@ PERMISSIONS
   script that draws the subtitles.
 - host permissions http://127.0.0.1/* and http://localhost/*: the companion server (port 8790),
   whose URL is a setting with this default.
-- No notifications permission (0.9.0 to 0.23.0 held one): a newer release is shown by the
-  toolbar badge (browser.action.setBadgeText "1", which needs no permission) and the popup's
-  banner.
+- notifications: three notifications, all created in background.js (ids shisuko-update,
+  shisuko-updated and shisuko-update-failed). "Shisu-ko <release> is available" / "The server
+  runs <server's version>. Click to update it now." when the server's check (below) names a
+  newer release and the running server can update itself, at most once per release and browser
+  session, and only at browser start (runtime.onStartup / onInstalled); the popup sets the badge
+  and the banner and never notifies. "Shisu-ko updated to <version>" once the server answers
+  with the new version after an update. "Shisu-ko could not update the server" / the error, only
+  when the request set off by a click on the first notification fails. Clicking the first one
+  runs the same update as the popup's Update button; a click on the other two does nothing. It
+  is a required permission because the first notification comes at browser start, where no
+  popup is open to ask for a grant.
+- downloads: the no-Anki fallback. When the viewer mines (Alt+Shift+M or a line's pickaxe) and
+  the server answers that Anki is not running (or that it mines nothing), background.js
+  (saveMine) saves the line's audio, from the local server's /clip, and a frame of the video the
+  content script drew onto a canvas when the viewer mined, to Downloads/shisu-ko-mining, with
+  browser.downloads.download and a blob: URL created in the background page and revoked two
+  minutes later. To see it: quit Anki, play a video, press Alt+Shift+M; the toast names the two
+  files.
 - The update check is the server's, not the extension's: server/server.py (UpdateChecker) sends
   GET https://api.github.com/repos/Multysquid/shisu-ko/releases/latest (headers Accept:
   application/vnd.github+json and User-Agent: Shisu-ko/<version>; no cookies, no token, no

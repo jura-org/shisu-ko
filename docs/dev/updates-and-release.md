@@ -5,7 +5,8 @@ How the server checks for a new release, how the add-on tells the viewer and ask
 ## How the update check works
 
 The server asks GitHub; the add-on asks the server. Since 0.24.0 the extension makes no request
-beyond the viewer's machine and holds no `notifications` permission. The server's side is
+beyond the viewer's machine; its badge, notification and banner all come from the server's
+answer. The server's side is
 `UpdateChecker` in `server/server.py`; the add-on's is the "updates" section of
 `addon/background.js` and `popup.js`. Neither installs anything: the server's updates are
 `update.py`'s, run by the launcher (`POST /update`, below); the extension's come from the
@@ -50,9 +51,10 @@ no `.xpi` handling; every GitHub release carries an `.xpi` AMO signed for self-d
   when it changed (`rememberCheck()`) and sets the badge. While the server is offline the stored
   check decides (`currentCheck()`), so an extension behind still gets its badge and line; an
   online server's answer always replaces it, its null included.
-- When (add-on). `startupCheck()` on `runtime.onStartup` and `onInstalled` sends one `/health`
-  to the server, but only once some server has answered this profile (`serverLatest` present): a
-  fresh profile asks nothing until the popup opens, which keeps `scripts/browser-smoke.mjs`'s
+- When (add-on). `startupCheck()` on `runtime.onStartup` and `onInstalled` asks the server's
+  `/health` once (`updateStatus({})`) and, for `newer`, notifies (below), but only once some
+  server has answered this profile (`serverLatest` present): a fresh profile asks nothing until
+  the popup opens, which keeps `scripts/browser-smoke.mjs`'s
   fresh Chromium profile quiet at install. `onInstalled` also removes 0.23.0's own `updateCheck`
   record.
 - Decision. `parseVersion("v0.9.0") -> [0, 9, 0]` (non-numeric or missing parts are 0),
@@ -71,8 +73,14 @@ no `.xpi` handling; every GitHub release carries an `.xpi` AMO signed for self-d
 - Ask. `applyBadge()` sets the toolbar badge (`action.setBadgeText` "1", `BADGE_COLOR`
   `#5b6fb8`, never the alert red; no permission needed) for `newer`, `cannot`, `behind` or a
   newer extension and clears it otherwise; `setBadge()` skips a call that would change nothing
-  (`badgeOn`) and tolerates a missing API (the test sandbox, a content script). The badge is the
-  only nudge outside the popup: there is no system notification. The popup's banner
+  (`badgeOn`) and tolerates a missing API (the test sandbox, a content script).
+  `notifyNewer()` creates one system notification per release and browser session
+  (`notifiedVersion` in `storage.session`; id `shisuko-update`, "Shisu-ko <latest> is
+  available" / "The server runs <server>. Click to update it now."), only for `newer`, only from
+  the start-up check. `notifications.onClicked` runs `updateServer({watch: true})`; a request
+  that fails there gets a notification of its own (`shisuko-update-failed`, whose click does
+  nothing), except when the server already runs the release (`upToDate: true`); `updateStatus()`
+  clears `shisuko-update` whenever the decision is `current`. The popup's banner
   (`#update-banner`, `renderUpdate()`) names the release and the server's version with
   **Update** and **Not now** for `newer`, the reason and no Update button for `cannot` ("was not
   started by run.cmd / run.sh", the one text for every blocker, since `/health` carries only the
@@ -86,18 +94,22 @@ no `.xpi` handling; every GitHub release carries an `.xpi` AMO signed for self-d
   (`updateSnoozed` = latest in `storage.session`). `#update-result` in the last drawer shows the
   server's check ("Newest release: 0.9.0, the server checked 3 min ago", "No release found, …",
   "The server's update check failed: <error> (last seen: X)"); there is no button to check now.
-- Update. Popup **Update** -> `{type: "updateServer"}` -> `requestUpdate()`: `/health` first
+- Update. Popup **Update** or the notification click -> `{type: "updateServer"}` ->
+  `requestUpdate()`: `/health` first
   (so a spent record ends, see below), refuse without a POST (`{ok: false, upToDate: true,
   error}`) when the server already runs >= latest, else `POST /update` through `apiRequest()`.
   On `{ok: true, restarting: true}` the record `serverUpdate` `{requestedAt, from, to, deadline,
   down}` (`deadline` = `UPDATE_WINDOW_MS`, 120 s: the launcher's update plus a model load) goes
-  to `storage.session` with a memory fallback (`sessionGet` / `sessionSet`) and the popup gets
+  to `storage.session` with a memory fallback (`sessionGet` / `sessionSet`), the notification is
+  cleared and the popup gets
   `{ok, restarting, from, to, requestedAt, deadline}`; a 409 passes the server's text through as
   `{ok: false, error, refused: true}` (the banner shows it and drops the button), unreachable is
   `offline: true`. In `noteHealth()` no answer marks the record `down`; a version >= `to` ends
-  it; the old version ends it too once the server was seen down or `UPDATE_SHUTDOWN_MS` (10 s)
+  it and notifies "Shisu-ko updated to <version>" (`shisuko-updated`); the old version ends it too once the server was seen down or `UPDATE_SHUTDOWN_MS` (10 s)
   has passed since the request (the old server closes its port within a second), because the
-  old code back after a restart means `update.py` could not update. The popup's `updateFlow`
+  old code back after a restart means `update.py` could not update. The notification path has
+  no popup polling, so `watchUpdate()` polls `/health` every `UPDATE_POLL_MS` (3 s) until the
+  record ends. The popup's `updateFlow`
   (`idle -> requesting -> updating -> done | stale | failed | lost`) follows it: badge "Updating
   server" with "Restarting with <latest>…", then "Updated to <version>", `stillOldHint()` ("The
   server restarted but still runs X; look at its window: update.py said why", banner stays) or,
@@ -107,8 +119,9 @@ no `.xpi` handling; every GitHub release carries an `.xpi` AMO signed for self-d
   (`updateAsked`) so a slow answer cannot overwrite the verdict for the server now on screen. It
   resolves to whether an answer was taken, and the banner is painted again only then. A reopened
   popup resumes the flow from `startServerStatus` (`updating`) before its first paint.
-- Chrome. `browser-api.js` bridges `action.setBadgeText` / `setBadgeBackgroundColor` and
-  `tabs.create`; the endpoint is plain HTTP, so the flow is the same there. The extension itself
+- Chrome. `browser-api.js` bridges `action.setBadgeText` / `setBadgeBackgroundColor`,
+  `notifications.create` / `clear` (with `onClicked` passed through), `downloads.download` (the
+  no-Anki fallback, `mining.md`) and `tabs.create`; the endpoint is plain HTTP, so the flow is the same there. The extension itself
   is another matter: an install from the Chrome Web Store (`CHROME_STORE_ID` in `popup.js`,
   `ecenifonpkaiccmmknpbllbebbfigjnm`; `CHROME_STORE_INSTALL`: `runtime.getURL("")` is exactly
   `chrome-extension://<id>/`) is updated by Chrome from the store, once the store has reviewed the
@@ -133,12 +146,13 @@ null, decision, snoozed, updating, extensionVersion}`; `updateServer` -> as abov
 Tests: `server/tests/test_update_check.py` (the request's headers, the day's cache, the backoff,
 the off switch, `/health`'s shape, the version ports), `addon/tests/background.test.js`,
 `addon/tests/popup.test.js`, `addon/tests/browser-api.test.js`, `addon/tests/settings.test.js`
-(no `notifications`; one `fetch()`, to the server, and no remote address but the release page
-link), `addon/tests/popup-copies.test.js`, and `scripts/browser-smoke.mjs`, whose fixture
-`/health` carries `latest` and whose request log, the service worker's included, must hold no
+(`notifications` required and used; every `fetch()` to the server, and no remote address but
+the release page link), `addon/tests/popup-copies.test.js`, and `scripts/browser-smoke.mjs`,
+whose fixture `/health` carries `latest`, whose end raises the `shisuko-update` notification
+from an old fixture server, and whose request log, the service worker's included, must hold no
 host but 127.0.0.1 and the routed YouTube page. `addon/tests/_loadBackground.js` stubs `action`,
-`runtime.onStartup` / `onInstalled` / `getManifest` and exposes `startup()` and `setNow()`; it
-has no notifications API.
+`notifications`, `downloads`, `runtime.onStartup` / `onInstalled` / `getManifest` and exposes
+`startup()`, `clickNotification()` and `setNow()`.
 
 ## Release
 
