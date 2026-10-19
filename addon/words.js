@@ -223,7 +223,8 @@ const SHISUKO_WORDS = (() => {
   // Ruby readings, and the parentheses shown around them where ruby is not supported. HTML lets
   // the end tag of <rt> and <rp> be left out before the next <rt>, <rp> or </ruby>
   // (<ruby>食<rt>た</ruby>べる), so the reading runs to the next end tag of any of the three, the
-  // rule match.js's RUBY reads by too, so a card's word and its sentence read alike. The end tag
+  // rule the server's matcher reads by too (_RUBY in server.py), so a card's word and its
+  // sentence read alike. The end tag
   // goes with the match rather than being left to TAGS (a lookahead): that keeps a field of
   // unclosed <rt> at milliseconds, and TAGS would drop it anyway.
   const RT_RP = /<(?:rt|rp)\b[^<>]*>[\s\S]*?<\/(?:rt|rp|ruby)\b[^<>]*>/gi;

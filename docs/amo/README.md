@@ -30,8 +30,8 @@ Screenshot captions, in order:
 | File | Caption |
 |---|---|
 | `01-subtitles.png` | Live subtitles drawn over the player as real text, a few seconds behind the transcription running on your own machine. |
-| `02-yomitan-lookup-anki.png` | Hover a line and the video waits. Look the word up with Yomitan, add the card, and Shisu-ko attaches the frame and the sentence audio. |
-| `03-hover-pickaxe.png` | The pickaxe on a hovered line (or Alt+Shift+M) mines the sentence by hand, into the newest Anki card or into Downloads. |
+| `02-yomitan-lookup-anki.png` | Hover a line and the video waits. Look the word up with Yomitan, add the card, and the Shisu-ko server attaches a frame and the sentence audio. |
+| `03-hover-pickaxe.png` | The pickaxe on a hovered line (or Alt+Shift+M) mines the sentence by hand, into the newest Anki card. |
 | `04-transcript-and-style.png` | The transcript panel lists every line so far; timestamps seek, pickaxes mine. Font, position, colour and outline are adjustable. |
 | `05-settings-popup.png` | Every setting lives in the toolbar popup; the switch in its header turns the whole extension off and on. |
 

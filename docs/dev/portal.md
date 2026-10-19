@@ -97,7 +97,9 @@ audio, Reading, Furigana, Pitch, Frequency, Definition/Meaning/Glossary, and the
 Word/Expression/Front or, failing all, the first field (Anki's duplicate check compares it). The
 picture and the sentence audio are fetched only when a field uses them.
 
-Media files are named like the extension's: `shisuko_<video>_<start ms>.jpg` / `.mp3`.
+Media files are named like the server's mined ones: `shisuko_<video>_<start ms>.jpg` / `.mp3`.
+The server's own miner (`mining.md`) leaves the portal's notes alone: they arrive with their picture
+and audio, and the portal's `/sync` carries no `anki` settings, so its sessions are never mined for.
 
 ## The video: an HLS proxy
 

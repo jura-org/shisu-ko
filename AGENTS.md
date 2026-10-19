@@ -14,8 +14,7 @@ plus sentence audio into the newest Anki card via AnkiConnect.
 
 ```
 addon/        Firefox source extension, Manifest V3, plain JS; directly loadable without a build
-              (match.js and words.js are shared by background.js and content.js; loaded before
-              both, in that order)
+              (words.js is shared by background.js and content.js and loaded before both)
 server/       server.py (single file) + setup/run scripts + update.py; runtime data in ~/.shisu-ko
               native_host.py: the native-messaging host behind the popup's "Start server" button
               (stdlib only); Firefox and Chrome run it through native-host.cmd / native-host.sh
@@ -69,7 +68,10 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   (`update_origin_allowed()`: the extension or no `Origin` at all) and answers 409 unless the server
   was started by `run.cmd` / `run.sh` (`SHISUKO_LAUNCHER=1`) without `--no-update` or
   `SHISUKO_NO_UPDATE` (`App.update_blocker()`); else it exits with `EXIT_UPDATE` (4). The server
-  never spawns `update.py` and never downloads a release itself; the launcher does.
+  never spawns `update.py` and never downloads a release itself; the launcher does. Mining added
+  no endpoint: `/sync` takes the optional `anki`, `mine` and `mined_since` and answers `mined`,
+  `mined_next` and `anki_error` only to a body carrying `anki` or `mined_since`, so every other
+  client's answer is unchanged.
 - A cue's word timings (`words`) and source (`src`, `"human"` on a line from the creator's
   subtitles) are opt-in on `/sync`: only a body with `"words": true` gets them, and the default
   response never changes (`without_words()`, `OPT_IN_CUE_FIELDS`). Their texts join to the cue's text
@@ -148,8 +150,8 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   `CACHE_FORMAT` bump, and `covered` still means what Whisper has seen. Detail:
   `docs/dev/cue-building.md`, "Human subtitles".
 - `enabled` is the master switch (popup header toggle, Alt+Shift+S). Off means nothing happens on
-  YouTube pages: no `/sync`, no overlay, no native-caption hiding, no arrow keys, no Anki polling,
-  no mining, no known word marked, no status badge switched, no `cardStatus` ask
+  YouTube pages: no `/sync`, no overlay, no native-caption hiding, no arrow keys, no mining (no
+  `/sync` means no session the server attaches for, and no `mine`), no known word marked, no status badge switched, no `cardStatus` ask
   (`wordColoursOn()` includes `enabled`). Only the toggle command keeps working.
 - Anki sync after mining is the server's job; clients never call AnkiConnect `sync`. `AnkiWatcher`
   in `server.py` looks at `findNotes` `added:2` every 15 s (the first answer is the baseline,
@@ -158,14 +160,24 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   by default in the container unless `--anki-url` is given; `/health` reports it as
   `anki_sync: {state, last, error}`. The extension's `enabled` has no say in it. Detail:
   `docs/dev/server-runtime.md`, "How the Anki sync after mining works".
+- The server attaches; the extension never writes to Anki. `Miner` in `server.py` gives a note
+  Yomitan made its line's audio and picture, in empty fields only. The one write into a filled
+  field is `grow_sentence()`: a sentence that is a fragment of the matched cue (Yomitan cuts at
+  。！？) becomes the cue's row, escaped, with Yomitan's `<b>` kept and never past the newline
+  seam; any other text stays. A field that changed between the first read and the write is never
+  written. The viewer's own mine reaches it as `/sync`'s `mine`. The extension reads Anki for the word colours
+  alone; `addon/tests/settings.test.js` holds that no file in `addon/` names `updateNoteFields`,
+  `storeMediaFile`, `addNote` or `browser.downloads`. `--mine auto|off` decides it, off by default
+  in the container unless `--anki-url` is given. Detail: `docs/dev/mining.md`.
 - The extension's permissions are pinned: `ALLOWED_PERMISSIONS` in `scripts/tests/build.test.mjs`
-  holds both built manifests to the 0.19.1 lists (`storage`, `downloads`, `tabs`,
-  `notifications`; optional `nativeMessaging`; the YouTube and loopback hosts). Never add a
+  holds both built manifests to the 0.19.1 lists less `downloads`, which went in 0.22.0 with the
+  Downloads fallback (`storage`, `tabs`, `notifications`; optional `nativeMessaging`; the YouTube
+  and loopback hosts). Never add a
   permission or host permission: a new one sends a release to the Chrome Web Store's manual review
   (`alarms` held 0.21.0 there). Remove one that falls out of use, and edit the list on purpose.
 - Overlay handlers (`onMineClick`, `onTranscriptClick`, `onSubtitleEnter`, `onSubtitleLeave`, the
   transcript's close button) act only on `ev.isTrusted` events. Server text reaches Anki's HTML
-  fields only through `escapeHtml()` in `background.js`; the overlay shows it through `textContent`.
+  fields only through `escape_html()` in `server.py`; the overlay shows it through `textContent`.
 - Live streams run on the stream's media clock (`getProgressState().current`), never on
   `video.currentTime`. Every read or seek of the playhead goes through `playhead()` /
   `seekPlayhead()`.
@@ -271,12 +283,16 @@ and `entry_point()`, `run_probe_gpu()`, `server/amd_setup.py`. Launcher rules th
   whose exit code nothing reads (`|| true` in `setup.sh`).
 
 **Mining** (`docs/dev/mining.md`). `electSyncTab()` in `background.js` picks the one tab whose
-`/sync` reaches the server; it never names a tab that did not ask. `ankiPoll()` watches for the note
-Yomitan just created; `addToAnki()` refuses a note whose sentence does not match (`MIN_SIMILARITY`).
-A mined card gets exactly the cue on screen: `sentenceForCue(cue)` in `content.js` is the one
-place that decides it, and cues are never rejoined by `seg`. `SHISUKO_MATCH` (`addon/match.js`)
-scores cards against cues; `premined` in `background.js` holds frames and clips captured while a
-line played.
+`/sync` reaches the server; it never names a tab that did not ask. In `server.py`,
+`AnkiWatcher.poll()` hands new note ids to `Miner.notes_added()` (every 3 s while a client mines,
+`Miner.watching()`); `Miner.attach_new()` matches a fresh note to a watched session's cues
+(`best_cue()`, the port of 0.21.1's `match.js`, `MIN_SIMILARITY` 0.6) and `Miner.attach()` writes
+its empty fields; `Miner.mine_now()` takes `/sync`'s `mine`; `FrameGrabber` takes the picture from
+YouTube's stream. A mined card gets exactly the cue: `Miner.clip()` cuts that cue's start to end,
+`grow_sentence()` grows Yomitan's fragment to that cue and no further, and cues are never
+rejoined by `seg`. In `content.js`, `ankiForSync()` builds `/sync`'s `anki`,
+`mineCue()` / `pendingMine()` send a mine until `takeMined()` reads its answer, and `minedNote`
+tells the background a note's deck.
 
 **Word colours** (`docs/dev/word-colours.md`). `addon/words.js` (`SHISUKO_WORDS`, pure) parses
 fields and marks words (`buildIndex()`, `markWords()`); `cardStatus()` / `fetchDeckIndex()` in
@@ -452,7 +468,10 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
   overlay stays in the page, so `ensureOverlay()` removes every `.shisuko-root` and
   `.shisuko-outside` first. Chrome's
   orphans keep running and shut themselves down (`runtimeAlive()`).
-- Screenshots fail on DRM-protected videos (tainted canvas); the audio clip still works.
+- A mined card's picture comes from YouTube's stream through yt-dlp (`FrameGrabber`), not from
+  the browser: a DRM-protected video, or one yt-dlp cannot resolve, gets the audio alone. A DRM,
+  live or no-stream verdict is kept for the stream's 4 hours; any other failed resolve for
+  `FRAME_RETRY` (10 min), so a bot check or a network blip does not cost the afternoon's pictures.
 - The native server and the container both use port 8790; run one at a time.
 - Firefox and Chrome run a `.cmd` native host through `cmd.exe`: the wrapper must print nothing
   (`@echo off` first), the host must accept the browsers' arguments (Firefox's two, Chrome's origin
@@ -462,8 +481,6 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
   service worker runs: `browser-api.js` looks it up on `chrome.runtime` at each use, never at load.
 - `scripts/browser-smoke.mjs` waits for `#server-status` to read exactly `Server offline` and then
   `Server online`; keep those badge texts.
-- `browser.downloads.download()` refuses `data:` URLs. Build a `Blob`, pass
-  `URL.createObjectURL()` from the background page, revoke it later.
 - The toolbar popup dies with the click that closes it: `flushSave()` sends before any `await`,
   sends only the `dirty` fields, and a focused field takes outside changes unless the viewer is
   typing (`typing()`). `saveSettings()` in `background.js` runs one save at a time (`saveChain`).
@@ -484,7 +501,8 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
    `reviewer-notes.md` must each stay within AMO's 3,000 characters (see "Release"; `npm test`
    fails otherwise).
 3. Run the checks above, then test manually on a real YouTube video: subtitles appear, hover
-   pauses, transcript panel works, Alt+Shift+M produces a toast and (with Anki running) fills the card.
+   pauses, transcript panel works, and (with Anki running) a Yomitan card gets its audio and
+   picture from the server within seconds, and Alt+Shift+M fills the newest card with a toast.
 4. Update README sections that describe changed behaviour; keep this file's invariants current,
    and the matching `docs/dev/` file.
 5. Commit with a descriptive message; do not commit `.env`, `dist/` or anything from `~/.shisu-ko`.

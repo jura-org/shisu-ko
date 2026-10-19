@@ -10,7 +10,7 @@ and how the server tests keep away from the real data folder.
 it never maintains a second application copy. `npm run watch` rebuilds after edits; reload the
 unpacked extension in `chrome://extensions` and reload the YouTube tab. The build writes
 versioned Firefox and Chrome ZIPs and excludes `addon/tests`, dotfiles, and development metadata.
-Chrome's `service-worker.js` loads `browser-api.js`, `settings.js`, `match.js`, `words.js` and
+Chrome's `service-worker.js` loads `browser-api.js`, `settings.js`, `words.js` and
 `background.js` in that order with classic `importScripts`, so settings globals retain the same
 behavior as Firefox; `addon/tests/settings.test.js` and `scripts/tests/build.test.mjs` hold that
 order. Chrome refuses an extension whose `commands` suggest more than four shortcuts, so
@@ -33,14 +33,14 @@ PNG file in the package.
 `server/tests/_serverlib.py` loads `server.py` the way `cue-building.md` recommends
 (`sys.modules` registration before `exec_module`), with `SHISUKO_HOME` pointed at a temporary
 folder first ("Server tests" below). `addon/tests/_loadBackground.js` runs
-`background.js` in a Node `vm` sandbox with `browser`/`fetch`/`btoa` stubbed out — top-level
+`background.js` in a Node `vm` sandbox with `browser`/`fetch` stubbed out — top-level
 `function` declarations become sandbox properties, but `const`/`let` (`DEFAULT_SETTINGS`,
 `REQUEST_TIMEOUT_MS`, `CARD_STATUS_TTL_MS`, `DECK_SEEN_KEY`, `DECK_NOTES_KEY`, `DECK_NOTES_FORMAT`) need an extra
 script run in the same context to expose them, since they live in the global lexical environment
-rather than as globalThis properties; it loads `settings.js`, `match.js` and `words.js` first,
+rather than as globalThis properties; it loads `settings.js` and `words.js` first,
 like the manifest. `addon/tests/_loadContent.js` does the same for `content.js` by rewriting
 its IIFE to return its pure helpers (`shouldSync`, `mergeCues`, `findActiveCue`, `jumpTarget`,
-`fontStack`, `modelForSync`, ...), the handlers that drive them (`sync`, `premineNow`,
+`fontStack`, `modelForSync`, ...), the handlers that drive them (`sync`, `takeMined`, `pendingMine`,
 `onKeyDown`, `onMineClick`, `discover`, ...), the word-colour functions (`renderText`,
 `refreshWordMarks`, `pollWordIndex`, `wordColoursOn`, `syncTick`, `setSubtitle`,
 `transcriptLine`, `mineCue`), the `browser.storage.onChanged` listener as `onSettingsChanged`
@@ -56,10 +56,22 @@ fire) and plays the background with a `getSettings` / `saveSettings` pair that m
 When adding a new setting or a new pure helper, add a matching test rather than only exercising
 it manually.
 
+`scripts/browser-smoke.mjs` (`npm run test:browser`, Playwright's Chromium) drives the packaged
+Chrome build against local fixtures: a fixture server answering `/health` and `/sync`, and a
+fixture AnkiConnect. Since 0.22.0 its fixture server keeps a mining log the way `server.py` does
+(one entry per mine nonce, `mined` / `mined_next` from the cursor): a line's pickaxe must put
+`mine` on the next `/sync` with the popup's `anki` settings, stop sending it once the log answers
+it, and toast the answer, and the popup's field names must reach the server in `/sync`. The
+fixture AnkiConnect answers only reads (`requestPermission`, `findCards`, `getDecks` for the deck
+a mined note went to) and the run fails on any write or `sync` from the extension. The attach
+itself is the server's and is tested in `server/tests/test_mining.py` and `test_mining_sync.py`.
+
 ## Server tests
 
 `python -m pytest server/tests` needs only `server/requirements-test.txt` (pytest, pytest-xdist and
-numpy): the tests fake faster-whisper, CTranslate2, PyTorch and yt-dlp where they need them. CI
+numpy): the tests fake faster-whisper, CTranslate2, PyTorch, yt-dlp and AnkiConnect where they need them;
+the frame decode test (`test_mining.py`) runs on a tiny MPEG-TS file it writes with PyAV, and is
+skipped without PyAV. CI
 runs them on Ubuntu with Python 3.10, 3.12 and 3.13 and on Windows with 3.12, none of them with a
 GPU.
 

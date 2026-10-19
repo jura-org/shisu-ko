@@ -10,9 +10,9 @@
  *  - render the active cue as ordinary DOM text over the player so dictionary
  *    extensions such as Yomitan can scan it; pause the video while the text is hovered
  *  - optional transcript panel listing every cue (also plain text)
- *  - sentence mining: grab the current video frame and ask the background script to
- *    fetch the matching audio clip and file both into Anki or the Downloads folder, either on
- *    demand or by itself as soon as Yomitan has added a card
+ *  - sentence mining is the server's: it attaches a line's audio and picture to the card Yomitan
+ *    made from it. This script sends the popup's Anki settings with every /sync, the viewer's own
+ *    mine (Alt+Shift+M, a line's button) with the next one, and toasts what the server reports
  */
 
 (() => {
@@ -35,12 +35,6 @@
   // The server's own --lookahead default: it transcribes no further ahead than this, so once the
   // covered range reaches it there is nothing left to ask for until the playhead moves.
   const SYNC_LOOKAHEAD_S = 900;
-  // A video paused this long with nobody reading the subtitle is not being mined from.
-  const PAUSE_POLL_IDLE_MS = 120000;
-  // Past that, a hover pause is still polled, at this cadence: the dictionary popup is an iframe
-  // whose pointer the page never sees, so a viewer reading a long entry looks parked, and the
-  // background drops the card they then make after a gap over its ANKI_BASELINE_MAX_AGE_MS (10 s).
-  const PAUSE_POLL_SLOW_MS = 5000;
   const RESUME_DELAY_MS = 350;
   const TOAST_MS = 3500;
   const TOAST_MAX_CHARS = 240;
@@ -48,12 +42,9 @@
   const STATUS_ERROR_MAX_CHARS = 160;
   const STATUS_NAME_MAX_CHARS = 100;
   const MINE_RECENT_WINDOW_S = 6;
-  const HOVER_CAPTURE_DELAY_MS = 400;
-  // Long enough that skimming through a video prepares nothing, short enough that a sentence the
-  // viewer actually reads is ready before the lookup. Reading a frame back stalls the main thread,
-  // so it must not happen on the tick that puts the line on screen.
-  const PREMINE_CAPTURE_DELAY_MS = 400;
-  const ANKI_POLL_LOG_MS = 60000;
+  // A mine the server has not answered by then is given up: it waits up to a minute for audio
+  // still being fetched, and a server older than 0.22.0 never answers one at all.
+  const MINE_TIMEOUT_MS = 90000;
   // The deck index behind the word colours is asked for this often (the background keeps it as
   // long, so most asks come back "unchanged"); a failing ask is logged this often.
   const WORD_INDEX_REFRESH_MS = 30000;
@@ -72,8 +63,6 @@
   // The honorific prefixes ICU cuts off the word they front (お|風呂, ご|家族), as words.js has
   // them: pointed at, the word is meant, not the prefix (knownTarget).
   const HONORIFICS = new Set(["お", "ご"]);
-  // A card is most likely to appear while a subtitle is hovered.
-  const HOVER_POLL_INTERVAL_MS = 300;
   // A blank shorter than this reads as a flicker rather than a pause, so the text is held instead.
   const MIN_BLANK_S = 0.3;
   const CUE_LEAD_IN_S = 0.15;
@@ -192,9 +181,6 @@
     transcriptHovered: false,
     hoverPaused: false,
     awaitingPlayerMove: false,
-    // When the pointer was last over the subtitle or the player: a hover pause whose viewer has
-    // not been seen for as long as a plain pause is given is not a lookup any more (ankiPollAllowed).
-    hoverSeenAt: 0,
     resumeTimer: null,
     lastPointer: { x: 0, y: 0 },
     // Whether the pointer is over the player now, that is whether lastPointer still says where it
@@ -204,23 +190,12 @@
     // The playhead on the video's own clock as of the last request outside an ad, or where the
     // video will start before the first: what is sent while an ad runs on its clock (see sync).
     contentPlayhead: 0,
-    mining: false,
-    // What the background holds ready for this tab, newest sentence first: [{ key, cueIds, image,
-    // audio }]. Replaced by every premine reply; the payloads themselves never come back here.
-    premined: [],
-    // Premine and reset messages go out one at a time, each once the one before was answered (see
-    // premineTurn); the count is what is queued or out, so a reset knows there is something to drop.
-    premineQueue: Promise.resolve(),
-    premineInFlight: 0,
-    premineTimer: null,
-    hoverCaptureTimer: null,
-    // The sentence and position of the last hover frame sent: a second entry on the same paused
-    // frame reads nothing back (captureHoverFrame).
-    hoverShot: null,
-    transcriptHoverTimer: null, // the transcript line under the pointer, about to be ranked first
-    ankiPollInFlight: false,
-    lastAnkiPollAt: 0, // when the last Anki poll went out: the slow cadence of a long hover pause
-    lastAnkiPollLog: 0,
+    // The viewer's own mine until the server answers it: { cue_id, nonce, session, at, generation },
+    // sent with every /sync (see mineCue), or null.
+    mining: null,
+    // The cursor into the server's mining log (/sync's `mined_next`); null asks where it stands.
+    minedSince: null,
+    ankiError: null, // the last `anki_error` the server gave, toasted once
     // The deck's words as SHISUKO_WORDS.buildIndex() holds them, for the word colours: `at` is the
     // background's timestamp of the entries it was built from (the `since` of the next ask), `key`
     // a fingerprint of those entries, so an index refetched unchanged does not redraw the transcript.
@@ -249,7 +224,6 @@
     videoListeners: null,
     lastSeekSync: 0,
     lastSyncAt: 0,
-    pausedSince: 0, // when the video was last paused, 0 while it plays
     lastHref: null,
     rediscover: true, // re-query the player and video on the next discover() tick
     // A live stream's cues sit on the stream's media clock, which the player exposes as
@@ -277,9 +251,6 @@
     timers.length = 0;
     endDrag(null);
     detach();
-    clearHoverCapture();
-    clearTranscriptHover();
-    clearPremineTimer();
     clearResumeTimer();
     // An orphaned instance must stop swallowing arrow keys; the fresh one owns them now.
     window.removeEventListener("keydown", onKeyDown, true);
@@ -617,7 +588,7 @@
     mineBtn.type = "button";
     mineBtn.className = "shisuko-mine";
     mineBtn.textContent = "⛏";
-    mineBtn.title = "Mine this sentence: screenshot + audio (Alt+Shift+M)";
+    mineBtn.title = "Mine this sentence into the newest Anki card: audio + picture (Alt+Shift+M)";
     mineBtn.addEventListener("click", onMineClick);
     subBox.appendChild(mineBtn);
     // The grip moves the box to another dock; the text itself stays free for selection and Yomitan.
@@ -679,7 +650,7 @@
 
   // The overlay lives in the page's DOM, where any script on youtube.com can dispatch a click on
   // the button or a mouseenter on the subtitle; only what the viewer did (isTrusted) may write a
-  // card, save a file, seek or pause. The keyboard commands come through the browser, not the page.
+  // card, seek or pause. The keyboard commands come through the browser, not the page.
   function onMineClick(ev) {
     if (!ev.isTrusted) return;
     ev.preventDefault();
@@ -1078,29 +1049,22 @@
       const onPlay = () => {
         state.hoverPaused = false;
         state.awaitingPlayerMove = false;
-        state.pausedSince = 0;
         clearResumeTimer();
         sync(); // playing again: back to the one second cadence at once, not at the next tick
-      };
-      const onPause = () => {
-        if (!state.pausedSince) state.pausedSince = Date.now();
       };
       video.addEventListener("timeupdate", onTime);
       video.addEventListener("seeking", onSeek);
       video.addEventListener("play", onPlay);
-      video.addEventListener("pause", onPause);
-      state.videoListeners = { onTime, onSeek, onPlay, onPause };
-      if (video.paused) state.pausedSince = Date.now();
+      state.videoListeners = { onTime, onSeek, onPlay };
     }
   }
 
   function detach() {
     if (state.video && state.videoListeners) {
-      const { onTime, onSeek, onPlay, onPause } = state.videoListeners;
+      const { onTime, onSeek, onPlay } = state.videoListeners;
       state.video.removeEventListener("timeupdate", onTime);
       state.video.removeEventListener("seeking", onSeek);
       state.video.removeEventListener("play", onPlay);
-      state.video.removeEventListener("pause", onPause);
     }
     state.videoListeners = null;
     if (state.player) {
@@ -1127,11 +1091,6 @@
     state.transcriptRebuild = true;
     state.transcriptAppendFrom = null;
     state.lineById.clear();
-    clearHoverCapture();
-    clearTranscriptHover();
-    state.hoverShot = null;
-    // The cue ids the held sentences are keyed by mean nothing once the cues are gone.
-    resetPremine();
     setSubtitle(null);
     // setSubtitle() already did this where there is an overlay; without one nothing else would.
     state.activeCueId = null;
@@ -1147,6 +1106,8 @@
     state.offline = false;
     state.serverSession = null;
     state.standby = false;
+    state.mining = null; // its cue is the last video's
+    state.minedSince = null; // another video is another session, with a log of its own
     state.languagePaused = false;
     state.heard = null;
     state.modelLoading = null;
@@ -1154,7 +1115,6 @@
     state.hoverPaused = false;
     state.awaitingPlayerMove = false;
     state.lastSyncAt = 0;
-    state.pausedSince = state.video && state.video.paused ? Date.now() : 0;
     state.live = false;
     state.liveOffset = 0;
     state.serverLive = false;
@@ -1189,9 +1149,10 @@
   // and cues are wanted. While it is paused, only while the server still has work around the
   // playhead, plus a slow heartbeat so a restart, an error or a late cue is still noticed — and so
   // the server does not drop the session for want of a client.
-  // Pure: { paused, t, status, covered, duration, lastSyncAt, standby } and a clock in, a decision out.
+  // A mine the viewer asked for goes out, and is answered, on the next tick.
+  // Pure: { mining, paused, t, status, covered, duration, lastSyncAt, standby } and a clock in, a decision out.
   function shouldSync(st, now) {
-    if (!st.paused) return true;
+    if (!st.paused || st.mining) return true;
     if (now - (st.lastSyncAt || 0) >= SYNC_IDLE_INTERVAL_MS) return true;
     // Standing by, paused: the heartbeat above is the whole cadence. Its status was left wherever
     // the last real answer put it, so without this the rule below would make the tab ask every
@@ -1208,9 +1169,9 @@
   function syncTick() {
     const video = state.video;
     if (!video) return;
-    pollForNewCard();
     pollWordIndex();
     const decision = {
+      mining: !!state.mining,
       paused: !!video.paused,
       t: playhead(),
       status: state.serverStatus,
@@ -1237,6 +1198,7 @@
       updateLiveClock();
       state.contentPlayhead = playhead();
     }
+    const mine = pendingMine();
     state.syncInFlight = true;
     state.lastSyncAt = Date.now();
     let result;
@@ -1251,6 +1213,9 @@
           paused: !!state.video.paused,
           since: state.since,
           model: modelForSync(s),
+          anki: ankiForSync(s),
+          mined_since: state.minedSince,
+          ...(mine ? { mine } : {}),
         },
       });
     } finally {
@@ -1263,8 +1228,7 @@
     // The background refused this tab: another tab holds the server, and this answer never left
     // the browser. So nothing is written down here -- not the cues, not `since`, not the covered
     // ranges, and least of all "the server is reachable". A standby tab that recorded that would
-    // be unable to tell waiting for its turn from a dead server, and would go on fetching clips
-    // and polling Anki against a server it never contacted.
+    // be unable to tell waiting for its turn from a dead server.
     if (result && result.ok && result.data && result.data.status === "standby") {
       state.standby = true;
       updateStatus();
@@ -1273,7 +1237,7 @@
     if (!result || !result.ok) {
       // Not standby, so the election let this request through: the background answers standby
       // only with ok: true. A flag left by the last refused tick would rank above the verdict
-      // below in statusText() and keep the pre-mining and the Anki watch closed.
+      // below in statusText().
       state.standby = false;
       // The language verdict came from the last answer that was one; this one says nothing about
       // the session, so it goes, as on a restart, or statusText() would show the pause in place of
@@ -1283,15 +1247,18 @@
       // Only an answer the server itself gave carries `data` (null for an empty body). Without it
       // nothing of ours answered: the server unreachable, something else on its port (not JSON),
       // or the background gone (sendMessage's own {ok, error} during a reload or a worker restart),
-      // and every other message would fail the same way, so the pre-mining and the Anki watch stop.
+      // and every other message would fail the same way.
       if (!result || result.offline || !("data" in result)) {
+        if (state.mining) {
+          state.mining = null; // nobody to mine it: said now, not at the timeout
+          showToast("Mining failed: " + (errorText(result && result.error) || "Server unreachable"), "error", 6000);
+        }
         state.offline = true;
         state.serverStatus = "offline";
         state.serverError = errorText(result && result.error) || "Server unreachable";
       } else {
         // The server is up and refused this request (a 400 for an odd id, a 500 from a broken
-        // cache): its own words, in the error style. It is not offline, so the pre-mining and the
-        // Anki watch go on; /clip is another handler.
+        // cache): its own words, in the error style. It is not offline.
         state.offline = false;
         state.serverStatus = "error";
         state.serverError = errorText(result.error) || "error";
@@ -1302,6 +1269,8 @@
     state.standby = false;
     state.offline = false;
     const data = result.data || {};
+    // Before the session check: the log belongs to the video, not to one session token.
+    takeMined(data);
     // Read before the session check: a model switch ends in a fresh session, and the status must
     // already say what is being loaded while the old one's cues are dropped. An older server sends
     // neither key, which is the same as nothing loading and nothing wrong. Both are judged for the
@@ -1357,7 +1326,7 @@
     for (const raw of incoming) {
       if (!raw || typeof raw.text !== "string") continue;
       // The server stamps every cue with the `seg` of the Whisper segment it came from; nothing
-      // here reads it, because a segment is not a sentence (see sentenceForCue).
+      // here reads it, because a segment is not a sentence: a mined card gets exactly its cue.
       const cue = {
         id: Number(raw.id),
         start: Number(raw.start) || 0,
@@ -1547,7 +1516,6 @@
     } else {
       renderText(state.subText, cue);
       state.subBox.classList.remove("shisuko-hidden");
-      schedulePremine(cue);
     }
     highlightTranscript(cue);
   }
@@ -1729,12 +1697,10 @@
     mine.type = "button";
     mine.className = "shisuko-line-mine";
     mine.textContent = "⛏";
-    mine.title = "Mine this sentence: screenshot + audio";
+    mine.title = "Mine this sentence into the newest Anki card: audio + picture";
     line.appendChild(time);
     line.appendChild(text);
     line.appendChild(mine);
-    line.addEventListener("mouseenter", onTranscriptLineEnter);
-    line.addEventListener("mouseleave", onTranscriptLineLeave);
     state.lineById.set(cue.id, line);
     return line;
   }
@@ -1811,7 +1777,7 @@
       ev.preventDefault();
       const line = mineButton.closest(".shisuko-line");
       const cue = cueById(line && line.dataset.id);
-      if (cue) mineCue(cue, { seekForFrame: cue.id !== state.activeCueId });
+      if (cue) mineCue(cue);
       return;
     }
     const time = ev.target.closest(".shisuko-time");
@@ -2392,377 +2358,86 @@
     return best;
   }
 
-  // The spoken sentence a mined card gets: the cue that was on screen, and nothing more.
-  //
-  // The server marks every cue it split out of one Whisper segment with a shared `seg`, and this
-  // used to rejoin them, on the premise that a segment is a sentence. It is not. A narrator who
-  // reads without pausing gets almost no punctuation out of Whisper, so `group_words` splits on
-  // the cue length limit alone, and rejoining those pieces hands the card clauses the viewer
-  // never saw and seconds they never heard. The VAD is no better a witness: Silero cuts at 300 ms
-  // of silence, which is a breath, and such a narrator runs ten seconds and three cues between
-  // breaths -- deferring to it makes the card longer still. Neither signal marks a sentence.
-  //
-  // So the line the viewer read and heard is the one thing certainly true of the card, and the
-  // clip bounds follow from it. Pure: a cue in, a sentence out, in the shape the callers and the
-  // background's clipParams() expect.
-  function sentenceForCue(cue) {
-    if (!cue) return null;
-    return { start: cue.start, end: cue.end, text: cue.text, cueIds: [cue.id] };
+  // The popup's mining settings as /sync carries them (`anki`): the server attaches with them, and
+  // validates them, since nothing the browser sends is trusted there. Pure: the settings in, the
+  // object out.
+  function ankiForSync(s) {
+    return {
+      auto: !!s.autoMine,
+      picture: String(s.ankiImageField || "").trim(),
+      audio: String(s.ankiAudioField || "").trim(),
+      sentence: String(s.ankiSentenceField || "").trim(),
+      word: String(s.ankiWordField || "").trim(),
+      pad_ms: Math.max(0, Math.min(2000, Math.round(Number(s.clipPaddingMs) || 0))),
+      format: s.clipFormat === "wav" ? "wav" : "mp3",
+    };
   }
 
-  // The sentence after this one, so its audio can be fetched before it is spoken. Pure: the cue
-  // list and a sentence in, the sentence starting at the next cue after it out, or null at the end.
-  function nextSentence(cues, sentence) {
-    const list = cues || [];
-    const ids = sentence && Array.isArray(sentence.cueIds) ? sentence.cueIds : [];
-    if (!ids.length) return null;
-    let last = -1;
-    for (let i = 0; i < list.length; i++) {
-      if (list[i] && ids.indexOf(list[i].id) >= 0 && i > last) last = i;
+  // A mine's name in the server's log: unique enough within one session, which is all it needs.
+  function newNonce() {
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  }
+
+  // The viewer's own mine: this cue into the newest Anki card. The server does the work; the next
+  // /sync carries the request, and every /sync after it until the answer's `mined` reports it
+  // (takeMined), so a lost answer costs a resend, never a second card.
+  function mineCue(cue) {
+    if (!cue || !state.videoId || !state.settings.enabled) return;
+    if (state.mining) {
+      showToast("Still mining the last line…", "info");
+      return;
     }
-    if (last < 0) return null;
-    const next = list[last + 1];
-    return next ? sentenceForCue(next) : null;
+    state.mining = { cue_id: cue.id, nonce: newNonce(), session: state.serverSession, at: Date.now(), generation: state.cueGeneration };
+    showToast("Mining…", "info", 15000);
+    resumeAfterMining(state.video);
+    sync();
   }
 
-  // One canvas for every frame read back: a backing store the size of the frame per line would be
-  // megabytes of garbage a minute. A DRM-protected video taints it for good (every later read
-  // would fail, on every later video), so a failed read lets it go and the next one starts afresh.
-  let frameCanvas = null;
-
-  // The video's frame drawn onto the shared canvas, sized to it (1280 px wide at most), or null
-  // when the video has no frame yet. Setting the size clears what the last read left.
-  function drawFrame(video) {
-    const w = video.videoWidth;
-    const h = video.videoHeight;
-    if (!w || !h) return null;
-    const scale = Math.min(1, 1280 / w);
-    const canvas = frameCanvas || (frameCanvas = document.createElement("canvas"));
-    canvas.width = Math.round(w * scale);
-    canvas.height = Math.round(h * scale);
-    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
-    return canvas;
-  }
-
-  function captureFrame(video) {
-    if (!video) return null;
-    try {
-      const canvas = drawFrame(video);
-      return canvas ? canvas.toDataURL("image/jpeg", 0.85) : null;
-    } catch (err) {
-      frameCanvas = null;
-      return null; // DRM-protected streams taint the canvas
+  // What the next /sync asks for, or nothing: a mine whose cues were dropped meanwhile (a new
+  // session) is given up, since its cue id now names another line.
+  function pendingMine() {
+    const m = state.mining;
+    if (!m) return null;
+    if (m.generation !== state.cueGeneration) {
+      state.mining = null;
+      showToast("Nothing mined: the subtitles changed", "warn");
+      return null;
     }
-  }
-
-  // ---- pre-mining: prepare every sentence that plays, before any card exists ----
-
-  // Where a cue sits in what the background holds ready, Infinity when it holds nothing for it.
-  // The newest sentence ranks first, so a card that could belong to two identical lines is given
-  // the one the viewer just read. Pure: the held list and a cue in, an order out.
-  function rankOfCue(held, cue) {
-    const list = held || [];
-    for (let i = 0; i < list.length; i++) {
-      const ids = list[i] && list[i].cueIds;
-      if (Array.isArray(ids) && cue && ids.indexOf(cue.id) >= 0) return i;
+    if (Date.now() - m.at > MINE_TIMEOUT_MS) {
+      state.mining = null;
+      showToast("Mining failed: no answer from the server (a server older than 0.22.0 cannot mine)", "error", 6000);
+      return null;
     }
-    return Infinity;
+    return { cue_id: m.cue_id, nonce: m.nonce, session: m.session };
   }
 
-  function heldHas(key, what) {
-    return state.premined.some((entry) => entry.key === key && entry[what]);
-  }
-
-  // Preparing material costs a frame read and a clip request, so it is spent only where a card can
-  // follow: the add-on on, a video open, the server reachable, the tab in front, no ad running.
-  function premineAllowed() {
-    return !!(
-      state.settings.enabled &&
-      state.videoId &&
-      state.video &&
-      !state.offline &&
-      !state.standby && // another tab has the server: a clip request would only be refused
-      document.visibilityState === "visible" &&
-      !isAdPlaying()
-    );
-  }
-
-  // Premine and reset messages go out one at a time, each sent once the one before was answered.
-  // The background files a sentence only after an await of its own (its settings read), so a reset
-  // fired while a premine was out could be handled first, and the old video's sentence would stay
-  // in the store, listed in every later inventory under a key the new video's first lines share.
-  // `send` runs when the turn comes and may return null to send nothing after all.
-  function premineTurn(send) {
-    const turn = state.premineQueue.then(send);
-    state.premineQueue = turn.then(() => undefined, () => undefined);
-    return turn;
-  }
-
-  async function sendPremine(sentence, extra) {
-    const generation = state.cueGeneration;
-    const msg = Object.assign(
-      {
-        type: "premine",
-        videoId: state.videoId,
-        key: sentence.cueIds[0],
-        cueIds: sentence.cueIds,
-        sentence: { start: sentence.start, end: sentence.end, text: sentence.text },
-      },
-      extra || {}
-    );
-    state.premineInFlight++;
-    let res = null;
-    try {
-      // A sentence whose cues were dropped while it waited for its turn is not sent at all.
-      res = await premineTurn(() => (generation === state.cueGeneration ? sendMessage(msg) : null));
-    } finally {
-      state.premineInFlight--;
-    }
-    // The inventory answered is the tab's as of this message. Another video, or this one's cues
-    // started over, while it was out: those keys are the new cues' ids (they restart at 0), and
-    // taking them would make the new video's first lines count as prepared with the old one's
-    // material. The reset queued behind this message drops them from the store.
-    if (res && res.ok && Array.isArray(res.held) && generation === state.cueGeneration) state.premined = res.held;
-    return res;
-  }
-
-  function clearPremineTimer() {
-    if (state.premineTimer) {
-      clearTimeout(state.premineTimer);
-      state.premineTimer = null;
-    }
-  }
-
-  function resetPremine() {
-    clearPremineTimer();
-    // Nothing held and nothing out means nothing to drop, and with the master switch off nothing
-    // is ever held: a switched-off add-on sends no messages at all.
-    if (state.premined.length || state.premineInFlight) premineTurn(() => sendMessage({ type: "premineReset" }));
-    state.premined = [];
-  }
-
-  // A new line is on screen. Wait out the delay before touching the GPU, then prepare this
-  // sentence and ask for the next one's audio, so a lookup on either is already paid for.
-  function schedulePremine(cue) {
-    clearPremineTimer();
-    if (!cue || !premineAllowed()) return;
-    const sentence = sentenceForCue(cue);
-    if (!sentence) return;
-    const key = sentence.cueIds[0];
-    state.premineTimer = setTimeout(() => {
-      state.premineTimer = null;
-      premineNow(key);
-    }, PREMINE_CAPTURE_DELAY_MS);
-  }
-
-  // Can a card be mined by itself: automatic mining on, and into Anki (to the Downloads folder
-  // nothing is ever mined without the viewer asking). Pure given the settings.
-  function autoAnkiMining() {
-    const s = state.settings;
-    return !!s.autoMine && s.mineTarget === "anki";
-  }
-
-  async function premineNow(key) {
-    if (!premineAllowed()) return;
-    const active = cueById(state.activeCueId);
-    const sentence = active ? sentenceForCue(active) : null;
-    if (!sentence || sentence.cueIds[0] !== key) return; // the line moved on while we waited
-    // A held frame is read by automatic mining alone: a mine the viewer asks for captures the frame
-    // on screen. Otherwise the readback and the few hundred kilobytes shipped per line would be
-    // dead weight, so only the clip is prepared, which a manual mine does reuse.
-    const frame = autoAnkiMining();
-    // Another video, or this one's cues started over, while a frame was read back or a message
-    // was out: the sentence and the frame are the old cues', and the new ones share their ids.
-    const generation = state.cueGeneration;
-    if (frame ? !heldHas(key, "image") : !heldHas(key, "audio")) {
-      const imageDataUrl = frame ? await captureFrameAsync(state.video) : null;
-      if (generation !== state.cueGeneration || !premineAllowed()) return;
-      await sendPremine(sentence, frame ? { imageDataUrl } : {});
-      if (generation !== state.cueGeneration) return;
-    }
-    const next = nextSentence(state.cues, sentence);
-    if (next && !heldHas(next.cueIds[0], "audio")) await sendPremine(next, { ahead: true });
-  }
-
-  function captureHoverFrame() {
-    // The frame to attach is the one on screen when the viewer hovered the line, but reading a
-    // video frame back from the GPU stalls the main thread, so wait until Yomitan's scan has run
-    // and encode off the main thread. It replaces the frame taken when the line appeared: this is
-    // the one the viewer was looking at, and hovering pins the sentence against eviction.
-    clearHoverCapture();
-    const id = state.activeCueId;
-    if (id === null || !premineAllowed() || !autoAnkiMining()) return; // the frame is for automatic mining
-    state.hoverCaptureTimer = setTimeout(() => {
-      state.hoverCaptureTimer = null;
-      if (state.activeCueId !== id || !premineAllowed()) return;
-      const sentence = sentenceForCue(cueById(id));
-      if (!sentence) return;
-      const video = state.video;
-      const key = sentence.cueIds[0];
-      const t = video.currentTime;
-      // The pointer crosses the box edge for every word looked up in the popup, and the first
-      // hover paused the video: every crossing would read the same frame back and ship it again,
-      // when the background already holds this sentence's frame from this very position.
-      const shot = state.hoverShot;
-      if (shot && shot.key === key && shot.t === t && video.paused && heldHas(key, "image")) return;
-      const generation = state.cueGeneration; // the same id on another video is another line
-      captureFrameAsync(video).then((imageDataUrl) => {
-        if (!imageDataUrl || state.activeCueId !== id || generation !== state.cueGeneration) return;
-        state.hoverShot = { key, t };
-        sendPremine(sentence, { imageDataUrl, hover: true });
-      });
-    }, HOVER_CAPTURE_DELAY_MS);
-  }
-
-  function clearHoverCapture() {
-    if (state.hoverCaptureTimer) {
-      clearTimeout(state.hoverCaptureTimer);
-      state.hoverCaptureTimer = null;
-    }
-  }
-
-  // A line read in the transcript panel is looked up there, so its sentence is ranked first, the
-  // way a hover on the subtitle ranks the line on screen: a card cut from it whose sentence is
-  // also a piece of the playing line is separated from that line by rank alone (matchCue), and
-  // without this it would go to the playing line. No frame goes with it: the panel is not the
-  // video, and the background keeps the frame it already holds for the sentence when the message
-  // brings none. Sent once the pointer has rested on the line as long as the subtitle hover waits:
-  // scrolling the panel sweeps the pointer across lines, each of which would cost a clip request.
-  function onTranscriptLineEnter(ev) {
-    if (!ev.isTrusted) return; // see onMineClick
-    clearTranscriptHover();
-    if (!premineAllowed()) return; // with the master switch off nothing is sent
-    const line = ev.currentTarget;
-    const cue = cueById(line && line.dataset.id);
-    if (!cue) return;
-    const generation = state.cueGeneration; // the same id on another video is another line
-    state.transcriptHoverTimer = setTimeout(() => {
-      state.transcriptHoverTimer = null;
-      if (generation !== state.cueGeneration || !premineAllowed()) return;
-      const sentence = sentenceForCue(cue);
-      if (sentence) sendPremine(sentence, { hover: true });
-    }, HOVER_CAPTURE_DELAY_MS);
-  }
-
-  // Leaving the line sends nothing; a line the pointer only crossed is not ranked either.
-  function onTranscriptLineLeave(ev) {
-    if (!ev.isTrusted) return;
-    clearTranscriptHover();
-  }
-
-  function clearTranscriptHover() {
-    if (state.transcriptHoverTimer) {
-      clearTimeout(state.transcriptHoverTimer);
-      state.transcriptHoverTimer = null;
-    }
-  }
-
-  function captureFrameAsync(video) {
-    return new Promise((resolve) => {
-      try {
-        const canvas = drawFrame(video);
-        if (!canvas) return resolve(null);
-        // toBlob copies the bitmap before it returns, so the canvas is free for the next read.
-        canvas.toBlob((blob) => {
-          if (!blob) return resolve(null);
-          const reader = new FileReader();
-          reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : null);
-          reader.onerror = () => resolve(null);
-          reader.readAsDataURL(blob);
-        }, "image/jpeg", 0.85);
-      } catch (err) {
-        frameCanvas = null;
-        resolve(null); // DRM-protected streams taint the canvas
-      }
-    });
-  }
-
-  function seekTo(video, t) {
-    // Setting currentTime to the position the media is already at fires no "seeked" event, so
-    // the wait below would only end at the fallback timeout. Nothing to do in that case.
-    if (Math.abs((Number(video.currentTime) || 0) - t) < 0.05) return Promise.resolve();
-    return new Promise((resolve) => {
-      let done = false;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        video.removeEventListener("seeked", finish);
-        setTimeout(resolve, 80); // let the new frame paint before we grab it
-      };
-      video.addEventListener("seeked", finish);
-      video.currentTime = t;
-      setTimeout(finish, 1500);
-    });
-  }
-
-  async function mineCue(cue, options) {
-    if (!cue || state.mining || !state.video || !state.videoId) return;
-    const opts = options || {};
-    state.mining = true;
-    showToast(opts.auto ? "Attaching to the new card…" : "Mining…", "info", 15000);
-    try {
-      const video = state.video;
-      const videoId = state.videoId;
-      const generation = state.cueGeneration;
-      const sentence = sentenceForCue(cue);
-      const key = sentence ? sentence.cueIds[0] : null;
-      // The viewer asking for this line gets the frame on screen now. An automatic mine takes the
-      // pre-mined frame when there is one: it is the frame that was up while the line was read,
-      // and by now the video has moved on. Only a line still on screen, or one worth seeking
-      // back to, is captured afresh.
-      const capture = !opts.auto || (!heldHas(key, "image") && (cue.id === state.activeCueId || !!opts.seekForFrame));
-      // The viewer clicked on to another video while a seek was pending (up to 1.5 s when the
-      // media was swapped under it): the cue and its times are the old video's, and the card would
-      // get a clip cut from the new one at them. YouTube keeps the element across videos, so the
-      // position to restore is the old video's too, and the seek is left where the new one landed.
-      const moved = () => generation !== state.cueGeneration;
-      let restore = null;
-      if (capture && opts.seekForFrame) {
-        restore = { t: video.currentTime, paused: video.paused };
-        video.pause();
-        await seekTo(video, Math.min(cue.end, cue.start + 0.4) - (state.live ? state.liveOffset : 0));
-        if (moved()) {
-          showToast("Nothing mined: the video changed", "warn");
-          return;
-        }
-      }
-      const imageDataUrl = capture ? captureFrame(video) : null;
-      if (restore) {
-        await seekTo(video, restore.t);
-        if (moved()) {
-          showToast("Nothing mined: the video changed", "warn");
-          return;
-        }
-        if (!restore.paused) video.play().catch(() => {});
-      }
-      // Automatic mining leaves playback alone: the viewer is probably still in Yomitan's popup.
-      if (!opts.auto) resumeAfterMining(video);
-      const result = await sendMessage({
-        type: "mine",
-        videoId,
-        key,
-        cue: { start: cue.start, end: cue.end, text: cue.text },
-        sentence: sentence ? { start: sentence.start, end: sentence.end, text: sentence.text } : null,
-        imageDataUrl,
-        noteId: opts.noteId,
-        auto: !!opts.auto,
-      });
-      if (result && result.ok) {
-        showToast(result.message || "Mined", result.warning ? "warn" : "ok");
-        // The card the word colours are about was just made (or, with no deck chosen, the first
-        // one, which tells the background the deck): the next ask goes out soon, not at the interval.
+  // The server's mining log since the last answer: the outcome of the viewer's own mine, which
+  // ends it, and each note the server attached to by itself. A note that got its media tells the
+  // background its deck, for the word colours, and asks for their index soon.
+  function takeMined(data) {
+    if (typeof data.mined_next === "number") state.minedSince = data.mined_next;
+    const refused = typeof data.anki_error === "string" ? data.anki_error : null;
+    if (refused && refused !== state.ankiError) showToast("The server refused the Anki settings: " + refused, "error", 6000);
+    state.ankiError = refused;
+    for (const event of Array.isArray(data.mined) ? data.mined : []) {
+      if (!event || typeof event !== "object") continue;
+      const own = !!state.mining && event.nonce === state.mining.nonce;
+      if (own) state.mining = null;
+      if (event.ok && Number.isSafeInteger(event.note)) {
+        sendMessage({ type: "minedNote", noteId: event.note });
         state.wordIndexAskedAt = Date.now() - WORD_INDEX_REFRESH_MS + WORD_INDEX_MINE_DELAY_MS;
-      } else if (result && result.mismatch) showToast(result.error, "warn", 6000);
-      else showToast("Mining failed: " + ((result && result.error) || "unknown error"), "error", 6000);
-    } catch (err) {
-      showToast("Mining failed: " + String((err && err.message) || err), "error", 6000);
-    } finally {
-      state.mining = false;
+      }
+      // An automatic attach that went wrong is the server log's business, not a toast's.
+      if (own || (event.ok && !event.nonce)) {
+        const text = String(event.message || (event.ok ? "Mined" : "unknown error"));
+        if (event.ok) showToast(text, "ok");
+        else showToast(own && event.status === "error" ? "Mining failed: " + text : text, "warn", 6000);
+      }
     }
   }
 
   function resumeAfterMining(video) {
-    // The frame is captured; keep watching while the server cuts the audio clip. Only a pause
+    // Keep watching while the server cuts the audio clip and the frame. Only a pause
     // caused by hovering the subtitle is undone here; a pause the viewer chose stays.
     if (!state.hoverPaused || !video || !video.paused) return;
     state.hoverPaused = false;
@@ -2771,96 +2446,13 @@
     video.play().catch(() => {});
   }
 
-  // Is anyone plausibly mining right now? Polling costs a message and an AnkiConnect request per
-  // second, so it is spent only where a card can appear: a visible tab, playing, or paused with the
-  // viewer at the subtitle. A video left paused in a visible tab for two minutes is not being read.
-  function ankiPollAllowed() {
-    const s = state.settings;
-    // To the Downloads folder nothing is mined by itself: the background would answer every
-    // message with no card, and the message is a round trip across processes. A standby tab has
-    // no server to mine against: another tab holds it.
-    if (!s.enabled || !autoAnkiMining() || state.offline || state.standby) return false;
-    // Nothing transcribed yet means nothing a new card could be given.
-    if (!state.videoId || !state.cues.length) return false;
-    if (document.visibilityState !== "visible" || isAdPlaying()) return false;
-    const now = Date.now();
-    // A hover pause is a lookup in progress, the pointer on the subtitle or gone from the player
-    // towards the popup, and it ends only when the pointer crosses the player again. Given the
-    // same two minutes at the hover rate, from the pointer's last appearance rather than from the
-    // pause, and a slow heartbeat after them: a viewer who parked the pointer on the sidebar and
-    // left would otherwise be polled for, at the hover rate, for hours, while one still reading
-    // the popup, whose pointer the page cannot see, must not lose the card they make to a gap the
-    // background no longer trusts its baseline across (PAUSE_POLL_SLOW_MS).
-    if (state.hoverPaused || state.awaitingPlayerMove) {
-      if (now - state.hoverSeenAt < PAUSE_POLL_IDLE_MS) return true;
-      return now - state.lastAnkiPollAt >= PAUSE_POLL_SLOW_MS;
-    }
-    return !state.pausedSince || now - state.pausedSince < PAUSE_POLL_IDLE_MS;
-  }
-
-  // Ask the background whether Yomitan just created a card.
-  async function pollForNewCard() {
-    if (state.mining || state.ankiPollInFlight) return;
-    if (!ankiPollAllowed()) return;
-    state.ankiPollInFlight = true;
-    state.lastAnkiPollAt = Date.now();
-    let res;
-    try {
-      res = await sendMessage({ type: "ankiPoll" });
-    } finally {
-      state.ankiPollInFlight = false;
-    }
-    if (!res) return;
-    // Anki being closed or not having granted access is normal; it must not raise toasts.
-    if (!res.ok) logAnkiPollError(res.error);
-    else if (res.newNoteId) autoMine(res.newNoteId, res.note, !!res.replayed);
-  }
-
-  function logAnkiPollError(error) {
-    const now = Date.now();
-    if (now - state.lastAnkiPollLog < ANKI_POLL_LOG_MS) return;
-    state.lastAnkiPollLog = now;
-    console.debug("Shisu-ko: Anki watch:", error || "unknown error");
-  }
-
-  // A card is matched to the line it is about, not assumed to be about the line playing now: by
-  // the time Yomitan has written the note the video has moved on, and with pause-on-hover off it
-  // has moved on by several lines. Only a card with neither sentence nor word to go on falls back
-  // to the playhead. Sentences already prepared rank first, so two identical lines resolve to the
-  // one the viewer just read. A `replayed` note is one the background found for another tab's
-  // poll and hands to every tab (its ledger): it may well be about a line of another video, so
-  // a line of this one matching its sentence is the only reason to act on it, and no match is
-  // no news to this tab: no toast, and never the line at this tab's playhead.
-  function autoMine(noteId, note, replayed) {
-    const written = note ? SHISUKO_MATCH.normalize(note.sentence) : "";
-    const word = note ? SHISUKO_MATCH.normalize(note.word) : "";
-    let cue;
-    if (written || word) {
-      cue = SHISUKO_MATCH.matchCue(state.cues, note, { rank: (c) => rankOfCue(state.premined, c), t: playhead() });
-      if (!cue) {
-        if (!replayed) showToast("New card's sentence matches no subtitle; nothing attached", "warn");
-        return;
-      }
-    } else if (replayed) {
-      return; // the ledger only carries cards with a sentence; nothing to match is nothing to do
-    } else {
-      cue = currentCueForMining();
-      if (!cue) {
-        showToast("New card detected but no subtitle to attach", "warn");
-        return;
-      }
-    }
-    const seekForFrame = cue.id !== state.activeCueId && !!(state.video && state.video.paused);
-    mineCue(cue, { seekForFrame, noteId, auto: true });
-  }
-
   function mineCurrent() {
     const cue = currentCueForMining();
     if (!cue) {
       showToast("No subtitle at this position to mine", "error");
       return;
     }
-    mineCue(cue, { seekForFrame: false });
+    mineCue(cue);
   }
 
   // ------------------------------------------------------------ pause while hovering
@@ -2869,8 +2461,6 @@
     if (!ev.isTrusted) return; // see onMineClick
     clearResumeTimer();
     state.awaitingPlayerMove = false;
-    state.hoverSeenAt = Date.now();
-    captureHoverFrame();
     if (!state.settings.pauseOnHover || !state.video) return;
     if (!state.video.paused && !state.video.ended) {
       state.video.pause();
@@ -2880,8 +2470,6 @@
 
   function onSubtitleLeave(ev) {
     if (!ev.isTrusted) return;
-    clearHoverCapture();
-    state.hoverSeenAt = Date.now();
     // The box follows the grip; endDrag() decides about the pause once it lands.
     if (state.drag && state.drag.moving) return;
     if (subtitleOutside()) {
@@ -2903,13 +2491,12 @@
   }
 
   // The pointer over a box outside the player, where onPlayerMouseMove never hears it:
-  // Alt+Shift+K reads the word under it (knownTarget), and the hover counts as seen.
+  // Alt+Shift+K reads the word under it (knownTarget).
   function onSubtitleMove(ev) {
     if (!ev.isTrusted || !subtitleOutside()) return;
     state.lastPointer.x = ev.clientX;
     state.lastPointer.y = ev.clientY;
     state.pointerInPlayer = true;
-    state.hoverSeenAt = Date.now();
   }
 
   // Whether the pointer, gone to `el` from the subtitle, is still on the page rather than in a
@@ -2925,7 +2512,6 @@
     state.lastPointer.x = ev.clientX;
     state.lastPointer.y = ev.clientY;
     state.pointerInPlayer = true;
-    state.hoverSeenAt = Date.now();
     if (!state.hoverPaused || !state.awaitingPlayerMove) return;
     if (state.subBox && state.subBox.contains(ev.target)) return;
     if (!isYouTubeElement(ev.target)) return;
@@ -2996,9 +2582,6 @@
     timers.push(setInterval(discover, DISCOVER_INTERVAL_MS));
     timers.push(setInterval(syncTick, SYNC_INTERVAL_MS));
     timers.push(setInterval(render, RENDER_INTERVAL_MS));
-    timers.push(setInterval(() => {
-      if (state.hoverPaused || state.awaitingPlayerMove) pollForNewCard();
-    }, HOVER_POLL_INTERVAL_MS));
     window.addEventListener("keydown", onKeyDown, true);
     document.addEventListener("yt-navigate-finish", () => {
       // YouTube swaps the player on navigation: the cached element must be looked up again.

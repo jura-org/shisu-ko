@@ -18,7 +18,7 @@ function loadSchema() {
 
 test("the schema is frozen and has the expected core keys", () => {
   const schema = loadSchema();
-  for (const key of ["enabled", "serverUrl", "fontScale", "pauseOnHover", "lingerSeconds", "mineTarget", "ankiUrl"]) {
+  for (const key of ["enabled", "serverUrl", "fontScale", "pauseOnHover", "lingerSeconds", "autoMine", "ankiUrl"]) {
     assert.ok(key in schema, `missing ${key}`);
   }
   assert.equal(schema.serverUrl, "http://127.0.0.1:8790");
@@ -83,8 +83,8 @@ test("the manifest names the five commands, and the content script handles each"
 
 test("settings.js is loaded before the scripts that use it", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ADDON, "manifest.json"), "utf8"));
-  assert.deepEqual(manifest.background.scripts, ["browser-api.js", "settings.js", "match.js", "words.js", "background.js"]);
-  for (const entry of manifest.content_scripts) assert.deepEqual(entry.js, ["browser-api.js", "settings.js", "match.js", "words.js", "content.js"]);
+  assert.deepEqual(manifest.background.scripts, ["browser-api.js", "settings.js", "words.js", "background.js"]);
+  for (const entry of manifest.content_scripts) assert.deepEqual(entry.js, ["browser-api.js", "settings.js", "words.js", "content.js"]);
   const html = fs.readFileSync(path.join(ADDON, "popup.html"), "utf8");
   assert.ok(html.indexOf('src="browser-api.js"') < html.indexOf('src="settings.js"'));
   assert.ok(html.indexOf('src="settings.js"') < html.indexOf('src="popup.js"'));
@@ -134,4 +134,22 @@ test("the extension never calls AnkiConnect's sync, holds no alarms and no ankiA
     assert.doesNotMatch(text, /\balarms\b/, `${name} uses alarms`);
     assert.doesNotMatch(text, /ankiAutoSync|ankiSync/, `${name} still knows the old Anki sync`);
   }
+});
+
+// Mining is the server's (Miner in server/server.py): it attaches the audio and the picture to the
+// note Yomitan made, and takes the viewer's own mine through /sync. The extension never writes to
+// Anki, keeps no Downloads fallback (0.21.1 and before saved the files there; `downloads` left the
+// manifest with it) and no matcher of its own. 0.21.1 stored `mineTarget` and
+// `mineFallbackDownload`; nothing reads them now.
+test("the extension never writes to Anki and saves no files", () => {
+  const files = fs.readdirSync(ADDON).filter((name) => /\.(js|html|json)$/.test(name));
+  for (const name of files) {
+    const text = fs.readFileSync(path.join(ADDON, name), "utf8");
+    for (const action of ["updateNoteFields", "storeMediaFile", "addNote", "updateNote", "addNotes"]) {
+      assert.doesNotMatch(text, new RegExp(`["'\`]${action}["'\`]`), `${name} calls AnkiConnect's ${action}`);
+    }
+    assert.doesNotMatch(text, /\.downloads\b|"downloads"/, `${name} uses browser.downloads`);
+    assert.doesNotMatch(text, /mineTarget|mineFallbackDownload|SHISUKO_MATCH|premine/, `${name} still knows the extension's own mining`);
+  }
+  assert.ok(!fs.existsSync(path.join(ADDON, "match.js")), "match.js moved to the server (best_cue in server.py)");
 });

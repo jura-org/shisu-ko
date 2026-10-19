@@ -1,6 +1,8 @@
-# Mining: one tab at a time, automatic mining, matching, pre-mining
+# Mining: one tab at a time, the server's attach, matching
 
-How the add-on elects the tab that talks to the server, how a card gets its sentence, frame and clip (`addon/background.js`, `addon/content.js`, `addon/match.js`).
+How the add-on elects the tab that talks to the server (`addon/background.js`), and how the
+server gives a card its clip and picture (`Miner`, `FrameGrabber` and the matcher in
+`server/server.py`). Since 0.22.0 the extension never writes to Anki.
 
 ## One tab at a time
 
@@ -25,14 +27,14 @@ re-selected would otherwise stay unknown and its video starve in standby.
 A refused tab gets `{status: "standby"}` from the background without a server call. The content
 script treats that as "this tab is not the one talking to the server" and nothing more: it leaves
 `offline`, the server status, the cues and `since` untouched, so a tab that stands by and comes
-back keeps its subtitles, and it stops pre-mining and polling Anki for new cards, which is what
-kept `/clip` reaching the server from a tab the election had refused (the word colours'
-`cardStatus` ask keeps going: the index is the deck's, served from the background's one cache,
-and never reaches the server, see "How word colours work" in `word-colours.md`). Every other answer clears the flag, a
+back keeps its subtitles (the word colours' `cardStatus` ask keeps going: the index is the
+deck's, served from the background's one cache, and never reaches the server, see "How word
+colours work" in `word-colours.md`). A viewer's own mine waits in a standby tab until the tab
+gets the right back, which a watched tab does on its next ask. Every other answer clears the flag, a
 refusal by the server (`{ok: false, error, data}`, a 4xx/5xx) or unreachable included: the
 background answers standby only with `ok: true`, so any other answer means the election let the
 request through, and a flag left by the last refused tick would hide the server's error behind
-"running in another tab" and keep the pre-mining and the Anki watch closed. Such a refusal also
+"running in another tab". Such a refusal also
 drops the language verdict (`languagePaused`, `heard`), as a restarted session does: the answer
 says nothing about the session, `statusText()` ranks the pause above the error, and the next
 real answer brings the verdict back. An ad does not hand the right on: `/sync` keeps going out
@@ -58,185 +60,186 @@ message like "Transcribing…", not an error, and obeys `showStatus`;
 
 ## How automatic mining works
 
-`ankiPoll(tabId)` in `addon/background.js` watches AnkiConnect so the viewer never presses
-anything: the content script asks once per sync tick (`ankiPollAllowed()`: `autoMine` on with
-`mineTarget` `anki`, which is `autoAnkiMining()`; a visible tab, no ad, not already mining, not
-standing by for another tab (`state.standby`, see "One tab at a time"), and not idle, meaning
-two minutes after a plain pause (`PAUSE_POLL_IDLE_MS`) or, during a hover pause, two minutes
-after the pointer was last seen over the subtitle or the player, `hoverSeenAt`, after which a
-hover pause still polls at a slow heartbeat, `PAUSE_POLL_SLOW_MS` (5 s), since a viewer reading
-the popup, whose pointer the page cannot see, must not lose the card they make to a gap the
-background no longer trusts its baseline across) and the background answers
-with the id of a note Yomitan has just created, plus what that note says (`notesInfo`: its
-sentence field and its word field, `ankiWordField` or the field with `order` 0).
-Four rules keep it from touching the wrong card.
+The server mines. `AnkiWatcher` (see "How the Anki sync after mining works" in
+`server-runtime.md`) looks at `findNotes("added:2")` and hands every note id it has not seen
+before to `Miner.notes_added()` (its `on_new` hook), which queues them for the miner's one
+worker thread (`run_forever()`). While a client mines (`Miner.watching()`: a session synced in
+the last `ATTACH_SYNC_WINDOW` with auto on and cues to match), the watcher looks every
+`ANKI_POLL_MINING` (3 s) instead of every `ANKI_POLL` (15 s), through its `fast` hook. The
+baseline the watcher takes at start is never handed over.
 
-- Baseline. Every poll remembers the highest `findNotes("added:1")` id. It reports nothing when
-  that baseline cannot be trusted: first poll, previous poll failed, or more than 10 s since the
-  previous successful one. Notes added while Anki was closed or no video was open stay untouched.
-- One at a time. Two or more ids above the baseline mean an import or a sync, not a lookup, so
-  the baseline moves and nothing is reported.
-- Sentence guard. `addToAnki()` with an explicit note id scores the note's sentence field
-  (`ankiSentenceField`, else `Sentence`) against the spoken sentence and against the cue text with
-  `SHISUKO_MATCH.similarity`; below `MIN_SIMILARITY` on both it returns `{ mismatch: true }` and
-  writes nothing. It is the same scoring the content script used to pick the cue, so the guard can
-  no longer refuse what the matcher accepted.
-- No downloads fallback. `mineCue` with `auto: true` never falls back to the Downloads folder: a
-  failure the viewer did not ask for must not scatter files.
+`Miner.attach_new(note_id)` decides, and these rules keep it from touching the wrong card:
 
-Every field the settings name (image, audio, sentence, word, pitch) is looked up through
-`SHISUKO_WORDS.fieldKey(fields, name)`: the name itself, trimmed, else the one field whose name
-differs from it in case alone, and written back under the note type's own spelling. Note types
-disagree on case (Lapis and JPMN write `Picture` and `SentenceAudio`, Eminent `picture` and
-`sentenceAudio`), Anki answers a name exactly, and a setting in the other case found nothing:
-every mine into an Eminent card failed with "The new card has none of the fields Picture,
-SentenceAudio". Two fields differing in case alone leave an inexact name unmatched rather than
-guessed, and only the note's own names count (`constructor` is no field; `update` has no
-prototype, so a field named `__proto__` is written like any other). A card with neither the image
-nor the audio field is refused before any media is stored, even when its sentence field could be
-extended (one of the two missing is a partial mine, as before), with `missingFieldsError()`: the
-names looked for, where to change them ("Check the field names and change them in the settings if
-they differ: popup > Anki, clips and server") and then the card's own field names, those that
-look like a picture or audio field (`MEDIA_FIELD_NAME`) first, the rest in the note type's order,
-the first `MISSING_FIELDS_SHOWN` (8). The list comes last because a toast is cut at 240
-characters, and the Downloads fallback says "Saved to Downloads instead." before the Anki error
-for the same reason. A note AnkiConnect no longer has (`notesInfo` answers `{}`) is "no longer in
-Anki", not a settings problem.
+- Once. The id goes into `handled` before anything else; a note is judged once, whatever the
+  verdict, and never again (the set keeps the last `MINE_HANDLED_KEEP`).
+- Fresh. A note id is its creation time in milliseconds. A note made more than
+  `ATTACH_NOTE_MAX_AGE` (180 s) before it was found is not the viewer's lookup.
+- Watched. Only sessions (`candidates()`) whose client sent `anki` settings with `auto` on and
+  synced within `ATTACH_SYNC_WINDOW` (60 s) count. No `/sync` means no candidate: the `enabled`
+  switch off, a closed tab, a tab left on another video. The portal sends no `anki`, so its
+  sessions are never candidates (and its cards are complete anyway).
+- One lookup at a time. More than `ATTACH_MAX_BATCH` (5) new notes in one look are an import or
+  a sync from another device: `notes_added()` queues none of them.
+- A sentence. A card whose sentence field (the setting, else `Sentence`) is empty names no line;
+  the word alone is in every video, so such a card is left alone.
+- A match. `best_cue()` against each candidate's cues; the best of all wins (below). No match,
+  nothing written; the debug log names the videos it tried.
+- Something to do. `targets()` is the picture and audio fields that exist and are empty (the
+  picture only with `--mine-picture on`); `sentence_update()` is the sentence grown to the cue
+  (below). A card with neither is left alone.
 
-Right after a successful `updateNoteFields`, `addToAnki()` calls `rememberDeck(url, noteId)`
-without awaiting it (see "How word colours work" in `word-colours.md`): the mine's answer never waits for it, and its
-failure is a `console.debug` line.
+`Miner.attach()` then cuts the clip (`Miner.clip()`: `App.clip()` with the client's `pad_ms` and
+`format`, waiting up to `ATTACH_CLIP_WAIT` for audio still being fetched, since the cues can be
+cached and the audio not), takes the picture (`Miner.picture()`, below), stores both with
+`storeMediaFile` under `shisuko_<video>_<start ms>.mp3` / `.jpg`, and writes the field
+names Anki reported back (it may lowercase a name or add a suffix). Right before
+`updateNoteFields` it reads the note again and drops every field that no longer holds what it
+held at the first read: Yomitan, the viewer or another tool may have changed one while the clip
+and the frame were made, and that change is never overwritten. A card that gets the audio and no
+picture says so in its message ("no picture"), and one whose sentence grew says "sentence
+extended to the whole line". A manual mine that fails inside AnkiConnect is answered as an
+`error` against its nonce, never left to the tab's timeout; a picture that fails, at the resolve
+or mid-decode, costs the picture alone.
 
-Polls are throttled to one request per 250 ms (several tabs poll the same background), and the
-`requestPermission` handshake is retried at most once a minute after the viewer clicked No:
-`ankiPermission(url)` shares one request in flight (`ankiWatch.permissionPending`), so every
-caller arriving while Anki's dialog is up (the poll, a tab's `cardStatus` ask, the popup's
-`ankiDecks`) awaits the same answer rather than queueing a dialog of its own, and it sets
-`permissionAskAt` a minute ahead (`ANKI_PERMISSION_RECHECK_MS`) before the request, so an
-answered request, granted or denied, is not repeated within the minute. A request Anki never
-answered (closed, not installed) is no refusal: it puts `permissionAskAt` back to 0, rejects for
-every waiting caller and is recorded in `ankiWatch.permissionFailed = {at, err}`; `ankiPoll()`,
-a timer, rethrows that failure for `ANKI_PERMISSION_RETRY_MS` (5 s) instead of knocking again
-(the poll answers `offline: true` meanwhile), so Anki not running is not a minute of "denied"
-and a started one is noticed within seconds, while a tab's `cardStatus` ask and the popup's
-`ankiDecks` (a viewer's own action) ask at once, and any answered request clears the failure
-for the poll. Poll errors are logged with `console.debug`, never toasted. A `notesInfo` that
-fails still reports the id, with `note: null`, and the content script falls back to the cue at
-the playhead.
+Every field the settings name is looked up through `field_key(fields, name)` (words.js's
+`fieldKey`, ported): the name itself, trimmed, else the one field whose name differs from it in
+case alone. Note types disagree on case (Lapis and JPMN write `Picture` and `SentenceAudio`,
+Eminent `picture` and `sentenceAudio`), and Anki answers a name exactly. Two fields differing in
+case alone leave an inexact name unmatched rather than guessed. A card with neither field gets
+`missing_fields_error()`: the names looked for, where to change them, then the card's own field
+names, the media-looking ones (`MEDIA_FIELD_NAME`) first, the first `MISSING_FIELDS_SHOWN` (8).
 
-The baseline is shared between tabs, so a note found by one tab's poll goes on a ledger
-(`ankiWatch.reports`, kept for `ANKI_REPORT_WINDOW_MS`, 60 s) and `replayReport()` answers it,
-with `replayed: true`, to every other tab that polls within the window, once per tab, before the
-throttle and without a request of its own; each tab matches the card's sentence against its own
-lines (`matchCue`), and the mine that writes into the note takes it off the ledger
-(`forgetReport()` marks the entry `written`; it stays until the window drops it). While a mine
-for a note runs (`mineCue()` keeps its promise in the entry's `mine`), the note is handed to no
-other tab, a second mine for it waits for the first and writes only when that one wrote nothing
-(else it answers `{ok: true, warning: true}` and "attached in another tab"), and a mine that
-wrote nothing (a mismatch, no clip) gives the note back: the finder is mid-mine for seconds
-when the other tab's tick lands, and two writes would leave the card with the later tab's frame
-and clip. Only a note with a sentence of at least `ANKI_REPORT_MIN_CHARS` (6) normalised
-characters goes on the ledger: one with a word alone, one `notesInfo` could not read, or one
-whose few-character sentence is in the lines of every video, goes to the tab that found it, as
-before.
+Whatever the server writes into an HTML field goes through `escape_html()`: the stored file
+names inside `<img src="...">` and `[sound:...]`, the sentence a manual mine puts into an empty
+sentence field, and every text part `grow_sentence()` puts around its own `<b>`. The newline `seam_for()` puts between two merged utterances becomes
+`<br>`, since HTML would otherwise collapse it into a space.
 
-Every request on the mining path has a deadline, because the content script holds
-`state.mining` until the `mine` message resolves: `fetchClip()` aborts each attempt after
-`CLIP_TIMEOUT_MS` (30 s, body read included; "Whisper server timed out"), `addToAnki()` and
-`storeMedia()` give AnkiConnect `ANKI_REQUEST_TIMEOUT_MS` (30 s) and its `requestPermission`
-`ANKI_PERMISSION_TIMEOUT_MS` (60 s, the dialog), an abort reading "AnkiConnect did not answer in
-time". The watcher's own `requestPermission` stays untimed: its poll resolves when the viewer
-answers the dialog. Whatever is written into a note's HTML fields goes through `escapeHtml()`:
-the sentence that fills an empty sentence field, and every text part `extendSentenceField()`
-puts around its own `<b>`.
+### What the client sends, and what it hears (`/sync`)
+
+The extension's popup settings travel inside every `/sync` body (`ankiForSync()` in
+`content.js`): `anki: {auto, picture, audio, sentence, word, pad_ms, format}`, from `autoMine`,
+`ankiImageField`, `ankiAudioField`, `ankiSentenceField`, `ankiWordField`, `clipPaddingMs` and
+`clipFormat`. The server takes them as untrusted (`anki_settings()`): a field name is at most 64
+characters with no control character and none of `"{}:<>`, `pad_ms` is 0-2000, `format` is
+`mp3` or `wav`, `auto` a boolean; unknown keys are ignored. Valid settings are kept on the
+session (`Session.anki`), the latest wins; invalid ones are not stored and the answer carries
+`anki_error`, which the tab toasts once. The subtitles go on either way.
+
+The viewer's own mine (Alt+Shift+M, the pickaxe on the subtitle or a transcript line) is
+`mine: {cue_id, nonce, session}` in the same body (`mine_request()` validates it; a malformed one
+is a 400). No endpoint was added for it. `content.js` keeps the request in `state.mining` and
+sends it with every `/sync` until the log answers its nonce; the server queues a nonce once
+(`App.queue_mine()`, `Session.mine_nonces`), so a lost answer costs a resend, never a second
+write. `Miner.mine_now()` takes the cue by id, refuses one whose `session` token is no longer the
+session's (the cue ids restarted), and writes it into the newest note of `findNotes("added:1")`,
+filling empty fields and growing the sentence the same way, plus an empty sentence field the
+settings name. It marks the
+note handled, so the automatic attach leaves it alone. A tab gives a mine up when its cues are
+dropped, when the server is unreachable, and after `MINE_TIMEOUT_MS` (90 s; a server older than
+0.22.0 never answers).
+
+What the server did goes into the session's log (`Miner.record()`: `Session.mined`, the last
+`MINE_LOG_KEEP` entries of the last `MINE_LOG_SECONDS`, each `{seq, nonce, ok, status, message,
+note}`; `status` is `attached`, `no_note`, `no_cue`, `no_fields`, `filled`, `off` or `error`). A
+body carrying `anki` or `mined_since` is answered `mined` (the entries from the cursor on) and
+`mined_next`. A cursor of `null` asks only where the log stands, so a fresh page replays nothing;
+one past `mined_next` is from before a server restart and reads the whole log. The answer is read
+before a mine is queued, so an outcome recorded at once (`off`: no miner) is never skipped by a
+fresh cursor. A body without either field gets exactly the answer it got before 0.22.0.
+
+`takeMined()` in `content.js` reads the log: the entry with its nonce ends the viewer's mine and
+is toasted; an automatic attach that worked is toasted, one that failed is the server log's
+business. Every entry that wrote a note sends `minedNote` to the background, which calls
+`rememberDeck()` for the word colours and asks for their index soon (see `word-colours.md`).
 
 ### What a mined card gets
 
-The cue that was on screen, and nothing more. `sentenceForCue(cue)` in `content.js` is the one place
-that decides it; it returns `{start, end, text, cueIds: [cue.id]}`, and `clipParams()` in
-`background.js` takes the audio bounds from that, so the sentence field and the clip always describe
-the same span the viewer read and heard.
+The cue that was on screen, and nothing more. The clip runs from that cue's `start` to its `end`,
+padded by `pad_ms` (`Miner.clip()`), and the picture is taken at `frame_time(start, end)`, a
+little into the line. A mine by hand names the cue by id; an automatic attach takes the cue the
+matcher picked. Cues are never rejoined by `seg`.
 
-It used to rejoin every cue sharing a `seg` within 1.5 s, on the premise that a Whisper segment is a
-sentence. It is not, and there is no second signal to fall back on. Whisper punctuates a fluent
-narrator barely at all (7 marks in 3095 characters on one measured video), so every split inside such
-a segment came from `--max-cue-chars` and the rejoin undid all of them: a card mined off a 3 s line
-got 9 s of audio and a clause that was never displayed. The VAD is a worse witness, not a better one
-— Silero cuts at 300 ms of silence, a breath, and that narrator ran 14.26 s across three cues between
-breaths, so deferring to it would have made the card longer again. `extendSentenceField()` still
-grows Yomitan's fragment when Yomitan cut inside the cue, but never past the cue.
+They used to be, on the premise that a Whisper segment is a sentence. It is not, and there is no
+second signal to fall back on. Whisper punctuates a fluent narrator barely at all (7 marks in
+3095 characters on one measured video), so every split inside such a segment came from
+`--max-cue-chars` and the rejoin undid all of them: a card mined off a 3 s line got 9 s of audio
+and a clause that was never displayed. The VAD is a worse witness, not a better one: Silero cuts
+at 300 ms of silence, a breath, and that narrator ran 14.26 s across three cues between breaths.
 
-A merged cue can hold two utterances either side of the newline `seam_for()` put between them, and
-Yomitan ends its sentence at that newline, so the grow stops at the row the fragment came from.
-`normalize()` strips whitespace, so the seam is invisible to the comparison and
-`extendSentenceField()` has to split on it itself; without that it put the other speaker's line on
-the card, which is the one thing the seam exists to prevent. A cue without a seam is one row and
-behaves as it always did. `escapeHtml()` writes the newline as `<br>`, since HTML would otherwise
-collapse it into a space and the card would lose the boundary entirely.
+Yomitan's sentence grows to the cue, never past it (`grow_sentence()`, the port of 0.21.1's
+`extendSentenceField()`; `test_mining.py` holds its old cases). Yomitan cuts the sentence it puts
+on a card out of the line on screen at 。！？, so a cue holding two sentences gives the card one
+of them. When the card's sentence, normalised as the matcher does, is a strict piece of the cue,
+the field gets the cue's text, escaped, with Yomitan's `<b>` around the same word (plain when the
+word cannot be found in the raw text). Anything else, the whole cue already or text the viewer
+wrote, is left alone. It is the one write into a filled field, and it is safe for the same
+reason: only text that the cue itself contains is ever replaced, and only by that cue.
 
-### Matching a card to its subtitle (`addon/match.js`)
+A merged cue can hold two utterances either side of the newline `seam_for()` put between them,
+and Yomitan ends its sentence at that newline, so the grow stops at the row the fragment came
+from. `match_normalize()` strips whitespace, so the seam is invisible to the comparison and
+`grow_sentence()` splits on it itself; without that it put the other speaker's line on the card,
+which is the one thing the seam exists to prevent.
 
-`SHISUKO_MATCH` is a plain script loaded after `settings.js` and, with `words.js` behind it,
-before the two scripts that use it, in both `background.scripts` and `content_scripts[0].js`.
+### Matching a card to its subtitle (`best_cue()` in `server.py`)
 
-- `normalize(text)` removes ruby readings first (`RUBY`: an `<rt>` or `<rp>` up to the next end
-  tag; Yomitan's `{sentence-furigana}` and `{furigana}` write `<ruby>食<rt>た</rt></ruby>べる`,
-  which stripping the tags alone would leave as 食たべる), then strips HTML tags, decodes
-  `&nbsp; &amp; &lt; &gt; &quot; &#39;`, removes bracket furigana (`{sentence-furigana-plain}`
-  writes ` 食[た]べる`), all whitespace and punctuation.
-- `similarity(card, spoken)` takes the card's text first, and the order matters. It is 1 when
-  the spoken text contains the card's sentence whole, however short (`contains()`: the server
-  merges a short cue into its neighbour, 嘘でしょ。本当にそんなことがあったの, and Yomitan stops at
-  the 。, so the card reads 嘘でしょ, four characters only that line explains), or when the card's
-  sentence contains the spoken text and that text is a real share of it (`comparable()`: at
-  least 6 characters, or half of the longer one, so a three-character cue, ですね, inside a long
-  card sentence is not a match); otherwise the Dice coefficient of their character-bigram sets,
-  0 unless comparable; `MIN_SIMILARITY` is 0.6. Dice, not the overlap coefficient: dividing by
-  the smaller set alone passes two sentences that merely end the same way (別の字幕です against
-  これはテスト字幕です scores 0.6), and containment already covers a card whose sentence is a real
-  fragment of the cue.
-- `matchCue(cues, note, opts)` picks the cue a card belongs to: cues scoring below the threshold
-  against the note's sentence are out, a cue containing the note's word gets +0.2, and ties break
-  on `share()`, then on `opts.rank(cue)` (the content script ranks pre-mined sentences, the one
-  read last first) and then on distance from `opts.t`, the playhead. `share()` is 1 for a cue
-  that runs past the sentence at a point where Yomitan cuts (`cutFrom()`: the sentence is a whole
-  piece of the cue's raw text between 。！？!?．… or a newline, or of such a piece between quotes,
-  「」『』 and the straight ones; Yomitan never cuts at 、), else the shorter text's length over
-  the longer one's (`coverage()`), so a whole line beats a fragment of itself and a line that is
-  the sentence beats one holding it mid-clause. A card with no sentence matches on the word alone; a card
-  with neither is nobody's, and `autoMine` falls back to `currentCueForMining()`.
+A port of the extension's `match.js` from 0.21.1, with its thresholds; `server/tests/test_mining.py`
+holds every case `addon/tests/match.test.js` held.
+
+- `match_normalize(text)` removes ruby readings first (`_RUBY`: an `<rt>` or `<rp>` up to the
+  next end tag; Yomitan's `{sentence-furigana}` writes `<ruby>食<rt>た</rt></ruby>べる`, which
+  stripping the tags alone would leave as 食たべる), then strips HTML tags, decodes `&nbsp; &amp;
+  &lt; &gt; &quot; &#39;`, removes bracket furigana (` 食[た]べる`), all whitespace (JavaScript's
+  `\s`, U+FEFF included) and punctuation. The word colours read a card's word by the same ruby
+  rule (`words.js`); `test_mining.py` holds `words.test.js`'s ruby shapes.
+- `match_similarity(card, spoken)` takes the card's text first, and the order matters. It is 1
+  when the spoken text contains the card's sentence whole, however short (`_contains()`: the
+  server merges a short cue into its neighbour, 嘘でしょ。本当にそんなことがあったの, and Yomitan
+  stops at the 。), or when the card's sentence contains the spoken text and that text is a real
+  share of it (`_comparable()`: at least 6 characters, or half of the longer one); otherwise the
+  Dice coefficient of their character-bigram sets, 0 unless comparable. `MIN_SIMILARITY` is 0.6.
+  Dice, not the overlap coefficient: dividing by the smaller set alone passes two sentences that
+  merely end the same way (別の字幕です against これはテスト字幕です scores 0.6).
+- `best_cue(cues, note, rank, t)` returns `(cue, score, share)`: cues below the threshold are out,
+  a cue containing the note's word gets `WORD_BONUS` (+0.2), and ties break on `_share()`, then on
+  `rank(cue)`, then on distance from `t`. `_share()` is 1 for a cue that runs past the sentence at a
+  point where Yomitan cuts (`_cut_from()`: a whole piece of the cue's text between 。！？!?．… or a
+  newline, or between quotes, 「」『』 and the straight ones; Yomitan never cuts at 、), else the
+  shorter text's length over the longer one's, so a whole line beats a fragment of itself and a
+  line that is the sentence beats one holding it mid-clause. `match_cue()` is its cue alone.
+- The attach passes no `rank` and the session's playhead (`want_t`) as `t`. The extension used to
+  rank the sentences it had pre-mined and the transcript line under the pointer first; the server
+  has neither signal, and `_share()` already separates the cases the ranking was for.
+- Across sessions, `attach_new()` keeps the candidate with the highest `(score, share)` and, on a
+  tie, the one synced last. Each candidate is matched with its own settings, since the sentence
+  and word field names are per client.
 - It stays O(n): containment is tried on every cue first and bigrams only if nothing contained.
 
-### Pre-mined sentences
+### The picture (`FrameGrabber`)
 
-Nothing is captured when the card appears; it was captured while the line played. 400 ms after a
-cue becomes active (`schedulePremine` in `content.js`), the content script reads the frame off the
-video and sends `premine` to the background, and asks for the *next* sentence's clip as well
-(`ahead: true`), so a lookup on either is already paid for. The frame is read only while
-`autoAnkiMining()` holds (`autoMine` on and `mineTarget` `anki`): a mine the viewer asks for takes
-the frame on screen, so otherwise the `premine` carries no image and only the clip is prepared.
-Hovering a line sends the frame again with `hover: true`: that is the frame the viewer was
-actually looking at, and it pins the sentence; the same sentence at the same paused position is
-not read back again (`hoverShot`). Every frame is drawn onto one shared canvas (`drawFrame()`),
-let go after a tainted read. Premine and `premineReset` messages leave one at a time
-(`premineTurn()`), and an answer from before `state.cueGeneration` changed (`dropCues()` bumps
-it: a new video, a new session token) is not taken as the held list, since the new cues' ids
-start at 0 again and would count as prepared with the old video's material.
+The frame comes from YouTube's stream, not from the browser. `FrameGrabber.resolve_stream()`
+asks yt-dlp, with `Fetcher.ytdlp_options()` (the cookies and JavaScript runtime the audio fetch
+uses) and `FRAME_FORMAT` (H.264 up to 720p, else the best up to 720p), for one stream URL;
+`frame_jpeg()` opens it with PyAV, seeks to the time and encodes the first frame at or after it
+with PyAV's own MJPEG encoder (`encode_jpeg()`, the portal's code). A URL is kept per video for
+`FRAME_STREAM_TTL` (4 h). A verdict (`FrameUnavailable`: DRM via `has_drm`, a live stream, no
+stream up to 720p) is kept as long, so it costs one resolve, not one per card; any other failure
+(YouTube's bot check, the network) is kept for `FRAME_RETRY` (10 min) and then tried again. A kept URL that no longer opens and
+is older than `FRAME_FRESH` (120 s) has expired: one fresh resolve, and that answer stands. A
+live stream gets no picture: its past frames are not there to seek to. `--mine-picture off`
+builds the miner without a grabber, and nothing is resolved.
 
-The store is `premined`, a `Map` in `background.js` keyed by tab, video and sentence
-(`cueIds[0]`). Entries hold the base64 frame, the clip and the promise fetching it
-(`fetchClip(..., attempts = 1)`: nobody is waiting, and a failure simply leaves `audio` null for
-the next attempt). Caps: 5 sentences per tab, 10 in all, oldest-touched unpinned first; a pinned
-entry goes only when nothing else is left. Oversize payloads (3 MB image, 5 MB audio) are dropped.
-`premineReset`, `tabs.onRemoved` and a new video or server session clear a tab. The inventory
-answered to the tab (`heldFor()`) is ordered by `seen`, stamped by every message without `ahead`,
-then by `touched`: a sentence only prepared ahead of its turn ranks behind the one on screen.
-Nothing is ever written to disk, and nothing survives a restart of the event page.
+The extension's frame capture (`captureFrame()`, the pre-mined frames and clips held in the
+background's `premined`) is gone with it; `downloads` and the Downloads fallback went too.
 
-`mineCue` then uses it: an `imageDataUrl` sent with the message wins, else the held frame; the
-held clip is used when its parameters still match the ones computed now (same start, end and
-format to the millisecond), else the clip is fetched with the usual four tries and stored. Mining
-does not remove an entry: two words from one line make two cards.
+### Switches
+
+`--mine auto|off` (`resolve_mining()`): off never writes to Anki. Inside the Docker image the
+default is off unless `--anki-url` names an Anki, as for the sync: 127.0.0.1 there is the
+container. `start_anki_watcher(args, app)` starts the miner's thread (`anki-mine`) beside the
+watcher's (`anki-sync`); `--anki-sync off` with mining on runs the watcher for the miner alone
+(`AnkiWatcher.sync_on` False, and `/health`'s `anki_sync` says `off`). A mine asked of a server
+whose mining is off is answered `off`.
 
 ## The Anki sync after mining
 
@@ -246,5 +249,8 @@ works"). 0.20.0 and 0.21.0 ran a scheduler here, kept alive across a stopped eve
 `alarms` permission; that permission held 0.21.0 at the Chrome Web Store's review, and the
 add-on is a thin client of the server. `addon/tests/settings.test.js` holds that no file in
 `addon/` names the action `sync`, `alarms` or the old `ankiAutoSync` setting, which a viewer's
-storage may still hold and nothing reads; the browser smoke test mines with that stale setting
-stored and sees no `sync` reach its fixture AnkiConnect.
+storage may still hold and nothing reads, and that none names `updateNoteFields`,
+`storeMediaFile`, `addNote`, `browser.downloads`, `mineTarget`, `mineFallbackDownload` or the old
+matcher. The browser smoke test runs with that stale setting stored, mines through its fixture
+server's `/sync`, and sees no write and no `sync` reach its fixture AnkiConnect; the attach
+itself is tested in `server/tests/test_mining.py`.

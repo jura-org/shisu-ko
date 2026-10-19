@@ -202,7 +202,7 @@ closes a broken word whatever the budget says (inside `cross_chars` and `cross_c
 shorter than `reach_chars` reach `cross_reach` for a partner, and joins the halves through
 `seam_for()`: `""` inside one sentence, `"\n"` where a viewer would see a new line. Three readers act
 on that newline — `.shisuko-sub` is `white-space: pre-wrap` so the overlay renders the second row,
-Yomitan ends its sentence there, and `match.js`'s `TERMINATORS` splits on it. A seam the gap alone
+Yomitan ends its sentence there, and the mining matcher's `_TERMINATORS` splits on it. A seam the gap alone
 put there gives way to a plain join when it would leave a row under `MIN_PIECE_CHARS` or a third row
 (`rows_fit()`), rather than the merge being refused; refusing leaves the stub alone on screen.
 
@@ -433,7 +433,7 @@ it is not repeated for that session (`Session.human_asked`). Cleaning (`clean_su
 model-text cleaning, then per row a speaker label (（田中）, 田中：, 【田中】, a >> or - turn mark), a
 sound tag ([笑], （拍手）, ♪), furigana in brackets after its kanji (`is_ruby()`: hiragana, at most four
 per kanji), and whitespace runs squeezed to one. The track's own row breaks stay `"\n"` rows: they are
-where its maker put them, often a turn between two speakers, and the overlay, Yomitan and `match.js`
+where its maker put them, often a turn between two speakers, and the overlay, Yomitan and the mining matcher
 read them as the cue builder's own.
 
 Alignment, per window (`assist_cues()`, after `build_window_cues()` in `process()`). Every character

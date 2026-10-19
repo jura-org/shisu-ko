@@ -19,8 +19,10 @@ Endpoints
   GET  /health   -> {ok, version, model, default_model, model_loading, model_error, models, device, compute_type,
                      engine, language, launcher, anki_sync: {state, last, error}}
   POST /sync     -> {ok, session, status, error, duration, title, live, covered, speech, cues, next, busy,
-                     model, model_loading, model_error, heard, language_paused}
-  GET  /clip?video_id=..&start=..&end=..&format=mp3|wav -> audio clip of a sentence (mining)
+                     model, model_loading, model_error, heard, language_paused}; a body carrying the
+                     extension's `anki` settings (or `mined_since`) also gets {mined, mined_next, anki_error}
+                     and may carry `mine`: {cue_id, nonce, session}, the viewer's own mine (Miner)
+  GET  /clip?video_id=..&start=..&end=..&format=mp3|wav -> audio clip of a sentence (the portal's mining)
   GET  /sessions -> the videos the server holds, for diagnostics
   POST /update   -> {ok, restarting, version}: the server exits with EXIT_UPDATE so that run.cmd / run.sh
                      run update.py and start it again; 409 {ok, error} when nothing would (Docker, Nix,
@@ -29,7 +31,10 @@ Endpoints
 
 With --anki-sync auto (the default outside the Docker image) a thread watches Anki's newest notes
 through AnkiConnect and asks Anki to sync with AnkiWeb after new ones (AnkiWatcher); /health
-reports how that goes. No client calls AnkiConnect's `sync`.
+reports how that goes. No client calls AnkiConnect's `sync`. With --mine auto (the same default) the
+same look hands each new note to the Miner, which gives a note Yomitan made from a subtitle line the
+line's audio and a frame of the video (FrameGrabber), in the fields it left empty; the extension never
+writes to Anki.
 
 Everything lives under ~/.shisu-ko (override with the SHISUKO_HOME environment variable):
 the Python environment, downloaded models, cached audio and cue files, and config.json with
@@ -45,6 +50,7 @@ of the venv's own CTranslate2 before anything imports it; to faster-whisper it i
 from __future__ import annotations
 
 import argparse
+import base64
 import bisect
 import copy
 import difflib
@@ -58,6 +64,7 @@ import json
 import logging
 import math
 import os
+import queue
 import random
 import re
 import shutil
@@ -87,7 +94,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.21.1"
+VERSION = "0.22.0"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -2525,6 +2532,13 @@ class Session:
     human_track: Optional[str] = None
     human_lines: list = field(default_factory=list)
     human_asked: bool = False
+    # Mining (Miner): the Anki settings the client sent last (anki_settings()), None until one did;
+    # the log of what was attached, which /sync answers as `mined` (seq counts every entry ever
+    # made); and the nonces of the mines asked for, with when, so a resent one runs once.
+    anki: Optional[dict] = None
+    mined: list = field(default_factory=list)
+    mine_seq: int = 0
+    mine_nonces: dict = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock)
 
     def cache_path(self) -> Path:
@@ -4171,8 +4185,12 @@ class AnkiWatcher:
     thread that calls it. Only that thread changes the state; status() is read by /health.
     """
 
-    def __init__(self, call, url: str = ANKI_DEFAULT_URL, clock=time.monotonic, wall=time.time):
+    def __init__(self, call, url: str = ANKI_DEFAULT_URL, clock=time.monotonic, wall=time.time,
+                 sync: bool = True, on_new=None, fast=None):
         self.call, self.url, self.clock, self.wall = call, url, clock, wall
+        # sync: whether new notes are synced for (--anki-sync); on_new(ids) hears of every new note
+        # (Miner.notes_added); fast() asks for a look every ANKI_POLL_MINING (Miner.watching).
+        self.sync_on, self.on_new, self.fast = sync, on_new, fast
         self.lock = threading.Lock()
         self.seen: Optional[set] = None  # note ids already counted; None until the first answer (the baseline)
         self.next_poll = clock()
@@ -4208,7 +4226,7 @@ class AnkiWatcher:
                 self.reachable, self.poll_error = False, text
             return 0
         self.poll_wait = ANKI_POLL
-        self.next_poll = now + ANKI_POLL
+        self.next_poll = now + (ANKI_POLL_MINING if self.fast is not None and self.fast() else ANKI_POLL)
         current = set(ids)
         with self.lock:
             back = self.reachable is False
@@ -4216,18 +4234,24 @@ class AnkiWatcher:
         if self.seen is None:
             # The baseline: notes made before the server started are never synced for.
             self.seen = current
-            log.info("anki sync: watching %s (%d note(s) from today and yesterday taken as synced)",
-                     self.url, len(current))
+            if self.sync_on:
+                log.info("anki sync: watching %s (%d note(s) from today and yesterday taken as synced)",
+                         self.url, len(current))
+            else:
+                log.info("anki: watching %s for new notes (%d from today and yesterday left alone)", self.url, len(current))
             return 0
         if back:
             log.info("anki sync: AnkiConnect answers again")
+        added = sorted(i for i in current - self.seen if isinstance(i, int))
         new = len(current - self.seen)
         # Only the notes still in the query are kept: the set stays two days long, and a note
         # that left it is old, never new.
         self.seen = current
         after_sync, self.after_sync = self.after_sync, False
-        if new:
+        if new and self.sync_on:
             self.note_added(new, now, during_sync=after_sync)
+        if added and self.on_new is not None:
+            self.on_new(added)
         return new
 
     def note_added(self, count: int, now: float, during_sync: bool = False) -> None:
@@ -4312,6 +4336,8 @@ class AnkiWatcher:
     def status(self) -> dict:
         """/health's anki_sync: {state, last, error}. last is the wall time (ms) of the last sync that
         went through; error why the last sync, or the last look at Anki, failed."""
+        if not self.sync_on:
+            return dict(ANKI_SYNC_OFF)  # the watcher looks for the miner alone
         with self.lock:
             if self.running:
                 state = "syncing"
@@ -4346,15 +4372,735 @@ def resolve_anki_sync(args, environ=os.environ) -> tuple:
     return True, url
 
 
-def start_anki_watcher(args) -> Optional[AnkiWatcher]:
+def start_anki_watcher(args, app=None) -> Optional[AnkiWatcher]:
+    """The watcher for the sync and, given the App, the miner; None when both are off."""
     on, url = resolve_anki_sync(args)
+    container = " (inside the container; pass --anki-url to turn it on)"
     if not on:
-        log.info("anki sync: off%s", " (inside the container; pass --anki-url to turn it on)"
-                 if getattr(args, "anki_sync", None) is None else "")
+        log.info("anki sync: off%s", container if getattr(args, "anki_sync", None) is None else "")
+    # Only a real App holds sessions to match notes against; a stand-in (the tests' main()) mines nothing.
+    mining = isinstance(app, App) and resolve_mining(args)
+    if isinstance(app, App) and not mining:
+        log.info("anki mine: off%s", container if getattr(args, "mine", None) is None else "")
+    if not on and not mining:
         return None
-    watcher = AnkiWatcher(lambda action, params, timeout: anki_connect(url, action, params, timeout), url=url)
+
+    def call(action, params, timeout):
+        return anki_connect(url, action, params, timeout)
+
+    miner = None
+    if mining:
+        picture = getattr(args, "mine_picture", "on") != "off"
+        miner = Miner(app, call, frames=FrameGrabber(app.fetcher) if picture else None)
+        app.miner = miner
+        threading.Thread(target=miner.run_forever, daemon=True, name="anki-mine").start()
+        log.info("anki mine: new notes get their line's audio%s", " and picture" if picture else " (no picture: --mine-picture off)")
+    watcher = AnkiWatcher(call, url=url, sync=on, on_new=miner.notes_added if miner else None,
+                          fast=miner.watching if miner else None)
     threading.Thread(target=watcher.run_forever, daemon=True, name="anki-sync").start()
     return watcher
+
+
+# --------------------------------------------------------------------------- mining: matching a card to its line
+#
+# A port of the extension's match.js (0.21.1), with its thresholds and its tests
+# (server/tests/test_mining.py). Yomitan's sentence is never byte-identical to the cue: it carries
+# <b> around the looked-up word, entities, furigana in brackets or in ruby, and it may stop short
+# of the cue or run past it. Comparing normalised character bigrams survives all of that and still
+# says no to an unrelated card. The card's text always comes first: Yomitan cuts its sentence out
+# of the line on screen at 。！？, so it is a piece of what was said, while a cue inside the card's
+# sentence may be a scrap that any sentence holds.
+
+# A card and a line agreeing on 60% of their bigrams are about the same line; below that the
+# overlap is what any two Japanese sentences share (particles, です, ます).
+MIN_SIMILARITY = 0.6
+# Reorders two cues that already passed the threshold; never lifts one below it.
+WORD_BONUS = 0.2
+
+_TAGS = re.compile(r"<[^>]*>")
+# {sentence-furigana} writes <ruby>食<rt>た</rt></ruby>べる: the reading goes with its <rt> (and an
+# <rp> fallback), whose end tag may be left out before </ruby>.
+_RUBY = re.compile(r"<(?:rt|rp)\b[^>]*>.*?(?=</(?:rt|rp|ruby)\b)", re.I | re.S)
+_ENTITIES = re.compile(r"&(nbsp|amp|lt|gt|quot|#39);", re.I)
+_ENTITY_TEXT = {"nbsp": " ", "amp": "&", "lt": "<", "gt": ">", "quot": '"', "#39": "'"}
+_FURIGANA = re.compile(r"\[[^\]]*\]")  # {sentence-furigana-plain}: " 食[た]べる"
+_SPACE = re.compile(r"[\s﻿]+")  # JavaScript's \s, which counts U+FEFF
+_PUNCTUATION = re.compile(r"[。、！？!?…・「」『』（）()〝〟“”\"'.,．]")
+# Where Yomitan ends the sentence it cuts out of the text on screen, plus the quotes it stops at
+# when the looked-up word sits inside them.
+_TERMINATORS = re.compile(r"[。！？!?．…\n]")
+_QUOTES = re.compile(r"[「」『』\"']")
+
+
+def match_normalize(text) -> str:
+    text = "" if text is None else str(text)
+    text = _RUBY.sub("", text)
+    text = _TAGS.sub("", text)
+    text = _ENTITIES.sub(lambda m: _ENTITY_TEXT.get(m.group(1).lower(), ""), text)
+    text = _FURIGANA.sub("", text)
+    return _PUNCTUATION.sub("", _SPACE.sub("", text))
+
+
+def _bigrams(s: str) -> set:
+    return {s[i:i + 2] for i in range(len(s) - 1)}
+
+
+def _coverage(a: str, b: str) -> float:
+    longer = max(len(a), len(b))
+    return min(len(a), len(b)) / longer if longer else 0.0
+
+
+def _comparable(a: str, b: str) -> bool:
+    """A three-character cue (ですね) sits inside almost any long sentence: it counts only as a real
+    share of what it is compared with."""
+    return min(len(a), len(b)) >= 6 or _coverage(a, b) >= 0.5
+
+
+def _contains(card: str, spoken: str) -> bool:
+    """The line said the card's sentence whole, however short; a line inside the card's sentence
+    counts only when it is a real share of it."""
+    return card in spoken or (_comparable(card, spoken) and spoken in card)
+
+
+def _cut_from(raw, sentence: str) -> bool:
+    """Whether Yomitan could have cut `sentence` out of `raw`, the line as shown: a whole piece of it
+    between terminators, or between a terminator and a quote. It never cuts at 、."""
+    for piece in _TERMINATORS.split("" if raw is None else str(raw)):
+        if match_normalize(piece) == sentence:
+            return True
+        if _QUOTES.search(piece) and any(match_normalize(inner) == sentence for inner in _QUOTES.split(piece)):
+            return True
+    return False
+
+
+def _share(sentence: str, text: str, raw) -> float:
+    """The tie-break between cues that match alike: a whole line beats a fragment of itself, and a
+    line that is the sentence beats one holding it mid-clause. A line running past the sentence at
+    a terminator said it whole."""
+    if len(text) > len(sentence) and sentence in text and _cut_from(raw, sentence):
+        return 1.0
+    return _coverage(sentence, text)
+
+
+def _score(card: str, spoken: str) -> float:
+    """Containment, else the Dice coefficient of the bigram sets. Not the overlap coefficient: that
+    passes two sentences that merely end alike (別の字幕です against これはテスト字幕です)."""
+    if not card or not spoken:
+        return 0.0
+    if _contains(card, spoken):
+        return 1.0
+    if not _comparable(card, spoken) or len(card) < 3 or len(spoken) < 3:
+        return 0.0
+    first, second = _bigrams(card), _bigrams(spoken)
+    return 2 * len(first & second) / (len(first) + len(second))
+
+
+def match_similarity(card, spoken) -> float:
+    """What the card says against what was said, in that order."""
+    return _score(match_normalize(card), match_normalize(spoken))
+
+
+def best_cue(cues, note, rank=None, t: float = 0.0) -> Optional[tuple]:
+    """(cue, score, share) of the cue a card is about, or None. `note` is {sentence, word} as Anki
+    holds them; `rank(cue)` orders equally good cues, lowest first, and the distance from `t`, the
+    playhead, is the last tie-break. O(n): containment first, bigrams only when nothing contains."""
+    cues = cues if isinstance(cues, list) else []
+    note = note or {}
+    sentence = match_normalize(note.get("sentence"))
+    word = match_normalize(note.get("word"))
+    if not sentence and not word:
+        return None
+    best = None  # (cue, score, share, rank, distance)
+
+    def offer(cue, value, common):
+        nonlocal best
+        if value <= 0:
+            return
+        place = rank(cue) if rank else math.inf
+        place = place if isinstance(place, (int, float)) and math.isfinite(place) else math.inf
+        distance = abs(float(cue.get("start") or 0.0) - float(t or 0.0))
+        if best is None or (value, common, -place, -distance) > (best[1], best[2], -best[3], -best[4]):
+            best = (cue, value, common, place, distance)
+
+    if not sentence:
+        for cue in cues:
+            text = match_normalize(cue.get("text"))
+            if text and word in text:
+                offer(cue, 1.0, 0.0)
+        return best[:3] if best else None
+
+    texts = [match_normalize(cue.get("text")) for cue in cues]
+    contained = False
+    for cue, text in zip(cues, texts):
+        if text and _contains(sentence, text):
+            contained = True
+            offer(cue, 1.0 + (WORD_BONUS if word and word in text else 0.0), _share(sentence, text, cue.get("text")))
+    if not contained:
+        for cue, text in zip(cues, texts):
+            if not text:
+                continue
+            value = _score(sentence, text)
+            if value >= MIN_SIMILARITY:
+                offer(cue, value + (WORD_BONUS if word and word in text else 0.0), _share(sentence, text, cue.get("text")))
+    return best[:3] if best else None
+
+
+def match_cue(cues, note, rank=None, t: float = 0.0) -> Optional[dict]:
+    """The cue a new card is about, or None (match.js's matchCue)."""
+    found = best_cue(cues, note, rank, t)
+    return found[0] if found else None
+
+
+# --------------------------------------------------------------------------- mining: note fields
+
+def field_key(fields, name) -> Optional[str]:
+    """Which of a note's fields a name from the settings means: the name itself, else the one field
+    whose name differs from it in case alone (words.js's fieldKey). Note types spell the same field
+    Picture or picture; two fields differing in case alone leave an inexact name unmatched."""
+    if not isinstance(fields, dict):
+        return None
+    wanted = str(name or "").strip()
+    if not wanted:
+        return None
+    if wanted in fields:
+        return wanted
+    same = [key for key in fields if key.lower() == wanted.lower()]
+    return same[0] if len(same) == 1 else None
+
+
+def field_value(fields, key: Optional[str]) -> str:
+    entry = fields.get(key) if key and isinstance(fields, dict) else None
+    return str(entry.get("value") or "").strip() if isinstance(entry, dict) else ""
+
+
+def escape_html(text) -> str:
+    """Text into an Anki field, which is HTML: "1<2" written as it is would lose characters, and a
+    transcript must never put markup into the collection. The newline between two merged
+    utterances stays a line break on the card."""
+    return html.escape(str(text), quote=True).replace("&#x27;", "&#39;").replace("\r\n", "\n").replace("\n", "<br>")
+
+
+_BOLD = re.compile(r"<b\b[^>]*>(.*?)</b>", re.I | re.S)  # \b: <br> is no bold
+
+
+def grow_sentence(existing, cue_text) -> Optional[str]:
+    """Yomitan cuts its sentence out of the line on screen at 。！？, so a card can hold a fragment of
+    the cue. The cue's text instead, as HTML with Yomitan's <b> around the same word; None when
+    `existing` is no fragment of it: the whole line already, or text of the viewer's own.
+
+    A cue can hold two utterances joined by the newline seam_for() put between them, and Yomitan
+    ends its sentence there: the fragment grows inside its own row, never into the other speaker's
+    (0.21.1's extendSentenceField())."""
+    have = match_normalize(existing)
+    full = str(cue_text or "")
+    text = next((row for row in full.split("\n") if have in match_normalize(row)), full)
+    want = match_normalize(text)
+    if not have or len(have) >= len(want) or have not in want:
+        return None
+    bold = _BOLD.search(str(existing))
+    word = match_normalize(bold.group(1)) if bold else ""
+    at = text.find(word) if word else -1
+    if at < 0:
+        return escape_html(text)
+    return escape_html(text[:at]) + "<b>" + escape_html(word) + "</b>" + escape_html(text[at + len(word):])
+
+
+def note_summary(fields, settings: dict) -> dict:
+    """{sentence, word} of a note: the sentence field the settings name (else "Sentence"), the word
+    field they name, else the field with order 0, where every Yomitan template puts the expression."""
+    sentence = field_value(fields, field_key(fields, settings.get("sentence") or "Sentence"))
+    if settings.get("word"):
+        word = field_value(fields, field_key(fields, settings["word"]))
+    else:
+        word = next((str(f.get("value") or "").strip() for f in fields.values()
+                     if isinstance(f, dict) and f.get("order") == 0), "")
+    return {"sentence": sentence, "word": word}
+
+
+MISSING_FIELDS_SHOWN = 8
+MEDIA_FIELD_NAME = re.compile(r"picture|image|screenshot|snapshot|photo|audio|sound|clip", re.I)
+
+
+def missing_fields_error(what: str, missing: list, fields: dict) -> str:
+    """The names looked for, where to change them, then the card's own names (the media-looking ones
+    first): the extension's toast is cut at 240 characters, and the list is the part that runs long."""
+    wanted = " or ".join(f'"{str(name).strip()}"' for name in missing)
+    names = [name for name, _ in sorted(fields.items(), key=lambda kv: (kv[1] or {}).get("order") or 0)]
+    ranked = [n for n in names if MEDIA_FIELD_NAME.search(n)] + [n for n in names if not MEDIA_FIELD_NAME.search(n)]
+    shown = ", ".join(ranked[:MISSING_FIELDS_SHOWN]) + (", …" if len(ranked) > MISSING_FIELDS_SHOWN else "")
+    has = f" Its fields: {shown}." if ranked else ""
+    return (f"The {what} card has no field {wanted}. Check the field names and change them in the settings "
+            f"if they differ: popup > Anki, clips and server.{has}")
+
+
+# What /sync's `anki` carries: the popup's field names and clip settings. Untrusted input: a name is
+# at most 64 characters with none of the ones Anki refuses in a field name ("{}:) and no markup.
+ANKI_FIELD_NAME_RE = re.compile(r'[^\x00-\x1f\x7f"{}:<>]{0,64}')
+ANKI_SETTINGS_DEFAULT = {"auto": True, "picture": "Picture", "audio": "SentenceAudio", "sentence": "",
+                         "word": "", "pad_ms": 200, "format": "mp3"}
+ANKI_PAD_MAX_MS = 2000
+MINE_NONCE_RE = re.compile(r"[A-Za-z0-9_-]{1,40}")
+
+
+def anki_settings(value) -> dict:
+    """The validated `anki` of a /sync body, defaults filled in; ValueError says what is wrong.
+    Keys this server does not know are ignored, so a newer extension still mines here."""
+    if not isinstance(value, dict):
+        raise ValueError("anki must be an object")
+    out = dict(ANKI_SETTINGS_DEFAULT)
+    for key in ("picture", "audio", "sentence", "word"):
+        if key in value:
+            name = value[key]
+            if not isinstance(name, str) or not ANKI_FIELD_NAME_RE.fullmatch(name.strip()):
+                raise ValueError(f"anki.{key} is not a field name")
+            out[key] = name.strip()
+    if "auto" in value:
+        if not isinstance(value["auto"], bool):
+            raise ValueError("anki.auto must be true or false")
+        out["auto"] = value["auto"]
+    if "pad_ms" in value:
+        pad = value["pad_ms"]
+        if isinstance(pad, bool) or not isinstance(pad, (int, float)) or not 0 <= pad <= ANKI_PAD_MAX_MS:
+            raise ValueError(f"anki.pad_ms must be 0-{ANKI_PAD_MAX_MS}")
+        out["pad_ms"] = int(pad)
+    if "format" in value:
+        if value["format"] not in ("mp3", "wav"):
+            raise ValueError("anki.format must be mp3 or wav")
+        out["format"] = value["format"]
+    return out
+
+
+def mine_request(value) -> dict:
+    """The validated `mine` of a /sync body: {cue_id, nonce, session}; ValueError when malformed."""
+    if not isinstance(value, dict):
+        raise ValueError("mine must be an object")
+    cue_id, nonce, session = value.get("cue_id"), value.get("nonce"), value.get("session")
+    if isinstance(cue_id, bool) or not isinstance(cue_id, int) or cue_id < 0:
+        raise ValueError("mine.cue_id must be a cue id")
+    if not isinstance(nonce, str) or not MINE_NONCE_RE.fullmatch(nonce):
+        raise ValueError("mine.nonce is malformed")
+    if session is not None and (not isinstance(session, str) or len(session) > 40):
+        raise ValueError("mine.session is malformed")
+    return {"cue_id": cue_id, "nonce": nonce, "session": session}
+
+
+# --------------------------------------------------------------------------- mining: the picture
+#
+# The card's picture is a frame of the video at the cue, decoded from YouTube's own stream, never
+# from the browser: an H.264 stream of 720p at most, resolved once per video through yt-dlp (with
+# the audio fetch's cookies) and kept for FRAME_STREAM_TTL, seeked and decoded by PyAV. A video
+# whose stream is DRM-protected or does not resolve gets the audio alone; that failure is kept
+# (FRAME_RETRY, or FRAME_STREAM_TTL for DRM), so a card mined every minute does not ask YouTube
+# every minute.
+
+FRAME_FORMAT = "bestvideo[height<=720][vcodec^=avc1]/bestvideo[height<=720]/best[height<=720]"
+FRAME_STREAM_TTL = 4 * 3600.0  # googlevideo URLs live about 6 h
+FRAME_FRESH = 120.0  # a stream URL this young is not re-resolved when it fails to open
+# A resolve that raised (YouTube's bot check, the network) is tried again after this; a verdict
+# (DRM, live, no stream up to 720p) stands as long as a URL would.
+FRAME_RETRY = 600.0
+
+
+class FrameUnavailable(Exception):
+    """No picture for this video: DRM, no stream, no PyAV, nothing decodable at that time."""
+
+
+def frame_time(start: float, end: float) -> float:
+    """Where in a cue the picture is taken: a little in, so the frame belongs to the line (the portal's rule)."""
+    return start + min(0.75, max(0.0, end - start) / 2)
+
+
+def encode_jpeg(frame) -> bytes:
+    """One decoded video frame as a JPEG, with PyAV's own MJPEG encoder (no Pillow, no ffmpeg)."""
+    import av
+
+    codec = av.CodecContext.create("mjpeg", "w")
+    codec.width, codec.height = frame.width, frame.height
+    codec.pix_fmt = "yuvj420p"
+    codec.time_base = frame.time_base or 1
+    codec.options = {"qscale": "3"}
+    image = frame.reformat(format="yuvj420p")
+    data = b"".join(bytes(p) for p in codec.encode(image)) + b"".join(bytes(p) for p in codec.encode(None))
+    if not data.startswith(b"\xff\xd8"):
+        raise FrameUnavailable("the frame did not encode as a JPEG")
+    return data
+
+
+def frame_jpeg(source: str, t: float) -> bytes:
+    """A JPEG of the first frame at or after `t` seconds of `source`, a stream URL or a file."""
+    try:
+        import av
+    except ImportError:
+        raise FrameUnavailable("PyAV is not installed in this Python") from None
+    try:
+        container = av.open(source, timeout=30)
+    except Exception as exc:  # noqa: BLE001 - av.error.* and OSError alike: the stream did not open
+        raise FrameUnavailable(f"the video stream did not open ({exc})") from None
+    with container:
+        stream = container.streams.video[0]
+        base = stream.time_base
+        if t > 1:
+            container.seek(int(t / base), stream=stream)
+        last = None
+        for frame in container.decode(stream):
+            if frame.pts is None:
+                continue
+            last = frame
+            if float(frame.pts * base) >= t - 0.001:
+                return encode_jpeg(frame)
+        if last is not None:
+            return encode_jpeg(last)
+    raise FrameUnavailable("no video frame at that time")
+
+
+class FrameGrabber:
+    """Pictures for mined cards. `resolve(video_id)` is the stream URL (yt-dlp), `decode(url, t)` the
+    JPEG (frame_jpeg); both are replaceable for tests. One resolve per video per FRAME_STREAM_TTL;
+    a failed one is tried again after FRAME_RETRY."""
+
+    def __init__(self, fetcher=None, resolve=None, decode=None, clock=time.time):
+        self.fetcher = fetcher
+        self.resolve = resolve or self.resolve_stream
+        self.decode = decode or frame_jpeg
+        self.clock = clock
+        self.lock = threading.Lock()
+        self.streams: dict = {}  # video_id -> (url or None, resolved at, why it failed, kept for)
+
+    def resolve_stream(self, video_id: str) -> str:
+        import yt_dlp
+
+        opts = dict(self.fetcher.ytdlp_options(video_id), format=FRAME_FORMAT)
+        opts.pop("progress_hooks", None)
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+        if info.get("is_live"):
+            raise FrameUnavailable("a live stream")
+        if info.get("has_drm"):
+            raise FrameUnavailable("the video is DRM-protected")
+        url = info.get("url")
+        if not url:
+            raise FrameUnavailable("no video stream up to 720p")
+        return url
+
+    def stream(self, video_id: str, fresh: bool = False) -> str:
+        with self.lock:
+            now = self.clock()
+            cached = self.streams.get(video_id)
+            if cached and not fresh and now - cached[1] < cached[3]:
+                if cached[0] is None:
+                    raise FrameUnavailable(cached[2])
+                return cached[0]
+            # Out of date entries go, so the dict holds the videos of the last hours alone.
+            for vid in [v for v, entry in self.streams.items() if now - entry[1] >= entry[3]]:
+                del self.streams[vid]
+            try:
+                url = self.resolve(video_id)
+            except FrameUnavailable as exc:
+                self.streams[video_id] = (None, now, str(exc), FRAME_STREAM_TTL)
+                raise
+            except Exception as exc:  # noqa: BLE001 - yt-dlp raises its own types; all mean no picture
+                reason = f"the stream did not resolve ({str(exc)[:160]})"
+                self.streams[video_id] = (None, now, reason, FRAME_RETRY)
+                raise FrameUnavailable(reason) from None
+            self.streams[video_id] = (url, now, None, FRAME_STREAM_TTL)
+            return url
+
+    def grab(self, video_id: str, t: float) -> bytes:
+        url = self.stream(video_id)
+        try:
+            return self.decode(url, t)
+        except FrameUnavailable:
+            with self.lock:
+                age = self.clock() - self.streams.get(video_id, (None, 0.0))[1]
+            if age < FRAME_FRESH:
+                raise
+        # An old URL that no longer opens has expired: one fresh resolve, then that answer stands.
+        return self.decode(self.stream(video_id, fresh=True), t)
+
+
+# --------------------------------------------------------------------------- mining: attaching to new notes
+#
+# Yomitan makes a note from the line on screen; the server attaches the line's audio and picture.
+# AnkiWatcher's look at the newest notes hands the new ids to Miner.notes_added(). A note is
+# attached to when it was made seconds ago, while a video whose client sent `anki` settings with
+# auto on synced in the last ATTACH_SYNC_WINDOW, and its sentence matches one of that video's
+# cues (best_cue()). Only empty picture and audio fields are written; a note is judged once. The
+# viewer's own mine (Alt+Shift+M, a line's mine button) arrives as /sync's `mine` and writes the
+# cue into the newest note, filling its empty fields the same way. Every outcome a client should
+# hear of goes into the session's log, which /sync answers as `mined`.
+
+ATTACH_SYNC_WINDOW = 60.0  # a client syncs at least every 5 s while its tab shows the video
+ATTACH_NOTE_MAX_AGE = 180.0  # a note made longer ago than this when found is not the viewer's lookup
+ATTACH_MAX_BATCH = 5  # more new notes in one look: an import or a sync from another device
+ATTACH_CLIP_WAIT = 60.0  # how long an attach waits for audio still being fetched
+ATTACH_CLIP_RETRY = 2.0
+ANKI_POLL_MINING = 3.0  # the watcher's look while a client mines: a card gets its media in seconds
+MINE_LOG_KEEP = 20
+MINE_LOG_SECONDS = 120.0
+MINE_HANDLED_KEEP = 2000
+
+
+class Miner:
+    """Attaches sentence audio and pictures to new Anki notes. `call(action, params, timeout)` is
+    AnkiConnect; `frames` a FrameGrabber, None for --mine-picture off. One worker thread does every
+    attach (run_forever()); tests call attach_new() and mine_now() directly."""
+
+    def __init__(self, app, call, frames=None, clock=time.time, sleep=time.sleep):
+        self.app, self.call, self.frames, self.clock, self.sleep = app, call, frames, clock, sleep
+        self.jobs: "queue.Queue" = queue.Queue()
+        self.handled: dict = {}  # note id -> None, oldest first: notes judged once, never again
+
+    # ---- what the watcher and /sync hand over
+
+    def watching(self) -> bool:
+        """Whether a client mines right now: the watcher then looks every ANKI_POLL_MINING."""
+        return bool(self.candidates())
+
+    def notes_added(self, ids) -> None:
+        if len(ids) > ATTACH_MAX_BATCH:
+            log.debug("anki mine: %d new notes at once (an import or a sync); none attached to", len(ids))
+            return
+        for note_id in ids:
+            self.jobs.put(("auto", note_id))
+
+    def request(self, s: Session, settings: dict, mine: dict) -> None:
+        self.jobs.put(("manual", s, settings, mine))
+
+    def run_forever(self) -> None:
+        while True:
+            job = self.jobs.get()
+            try:
+                if job[0] == "auto":
+                    self.attach_new(job[1])
+                else:
+                    self.mine_now(*job[1:])
+            except Exception:  # noqa: BLE001 - one bad note never stops the miner
+                log.exception("anki mine: unexpected error")
+
+    # ---- the session log
+
+    @staticmethod
+    def record(s: Session, event: dict, now: float) -> dict:
+        with s.lock:
+            event = dict(event, seq=s.mine_seq, at=now)
+            s.mine_seq += 1
+            s.mined = [e for e in s.mined if now - e["at"] <= MINE_LOG_SECONDS][-(MINE_LOG_KEEP - 1):] + [event]
+        return event
+
+    def remember(self, note_id: int) -> None:
+        self.handled[note_id] = None
+        while len(self.handled) > MINE_HANDLED_KEEP:
+            del self.handled[next(iter(self.handled))]
+
+    # ---- automatic: a note Yomitan just made
+
+    def candidates(self) -> list:
+        """Sessions a new note may belong to, the one synced last first: watched now, with the
+        client's settings and auto on. No /sync (the extension's switch off) means none."""
+        now = self.clock()
+        with self.app.lock:
+            sessions = list(self.app.sessions.values())
+        found = []
+        for s in sessions:
+            with s.lock:
+                if s.anki and s.anki["auto"] and now - s.last_sync <= ATTACH_SYNC_WINDOW and s.cues:
+                    found.append((s.last_sync, s))
+        return [s for _, s in sorted(found, key=lambda pair: pair[0], reverse=True)]
+
+    def attach_new(self, note_id: int) -> Optional[dict]:
+        """Judge one new note; the event recorded, or None when the note was left alone."""
+        if note_id in self.handled:
+            return None
+        self.remember(note_id)
+        now = self.clock()
+        age = now - note_id / 1000.0  # a note id is its creation time in milliseconds
+        if age > ATTACH_NOTE_MAX_AGE:
+            log.debug("anki mine: note %d was made %.0f s ago; left alone", note_id, age)
+            return None
+        candidates = self.candidates()
+        if not candidates:
+            log.debug("anki mine: note %d: no video is being mined from; left alone", note_id)
+            return None
+        info = self.note_info(note_id)
+        if info is None:
+            log.debug("anki mine: note %d is gone; left alone", note_id)
+            return None
+        fields = info["fields"]
+        best = None  # (score, share, -order, session, settings, cue)
+        for order, s in enumerate(candidates):
+            with s.lock:
+                settings, cues, t = s.anki, list(s.cues), s.want_t
+            note = note_summary(fields, settings)
+            if not match_normalize(note["sentence"]):
+                continue  # a card without a sentence names no line; the word alone is in every video
+            found = best_cue(cues, note, t=t)
+            if found and (best is None or (found[1], found[2], -order) > best[:3]):
+                best = (found[1], found[2], -order, s, settings, found[0])
+        if best is None:
+            log.debug("anki mine: note %d matches no line of %s; left alone",
+                      note_id, ", ".join(s.video_id for s in candidates))
+            return None
+        _, _, _, s, settings, cue = best
+        if not any(self.targets(fields, settings)) and self.sentence_update(fields, settings, cue)[1] is None:
+            log.debug("anki mine: note %d already has its picture, audio and whole line; left alone", note_id)
+            return None
+        return self.attach(s, settings, cue, note_id, fields, auto=True)
+
+    # ---- the viewer's own mine: a cue into the newest note
+
+    def mine_now(self, s: Session, settings: dict, mine: dict) -> dict:
+        nonce = mine["nonce"]
+        with s.lock:
+            cue = next((c for c in s.cues if c.get("id") == mine["cue_id"]), None)
+            token = s.token
+        if mine.get("session") not in (None, token) or cue is None:
+            return self.outcome(s, nonce, "no_cue", "The subtitles changed meanwhile; mine the line again")
+        try:
+            ids = self.call("findNotes", {"query": "added:1"}, ANKI_REQUEST_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001
+            return self.outcome(s, nonce, "error", anki_error_text(exc))
+        ids = [i for i in ids if isinstance(i, int)] if isinstance(ids, list) else []
+        if not ids:
+            return self.outcome(s, nonce, "no_note", "No card was added today. Create the card with Yomitan first, then mine.")
+        note_id = max(ids)
+        # Every failure from here on is answered too: the tab waits for this nonce in the log.
+        try:
+            info = self.note_info(note_id)
+            if info is None:
+                return self.outcome(s, nonce, "no_note", "The newest card is no longer in Anki; nothing attached")
+            self.remember(note_id)  # the viewer's choice: the automatic attach leaves it alone from now on
+            return self.attach(s, settings, cue, note_id, info["fields"], auto=False, nonce=nonce)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[%s] anki mine: the mine into note %d failed (%s)", s.video_id, note_id, exc)
+            return self.outcome(s, nonce, "error", anki_error_text(exc), note_id)
+
+    def outcome(self, s: Session, nonce: Optional[str], status: str, message: str, note=None) -> dict:
+        event = {"nonce": nonce, "ok": status == "attached", "status": status, "message": message, "note": note}
+        return self.record(s, event, self.clock())
+
+    # ---- the work
+
+    def note_info(self, note_id: int) -> Optional[dict]:
+        infos = self.call("notesInfo", {"notes": [note_id]}, ANKI_REQUEST_TIMEOUT)
+        info = infos[0] if isinstance(infos, list) and infos else None
+        # AnkiConnect answers {} for a note that is gone.
+        return info if isinstance(info, dict) and isinstance(info.get("fields"), dict) else None
+
+    def targets(self, fields: dict, settings: dict) -> tuple:
+        """(picture key, audio key) of the empty fields this mine fills; None where a field is
+        missing, filled, or (the picture) switched off."""
+        picture = field_key(fields, settings["picture"]) if self.frames is not None else None
+        audio = field_key(fields, settings["audio"])
+        return (picture if picture and not field_value(fields, picture) else None,
+                audio if audio and not field_value(fields, audio) else None)
+
+    @staticmethod
+    def sentence_update(fields: dict, settings: dict, cue: dict) -> tuple:
+        """(sentence key, its new HTML or None). An empty field gets the cue only when the settings
+        name it; a filled one grows from Yomitan's fragment to the cue (grow_sentence()), the one
+        write into a filled field."""
+        key = field_key(fields, settings["sentence"] or "Sentence")
+        have, text = field_value(fields, key), str(cue.get("text") or "")
+        if not key or not text:
+            return key, None
+        if not have:
+            return key, escape_html(text) if settings["sentence"] else None
+        return key, grow_sentence(have, text)
+
+    def attach(self, s: Session, settings: dict, cue: dict, note_id: int, fields: dict, auto: bool,
+               nonce: Optional[str] = None) -> dict:
+        what = "new" if auto else "newest"
+        picture_key, audio_key = self.targets(fields, settings)
+        named = ([settings["picture"]] if self.frames is not None else []) + [settings["audio"]]
+        if not any(field_key(fields, name) for name in named):
+            return self.outcome(s, nonce, "no_fields", missing_fields_error(what, named, fields), note_id)
+        sentence_key, sentence = self.sentence_update(fields, settings, cue)
+        if not picture_key and not audio_key and sentence is None:
+            return self.outcome(s, nonce, "filled", f"The {what} card already has its picture and audio; nothing changed", note_id)
+        base = f"shisuko_{s.video_id}_{int(round(float(cue['start']) * 1000))}"
+        update, notes = {}, []
+        if audio_key:
+            clip = self.clip(s, cue, settings)
+            if clip is None:
+                notes.append("no audio")
+            else:
+                data, _, ext = clip
+                update[audio_key] = f"[sound:{escape_html(self.store(f'{base}.{ext}', data))}]"
+        if picture_key:
+            picture = self.picture(s, cue)
+            if picture is None:
+                notes.append("no picture")
+            else:
+                update[picture_key] = f'<img src="{escape_html(self.store(f"{base}.jpg", picture))}">'
+        if sentence is not None:
+            update[sentence_key] = sentence
+        # Read again just before writing: Yomitan, the viewer or another tool may have changed a
+        # field while the clip and the frame were made. Only a field still holding what it held
+        # when read is written, so an edit made meanwhile is never overwritten.
+        latest = self.note_info(note_id)
+        if latest is None:
+            return self.outcome(s, nonce, "no_note", f"The {what} card is no longer in Anki; nothing attached", note_id)
+        update = {key: value for key, value in update.items() if field_value(latest["fields"], key) == field_value(fields, key)}
+        if not update:
+            return self.outcome(s, nonce, "error", f"Nothing to attach to the {what} card"
+                                + (f" ({'; '.join(notes)})" if notes else ""), note_id)
+        self.call("updateNoteFields", {"note": {"id": note_id, "fields": update}}, ANKI_REQUEST_TIMEOUT)
+        if sentence_key in update and field_value(fields, sentence_key):
+            notes.insert(0, "sentence extended to the whole line")
+        message = f"Added {' + '.join(update)} to the {what} Anki card" + (f" ({'; '.join(notes)})" if notes else "")
+        log.info("[%s] anki mine: %s (note %d, line at %.2f s)", s.video_id, message, note_id, float(cue["start"]))
+        return self.outcome(s, nonce, "attached", message, note_id)
+
+    def store(self, filename: str, data: bytes) -> str:
+        """Anki may rename an upload (lowercase, a suffix on a clash): the field names what it stored."""
+        stored = self.call("storeMediaFile", {"filename": filename, "data": base64.b64encode(data).decode("ascii")},
+                           ANKI_REQUEST_TIMEOUT)
+        return stored if isinstance(stored, str) and stored else filename
+
+    def clip(self, s: Session, cue: dict, settings: dict) -> Optional[tuple]:
+        """The cue's audio with the client's padding, from the server's own audio; None when there is
+        none. Waits a while for audio still being fetched: the cues can be cached, the audio not."""
+        pad = settings["pad_ms"] / 1000.0
+        start = max(0.0, float(cue["start"]) - pad)
+        end = max(start + 0.3, float(cue["end"]) + pad)
+        deadline = self.clock() + ATTACH_CLIP_WAIT
+        while True:
+            try:
+                return self.app.clip(s.video_id, start, end, settings["format"])
+            except ClipNotReady:
+                if self.clock() >= deadline:
+                    log.info("[%s] anki mine: the audio is still being fetched; the card gets none", s.video_id)
+                    return None
+                self.sleep(ATTACH_CLIP_RETRY)
+            except Exception as exc:  # noqa: BLE001 - no clip is a card without audio, not a failed mine
+                log.info("[%s] anki mine: no audio for the card (%s)", s.video_id, exc)
+                return None
+
+    def picture(self, s: Session, cue: dict) -> Optional[bytes]:
+        with s.lock:
+            live = s.live
+        if live:
+            return None  # a live stream's frame at a past time is not there to seek to
+        try:
+            return self.frames.grab(s.video_id, frame_time(float(cue["start"]), float(cue["end"])))
+        except Exception as exc:  # noqa: BLE001 - PyAV raises its own errors mid-decode; no picture is a card without one
+            log.info("[%s] anki mine: no picture for the card (%s)", s.video_id, exc)
+            return None
+
+
+def anki_error_text(exc: Exception) -> str:
+    if isinstance(exc, AnkiUnreachable):
+        return "Anki is not running or AnkiConnect is not installed"
+    return f"AnkiConnect: {str(exc)[:160]}"
+
+
+def resolve_mining(args, environ=os.environ) -> bool:
+    """Whether new notes are attached to. --mine off is off; inside the Docker image the default is
+    off unless --anki-url names an Anki, as for the sync."""
+    mode = getattr(args, "mine", None)
+    if mode == "off":
+        return False
+    return not (mode is None and in_container(environ) and not getattr(args, "anki_url", None))
 
 
 # --------------------------------------------------------------------------- application
@@ -4389,6 +5135,7 @@ class App:
         self.last_evict = time.time()
         self.sweep = self.old_record_sweep() if sweep else iter(())  # the server's own; tools and tests sweep nothing
         self.anki_watcher: Optional[AnkiWatcher] = None  # main() starts it: tools and tests watch nothing
+        self.miner: Optional[Miner] = None  # start_anki_watcher() sets it when new notes are attached to
         self.transcriber = Transcriber(self)
         self.transcriber.start()
 
@@ -4751,14 +5498,29 @@ class App:
         due = s.retry_at or (s.error_at + self.args.retry_after)
         return {"retrying": True, "retry_in": round(max(0.0, due - now), 1)}
 
-    def sync(self, video_id: str, url: str, t: float, since: int, model=None, words: bool = False) -> dict:
+    def sync(self, video_id: str, url: str, t: float, since: int, model=None, words: bool = False,
+             anki=None, mine: Optional[dict] = None, mined_since: Optional[int] = None) -> dict:
         """The /sync answer. `words` asks for each cue's word timings; without it no cue carries
-        any, so a client that never asks sees exactly what it saw before the field existed."""
+        any, so a client that never asks sees exactly what it saw before the field existed.
+
+        `anki` is the client's mining settings (anki_settings()), `mine` a mine it asks for
+        (mine_request()), `mined_since` its cursor into the session's mining log. A body with
+        `anki` or `mined_since` is answered `mined` (the log's entries from the cursor on; none for
+        a cursor of None, which asks only where the log stands), `mined_next` and, for settings
+        that did not validate, `anki_error`; every other answer is what it was before."""
         self.request_model(model)
+        settings, anki_error = None, None
+        if anki is not None:
+            try:
+                settings = anki_settings(anki)
+            except ValueError as exc:
+                anki_error = str(exc)
         s = self.get_session(video_id, url)
         with s.lock:
             s.want_t = max(0.0, float(t))
             s.last_sync = time.time()
+            if settings is not None:
+                s.anki = settings
             since = max(0, min(int(since), len(s.cues)))
             resp = {
                 "ok": True,
@@ -4782,9 +5544,45 @@ class App:
             if s.status == "error":
                 # Added only to an error, so every other answer is what it always was.
                 resp.update(self.retry_state(s, time.time()))
+        if anki is not None or mined_since is not None:
+            resp.update(self.mined_since(s, mined_since))
+            if anki_error:
+                resp["anki_error"] = anki_error
+        # After the log is read: an outcome recorded at once (mining off) lands at or past
+        # `mined_next`, so the next answer carries it, whatever cursor this request had.
+        if mine is not None:
+            self.queue_mine(s, mine)
         resp.update(self.model_state(model))
         self.maybe_evict()
         return resp
+
+    def queue_mine(self, s: Session, mine: dict) -> None:
+        """Hand a mine to the miner, once per nonce: the client sends it again with every /sync
+        until the log answers it, so a lost answer never mines twice."""
+        now = time.time()
+        with s.lock:
+            s.mine_nonces = {n: at for n, at in s.mine_nonces.items() if now - at <= MINE_LOG_SECONDS}
+            if mine["nonce"] in s.mine_nonces:
+                return
+            s.mine_nonces[mine["nonce"]] = now
+            settings = s.anki
+        if self.miner is None:
+            Miner.record(s, {"nonce": mine["nonce"], "ok": False, "status": "off", "note": None,
+                             "message": "Mining is off on the server (--mine off, or the Docker image without --anki-url)"}, now)
+        elif settings is None:
+            Miner.record(s, {"nonce": mine["nonce"], "ok": False, "status": "error", "note": None,
+                             "message": "The mine came without the Anki settings; nothing attached"}, now)
+        else:
+            self.miner.request(s, settings, mine)
+
+    @staticmethod
+    def mined_since(s: Session, since: Optional[int]) -> dict:
+        with s.lock:
+            if since is not None and since > s.mine_seq:
+                since = 0  # a cursor from before a server restart: this log is all new to the client
+            events = [] if since is None else [
+                {k: e[k] for k in ("seq", "nonce", "ok", "status", "message", "note")} for e in s.mined if e["seq"] >= since]
+            return {"mined": events, "mined_next": s.mine_seq}
 
     def clip(self, video_id: str, start: float, end: float, fmt: str):
         """Audio clip for sentence mining. Raises ClipNotReady while the audio is still being fetched."""
@@ -5209,8 +6007,20 @@ class Handler(BaseHTTPRequestHandler):
             return
         # Opt-in: only a literal true adds the word timings, so every other body answers as before.
         words = body.get("words") is True
+        mined_since = body.get("mined_since")
+        if mined_since is not None and (isinstance(mined_since, bool) or not isinstance(mined_since, int) or mined_since < 0):
+            self._json(400, {"ok": False, "error": "invalid mined_since"})
+            return
         try:
-            self._json(200, self.app.sync(video_id, str(body.get("url") or ""), t, since, model, words))
+            mine = mine_request(body["mine"]) if body.get("mine") is not None else None
+        except ValueError as exc:
+            self._json(400, {"ok": False, "error": f"invalid mine: {exc}"})
+            return
+        # Only what the body carries: every other body reaches App.sync() exactly as before.
+        extra = {key: value for key, value in (("anki", body.get("anki")), ("mine", mine), ("mined_since", mined_since))
+                 if value is not None}
+        try:
+            self._json(200, self.app.sync(video_id, str(body.get("url") or ""), t, since, model, words, **extra))
         except Exception as exc:  # noqa: BLE001
             log.exception("sync failed")
             self._json(500, {"ok": False, "error": str(exc)})
@@ -6878,7 +7688,14 @@ def parse_args(argv=None):
                    help="auto (default): watch Anki through AnkiConnect and sync it with AnkiWeb a minute after new notes "
                         "appear, then every 30 s while they keep coming; off: never. Off by default inside the Docker image "
                         "unless --anki-url is given")
-    p.add_argument("--anki-url", type=anki_url, default=None, help=f"AnkiConnect's address for the Anki sync (default {ANKI_DEFAULT_URL})")
+    p.add_argument("--anki-url", type=anki_url, default=None, help=f"AnkiConnect's address for the Anki sync and mining (default {ANKI_DEFAULT_URL})")
+    p.add_argument("--mine", default=None, choices=["auto", "off"],
+                   help="auto (default): give a note Yomitan makes from a subtitle line the line's audio and picture, "
+                        "and take the extension's Alt+Shift+M; off: never write to Anki. Off by default inside the "
+                        "Docker image unless --anki-url is given")
+    p.add_argument("--mine-picture", default="on", choices=["on", "off"],
+                   help="on (default): a mined card gets a frame of the video at its line, from YouTube's stream "
+                        "(one yt-dlp resolve per video); off: the audio alone")
     p.add_argument("--sentence-ends", default="auto", choices=["auto", "off"],
                    help="auto: write a sentence mark where Whisper left one out, when a word ending in a "
                         "sentence-final expression (よね, です, か, a plain form) is followed by a pause; "
@@ -7018,7 +7835,7 @@ def main() -> None:
         log.error("Cannot listen on %s:%d (%s). Is another server already running?", args.host, args.port, exc)
         finish(2)
     server.daemon_threads = True
-    app.anki_watcher = start_anki_watcher(args)
+    app.anki_watcher = start_anki_watcher(args, app)
     log.info("Listening on http://%s:%d  (Ctrl+C to stop)", args.host, args.port)
     try:
         server.serve_forever()

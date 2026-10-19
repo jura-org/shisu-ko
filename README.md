@@ -31,9 +31,9 @@ by `run.cmd` / `run.sh` before each start and by the extension once a day.
 - **Transcript panel** with every line so far. A timestamp jumps there, a pickaxe mines it.
 - **Subtitles where you want them.** Drag the subtitle by its grip to the top of the video, the
   bottom of the window, or beside the video in vertical text, read top to bottom like a book.
-- **Sentence mining by itself.** The moment Yomitan adds a card, a screenshot and an MP3 clip of
-  the line you were reading go into it. The pickaxe on a subtitle or a transcript line, or Alt+Shift+M,
-  does the same on demand, into the newest card or into your Downloads folder.
+- **Sentence mining by itself.** Seconds after Yomitan adds a card, the server puts the line's
+  MP3 clip and a picture of the video at that line into it. The pickaxe on a subtitle or a
+  transcript line, or Alt+Shift+M, does the same on demand, into the newest card.
 - **Word colours** (optional). With Anki running, every word of a line that has a card in your
   deck is coloured by the card's state, green to red, and can carry an overbar in the colour of
   its pitch accent, read from the card. The deck follows your mining, and a verb is found in its
@@ -279,7 +279,7 @@ again by itself when the subtitle language comes back.
 |---|---|
 | Alt+Shift+S | Turn Shisu-ko on or off (the switch in the popup header) |
 | Alt+Shift+L | Toggle the transcript panel |
-| Alt+Shift+M | Mine the current sentence (screenshot + audio) |
+| Alt+Shift+M | Mine the current sentence into the newest Anki card (audio + picture) |
 | Alt+Shift+K | Mark the word under the pointer (or the word selected in a line) as known, or take it off the list again; see [Word colours](#word-colours) |
 | Alt+Shift+H | Hide the status badge in the player's top left, the red "server offline" included, or show it again (the popup's **Status badge on the video, errors too** switch) |
 | ← / → | Jump to the start of the previous / next subtitle. In a gap between lines, Left goes back to the line that just ended. Where nothing is transcribed yet, and before the first subtitle arrives, the keys keep YouTube's five second seek. Can be turned off in the popup |
@@ -299,58 +299,65 @@ beside it) pauses the same way, and leaving it for the page around it resumes th
 
 ## Sentence mining
 
-Mining captures two things for the line you are looking at: a screenshot of the video frame and an
-MP3 clip of that line's audio, cut from the original track with a little padding on both sides.
-The line on screen is the whole of it — the card's sentence and its clip always describe the same
-seconds you just read and heard. Where Yomitan copied only part of the line, because it stopped at
-a 。 inside it, the sentence field is grown back to the line, keeping the bold around the word you
-looked up.
+The server mines, not the extension. A card gets two things for its line: an MP3 clip of that
+line's audio, cut from the original track with a little padding on both sides, and a picture of
+the video a moment into the line. The line on screen is the whole of it: the clip covers exactly
+the seconds of that one subtitle, never the lines around it.
 
-Both are prepared while you watch. Each line that plays has its clip, and with auto-attach on its
-frame, made ready in the background, so making a card attaches them at once, and still attaches
-them after the line has gone from the screen. Nothing is written to disk; a handful of recent
-sentences are held in memory and dropped when you leave the page.
-
-**Anki (default).** Normally you never trigger mining at all:
+**Anki.** Normally you never trigger mining at all:
 
 1. Hover the subtitle; the video pauses.
 2. Scan the word with Yomitan and click its **+** (Yomitan fills word, reading, sentence and
    glossary from its own template).
-3. Within a second Shisu-ko notices the new card and uploads `shisuko_<video>_<time>.jpg` and
-   `.mp3` to Anki's media folder, writing `<img src=...>` and `[sound:...]` into the fields. A
-   toast on the player confirms it. The screenshot is the frame that was on screen when you
-   hovered the line, and playback is left alone so you can keep reading the popup.
+3. Within a few seconds the server notices the new card, uploads `shisuko_<video>_<time>.mp3` and
+   `.jpg` to Anki's media folder and writes `[sound:...]` and `<img src=...>` into the fields. A
+   toast on the player confirms it. Playback is left alone so you can keep reading the popup.
 
-The card is matched to the line it is about. Shisu-ko compares the card's sentence and word
-against the transcript rather than assuming you looked up whatever is on screen now, so a card
-made a few lines later, or while the video kept playing, still gets the right frame and the right
-audio. A card that matches no subtitle is left alone and says so.
+The server looks at Anki's newest notes every 3 s while a tab with auto-attach on is syncing, and
+every 15 s otherwise. The card is matched to the line it is about: the server compares the card's
+sentence and word against the transcript of the video you are watching, so a card made a few
+lines later, or while the video kept playing, still gets the right audio and picture.
 
-Shisu-ko only touches a card that appeared while you were watching, one card at a time, and only
-when the card's sentence matches the subtitle, so an import, a sync or a card made elsewhere is
-never overwritten. When it cannot reach Anki it stays quiet and writes nothing. Turn the watching
-off with **Auto-attach to new Yomitan cards** in the popup; the shortcut and the pickaxe keep
-working either way and attach to the newest card added today.
+The server only touches a card made in the last three minutes, while a video was syncing, whose
+sentence matches one of that video's lines. It fills only empty fields, with one exception: when
+Yomitan cut the card's sentence short at a 。 or ！ inside the line, the server writes the whole
+line in its place, keeping Yomitan's bold word. It reads the card again right before writing,
+leaves a field you changed meanwhile alone, and judges each card once. Several cards appearing at
+once (an import, a sync from another device) are left alone, and so is a card without a sentence.
+A card that matches no line is left alone too; the server log says why. Turn the watching off
+with **Auto-attach to new Yomitan cards** in the popup; the shortcut and the pickaxe keep working
+either way and attach to the newest card added today.
 
 To mine by hand instead:
 
 - hover the subtitle and click the pickaxe that appears at its right edge,
 - press Alt+Shift+M while watching,
-- click the pickaxe on any line in the transcript panel (the video briefly jumps to that line to
-  grab the matching frame, then jumps back).
+- click the pickaxe on any line in the transcript panel.
 
-The first time, Anki shows a dialog asking whether to allow the extension; click **Yes**. Field
-names default to `Picture` and `SentenceAudio`, as used by common Japanese mining note types, and
-match whatever case your note type writes them in (`picture` and `sentenceAudio` in Eminent);
-change them in the popup when yours are named differently. An optional sentence field is filled with the subtitle
-text only when it is empty, so it never overwrites what Yomitan wrote. An optional word field
-names the field holding the expression, used to tell two similar lines apart and, by the
-[word colours](#word-colours), to read each card's word; left empty, the note's first field is
-read. If Anki is not running,
-mining by hand saves the files to Downloads instead (can be turned off).
+The request rides the next `/sync` to the server, which answers with what it did: the fields it
+filled, or why it filled none (no card today, the card already has its audio and picture, the note
+type lacks the fields). Field names default to `Picture` and `SentenceAudio`, as used by common
+Japanese mining note types, and match whatever case your note type writes them in (`picture` and
+`sentenceAudio` in Eminent); change them in the popup when yours are named differently. The popup
+sends them to the server with every `/sync`. An optional sentence field is filled with the
+subtitle text by a mine by hand, and only when it is empty. A sentence Yomitan cut short grows to
+the whole line, by hand or automatically, but only when it is a piece of that line: text of your
+own is never touched. An optional word field names the field holding the expression, used to tell two similar
+lines apart and, by the [word colours](#word-colours), to read each card's word; left empty, the
+note's first field is read.
 
-**Downloads.** With **Send screenshot and audio to** set to Downloads, the files land in
-`Downloads/shisu-ko-mining/`, ready to drag into any card.
+**The picture.** The server takes it from YouTube's own stream, not from the browser: it resolves
+an H.264 stream of 720p at most through yt-dlp, with the same cookies as the audio download, once
+per video, and keeps it 4 hours; PyAV decodes the frame. A DRM-protected video, or one yt-dlp
+cannot resolve, gets the audio alone; a resolve that failed for any reason but DRM is tried again
+after 10 minutes. Before 0.22.0 the browser drew the frame, which failed on
+DRM videos as well; now a video the browser could draw but yt-dlp cannot resolve gets no picture
+either. `--mine-picture off` attaches the audio alone, and `--mine off` stops the server writing
+to Anki at all (see [Server options](#server-options)). A live stream's card gets its audio and no
+picture.
+
+Without Anki there is nothing to mine into: the Downloads folder fallback of earlier versions is
+gone, and with it the extension's `downloads` permission.
 
 **Sync with AnkiWeb.** The server watches Anki and asks it to sync (AnkiConnect's `sync`) a
 minute after a new card appears, so the card is on your phone without pressing Sync. It does not
@@ -365,14 +372,13 @@ when Anki is back. Nothing ever interrupts you; the server log says what happene
 portal's Settings > Anki shows the last sync. `--anki-sync off` turns it off (see
 [Server options](#server-options)). The extension itself never syncs and has no switch for it.
 
-DRM-protected videos block screenshots; the audio clip still works. The Shisu-ko server uses
-port 8790 precisely so that AnkiConnect can keep its default 8765.
+The Shisu-ko server uses port 8790 precisely so that AnkiConnect can keep its default 8765.
 
 ## Word colours
 
 Two optional colourings, both off by default, both in the popup's **Word colours** section. They
-need Anki running with AnkiConnect, the same as mining, and share its permission dialog: click
-**Yes** once. Nothing leaves your computer; the extension only reads your deck.
+need Anki running with AnkiConnect, as mining does, and ask through AnkiConnect's permission
+dialog: click **Yes** once. Nothing leaves your computer; the extension only reads your deck.
 
 **Colour words by their Anki card** colours each word of a subtitle line, and of the transcript
 panel, by the state of its card: green for a card you have learned (in review), yellow for one you
@@ -627,9 +633,8 @@ during a switch, and the hint under the field carries the server's verdict on th
 With the experimental AMD engine on Windows the swap is a restart of the server (see
 [AMD graphics cards](#amd-graphics-cards-experimental)).
 
-The last drawer, **Anki, clips and server**, holds where mined material goes (Anki's newest
-card or the Downloads folder, with an optional Downloads fallback when Anki is unreachable), the
-AnkiConnect URL, the image, audio, sentence, word and pitch accent field names (the last one
+The last drawer, **Anki, clips and server**, holds the AnkiConnect URL (for the word colours;
+the server mines through its own `--anki-url`), the image, audio, sentence, word and pitch accent field names (the last one
 empty means the first field named pitch or accent that holds a readable value), the audio
 padding around the sentence, the clip format (MP3 or WAV), the Shisu-ko server URL (default
 `http://127.0.0.1:8790`) and the **Check for updates** link with the result of the last check.
@@ -641,15 +646,16 @@ Firefox (addon/)                                 Local server (server/), http://
 +----------------------------------+             +------------------------------------------------+
 | content script on youtube.com    |  POST /sync | 1. yt-dlp downloads the audio track once       |
 |  - video id, playhead, model 1x/s| ----------> |    (a live stream: follows its audio segments) |
-|  - renders cues as DOM text      | <---------- | 2. PyAV decodes it to 16 kHz mono              |
-|  - hover pauses, Yomitan scans   |   new cues  | 3. Silero VAD + faster-whisper transcribe      |
-|  - screenshot via <canvas>       |  GET /clip  |    windows at the playhead, then ahead of it   |
-+----------------------------------+ ----------> | 4. /clip cuts sentence audio from the source   |
+|  - Anki field names, a mine      | <---------- | 2. PyAV decodes it to 16 kHz mono              |
+|  - renders cues as DOM text      |   new cues, | 3. Silero VAD + faster-whisper transcribe      |
+|  - hover pauses, Yomitan scans   |   mined log |    windows at the playhead, then ahead of it   |
++----------------------------------+             | 4. Miner: a new card's line audio + a frame    |
         |                                        +------------------------------------------------+
-        | AnkiConnect (http://127.0.0.1:8765): storeMediaFile + updateNoteFields on the newest card;
-        | findNotes + notesInfo on one deck for the word colours
+        | AnkiConnect (http://127.0.0.1:8765): findNotes + notesInfo on one deck for the word
+        | colours, and the deck a mined card went to; never a write
         v
-      Anki  <-- the server: findNotes every 15 s, sync a minute after new notes (--anki-sync)
+      Anki  <-- the server: findNotes every 15 s (3 s while mining), storeMediaFile + updateNoteFields
+                on a new card's empty fields (--mine), sync a minute after new notes (--anki-sync)
 ```
 
 Why a local server instead of running the model in the browser: Whisper large-v3 has 1.5
@@ -764,7 +770,9 @@ sends the YouTube cookies of the browser chosen there (see [YouTube sign-in](#yo
 | `--human-subtitles off` | Build every cue from Whisper alone and ask YouTube for no subtitle track. The default `auto` uses a Japanese track the video's creator uploaded: a line Whisper heard the same way takes the creator's text and line breaks with Whisper's timing, any other stretch stays Whisper's. Cues already cached stay as they are |
 | `--sentence-ends off` | Cut and merge lines on Whisper's own punctuation alone. The default `auto` writes the sentence mark Whisper left out where a word ending in a sentence-final expression (よね, です, ます, か, or a plain form) is followed by a pause, so a run-on line breaks where the speaker ended the sentence and a mined card gets that sentence and no more |
 | `--anki-sync off` | Never sync Anki. The default `auto` watches Anki through AnkiConnect and syncs it with AnkiWeb a minute after new notes appear, then every 30 s while they keep coming (see [Sentence mining](#sentence-mining)); `/health` reports how the last sync went. Off by default inside the Docker image, where 127.0.0.1 is the container, unless `--anki-url` is given |
-| `--anki-url http://127.0.0.1:8765` | AnkiConnect's address for that sync (the default shown) |
+| `--anki-url http://127.0.0.1:8765` | AnkiConnect's address for that sync and for mining (the default shown) |
+| `--mine off` | Never write to Anki. The default `auto` gives a card Yomitan makes from a subtitle line that line's audio and picture, in the fields it left empty (and grows a sentence Yomitan cut short to the whole line), and takes the extension's Alt+Shift+M (see [Sentence mining](#sentence-mining)). Off by default inside the Docker image unless `--anki-url` is given |
+| `--mine-picture off` | A mined card gets the audio alone. The default `on` adds a frame of the video at the line, from YouTube's stream (one yt-dlp resolve per video, kept 4 hours) |
 | `--idle-minutes 30` | Release the decoded audio of a video nobody has synced for this long |
 | `--retry-after 30` | The longest wait between two attempts at a failed audio fetch (the waits start at 2 s and double; a private or removed video is not retried), and the wait before a model name that failed to download or load is tried again |
 | `--js-runtime deno` | JavaScript runtime for yt-dlp: auto, node, deno, bun, or name:path |
@@ -1040,8 +1048,8 @@ Windows:
 
 The extension does not change between native and Docker; both listen on `127.0.0.1:8790`.
 
-The server's Anki sync after mining is off in the container: 127.0.0.1 there is the container
-itself, not the computer running Anki. To turn it on, add `--anki-url` with an address the
+The server's mining and its Anki sync are off in the container: 127.0.0.1 there is the
+container itself, not the computer running Anki. To turn them on, add `--anki-url` with an address the
 container reaches Anki at to the `command:` line, for example
 `http://host.docker.internal:8765` (Docker Desktop; on Linux add
 `extra_hosts: ["host.docker.internal:host-gateway"]` to the service), and set AnkiConnect's
@@ -1092,9 +1100,9 @@ server does not send).
 | `run.cmd --check` says "GPU engine: AMD ROCm installed but not used" | The rest of the line says why: no test of the engine has passed yet, it was installed for another Python, it did not get a model onto the AMD GPU at its last start, or (Linux) ROCm 7.2's libraries are missing. `amd_setup.py --probe` tests it again and switches it on when it passes; `amd_setup.py --remove` takes it out. See [AMD graphics cards](#amd-graphics-cards-experimental). |
 | Subtitles fall further and further behind on a Mac, although the GPU is being used | The model is too large for the memory left over by the browser. large-v3 on an M1 Pro runs at half playback speed with one YouTube video playing, because the GPU's memory is the browser's memory. Type `large-v3-turbo` into the popup's model field; it is the default for new installs and runs at eight times playback speed with the browser open. |
 | A word is wrong that the same model got right on another machine | On a Mac, check the model first: the default there is large-v3-turbo, whose decoder is a quarter of large-v3's and which mishears about one word in twenty lines; type `large-v3` into the popup's model field if the machine can afford it. Beyond that the two backends do not always pick the same homophone (線状降水帯 came out 線上降水帯 on the GPU). Both search five beams, so there is nothing to turn on; check that the server was not started with `--beam-size 1`, and `--device cpu` gives the CPU's answer at about half the speed. |
-| Mining says "AnkiConnect denied access" | Click **Yes** in the dialog Anki shows, then mine again. |
+| Mining does nothing, or says "Anki is not running" | The server mines, through its own `--anki-url`: Anki must run with AnkiConnect where the server reaches it (in Docker, see [Docker](#docker)), and the server must be 0.22.0 or newer. The server log says what it did with each new card. |
 | Mining says the card has no field "Picture" or "SentenceAudio" | Your note type names them differently; the message lists the card's own fields. Enter the right names under Anki, clips and server > Image field / Audio field in the popup (upper and lower case do not matter). |
-| No screenshot, only audio | The video is DRM-protected; the browser refuses to read its frames. |
+| No picture, only audio | The server could not get the video's stream: it is DRM-protected, YouTube refused it (see the cookies under [Server options](#server-options)), or the server runs with `--mine-picture off`. The server log names the reason. |
 
 `run.cmd --check` prints diagnostics, including whether the Start button's launcher is registered;
 `GET http://127.0.0.1:8790/sessions` lists active sessions.
@@ -1117,19 +1125,19 @@ Planned: a distilled, smaller Japanese model that could eventually run in the br
 
 ```
 addon/                Firefox extension (Manifest V3, plain JS, no build step)
-  content.js          overlay, sync loop, hover-pause, transcript, live clock, mining trigger
-  background.js       server proxy, settings, AnkiConnect watching, Downloads handling, server start,
-                      release check (GitHub), badge and notification, the server's update
+  content.js          overlay, sync loop, hover-pause, transcript, live clock, mine requests in /sync
+  background.js       server proxy, settings, server start, release check (GitHub), badge and
+                      notification, the server's update, the word colours' AnkiConnect reads
   settings.js         the one place settings and their defaults are declared
-  match.js, words.js  shared by background.js and content.js: matching a card to its subtitle;
-                      the word colours (reading a note's word and pitch, finding words in a line)
+  words.js            shared by background.js and content.js: the word colours (reading a note's
+                      word and pitch, finding words in a line)
   popup.*             settings UI with the server status, the Start and Update buttons and the update
                       banner, also the preferences page
-  tests/              Node tests for background.js, popup.js, match.js, words.js and the pure helpers
+  tests/              Node tests for background.js, popup.js, words.js and the pure helpers
                       of content.js
 server/
   server.py           HTTP server: yt-dlp + faster-whisper (MLX on Apple Silicon) + live
-                      follower + clip cutting
+                      follower + clip cutting + mining (attaching audio and a frame to Anki notes)
   mlx_beam.py         the beam search mlx-whisper lacks; server.py loads it on the Apple GPU
   kitsune_engine.py   the Kitsune-Transcribe models on PyTorch behind faster-whisper's interface:
                       packages, quantised weights, CTC and cross-attention word timings

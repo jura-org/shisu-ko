@@ -71,7 +71,7 @@
         <input type="checkbox" id="autoMine">
         <span>Auto-attach to new Yomitan cards</span>
       </label>
-      <p class="hint"><kbd>Alt+Shift+M</kbd> mines the current line by hand.</p>
+      <p class="hint"><kbd>Alt+Shift+M</kbd> mines the current line by hand. The server adds the audio and the picture, through AnkiConnect.</p>
     </section>
 
     <!-- Both read the cards of one Anki deck: the one the last mined card went to, unless the
@@ -280,17 +280,6 @@
     <details>
       <summary>Anki, clips and server</summary>
       <div class="drawer">
-        <label class="row field">
-          <span class="lead">Send screenshot and audio to</span>
-          <select id="mineTarget">
-            <option value="anki">Anki, newest card</option>
-            <option value="download">Downloads folder</option>
-          </select>
-        </label>
-        <label class="row check">
-          <input type="checkbox" id="mineFallbackDownload">
-          <span>Save to Downloads if Anki is unreachable</span>
-        </label>
         <label class="row field">
           <span class="lead">AnkiConnect URL</span>
           <input type="text" id="ankiUrl" spellcheck="false">

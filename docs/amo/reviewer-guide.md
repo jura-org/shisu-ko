@@ -11,9 +11,11 @@ video id, the current playback position and the name of the Whisper model chosen
 (a faster-whisper size or a Hugging Face repo id; empty for the server's default) to that server
 once per second while a video plays, receives subtitle cues back and renders them over the
 player as plain DOM text (textContent), so
-popup dictionaries such as Yomitan can scan them. Optionally it sends a screenshot of the video
-frame and an MP3 clip of the sentence to Anki through the AnkiConnect add-on
-(http://127.0.0.1:8765), or saves them to Downloads/shisu-ko-mining/. Two further options, off
+popup dictionaries such as Yomitan can scan them. Sentence mining is the server's: the
+extension passes the user's Anki field names and clip settings to it inside the same request, and
+the viewer's Alt+Shift+M as a field of the next one; the server writes the line's audio and a
+frame of the video into Anki through the AnkiConnect add-on (http://127.0.0.1:8765). The
+extension never writes to Anki and saves no files. Two further options, off
 by default, read one Anki deck through AnkiConnect to colour the words of a line that have a
 card by the card's state and to draw an overbar in the colour of the card's pitch accent; the
 text stays text nodes, inside inline spans that carry only two data attributes.
@@ -66,12 +68,12 @@ The demo recording in the README shows the expected behaviour: https://github.co
    whatever it says (the red "server offline" too), and shows it again; the popup's "Status
    badge on the video, errors too" switch is the same setting.
 
-5. Mining without Anki: open the popup, expand "Anki, clips and server", set "Send screenshot and
-   audio to" to Downloads, then press Alt+Shift+M while a subtitle is shown. A toast confirms and
-   two files (shisuko_<video>_<time>.jpg and .mp3) land in Downloads/shisu-ko-mining/.
-   With Anki + AnkiConnect running instead, Alt+Shift+M attaches the two files to the newest
-   note created today (Anki asks once whether to allow the extension). With Yomitan installed,
-   creating a card from a hovered subtitle attaches them automatically.
+5. Mining (needs Anki with AnkiConnect running beside the server, and a note added today): press
+   Alt+Shift+M while a subtitle is shown. The next /sync carries the request; the server attaches
+   shisuko_<video>_<time>.mp3 and .jpg to the newest note and the toast on the player says what
+   it filled. With Yomitan installed, the server attaches them by itself, within seconds, to a
+   card created from a subtitle. No file is saved by the extension, and without Anki nothing is
+   mined.
 
 6. Live streams: any live stream with DVR (for example one on
    https://www.youtube.com/@ANNnewsCH/streams). Subtitles trail the sound by a few seconds.
@@ -119,7 +121,8 @@ The demo recording in the README shows the expected behaviour: https://github.co
     and pick the deck in the "Deck" select (Anki asks once whether to allow the extension; the
     list is fetched then, and the hint under the select reads "Looking at <deck>" for the
     automatic entry, or nothing for a chosen one). Left on "Automatic", the deck is the one the
-    last card mined in step 5 went to, and nothing is looked up before a card was mined. On the
+    last card mined in step 5 went to (the extension asks Anki for that note's deck with
+    findCards / getDecks), and nothing is looked up before a card was mined. On the
     video, every word of a subtitle that has a card in that deck turns green (a card in review),
     yellow (learning), orange (suspended) or red (new), in the transcript panel as well; a verb
     is found in its conjugations. The deck is read again every 30 s while a video is open, so
@@ -144,8 +147,6 @@ PERMISSIONS
   records for the browser session (the launch and update records below, and the words and
   pitch accents read from the deck for the word colours, "deckNotes", so a restarted
   background page need not read the deck again).
-- downloads: the Downloads fallback for mined screenshot/audio files (browser.downloads.download
-  with a blob: URL created in the background script; the URL is revoked when the download ends).
 - tabs: the popup calls browser.tabs.query({url: <youtube origins>}) to reload the open YouTube
   tabs after the host permission is granted (a query filtered by URL needs this permission); the
   background script routes the keyboard commands with tabs.query({active: true}) and
@@ -200,13 +201,11 @@ CODE THAT MAY NEED A WORD
   the page and nothing is written to it. It is needed because on a live stream the <video>
   element's currentTime restarts at an arbitrary point on every page load, while the cues are
   on the stream's media clock.
-- content.js, captureFrame(): draws the <video> element to a canvas and reads a JPEG for the
-  mined screenshot. DRM-protected videos taint the canvas; the extension then attaches only the
-  audio.
-- background.js, apiRequest()/fetchClip(): the only requests to the server, POST /sync with
-  {video_id, url, t, paused, since, model}, GET /clip?video_id&start&end&format (asked for
-  the sentence being mined, and 400 ms after a line appears for that line and the next one, so
-  the clip is ready when a card is created; see "Pre-mined sentences" in docs/dev/mining.md), GET /health
+- background.js, apiRequest(): the only requests to the server, POST /sync with
+  {video_id, url, t, paused, since, model, anki, mined_since} and, after the viewer's mine,
+  mine: {cue_id, nonce, session} until the server answers it (anki is the popup's field names,
+  padding and clip format; the answer's mined lists what the server wrote, which the content
+  script toasts; see docs/dev/mining.md), GET /health
   (the popup's status line, every 2 s while it is open; once at browser start and at install
   or update of the extension, from startupCheck(), for the badge and the start-up
   notification; and, after a click on the update notification, every 3 s for up to 120 s
@@ -215,9 +214,8 @@ CODE THAT MAY NEED A WORD
   (only from the popup's Update button or a click on the update notification; the server
   answers {ok, restarting, version} and exits so that its own launcher runs the project's
   update.py and starts it again, or 409 {ok: false, error} when it cannot); anki():
-  AnkiConnect JSON requests. For mining: requestPermission, findNotes ("added:1"),
-  storeMediaFile, updateNoteFields, notesInfo for the one note being filled, and after it
-  findCards / getDecks for that note, to remember its deck. For the word colours (only while
+  AnkiConnect JSON requests, reads only. After the server reports a note it filled: findCards /
+  getDecks for that note, to remember its deck for the word colours. For the word colours (only while
   one of the two options is on; the "word colours" section of background.js): deckNames for
   the popup's deck list, findNotes on the one deck with is:suspended / -is:suspended / is:new /
   is:learn / is:review clauses (five searches, and a sixth, edited:<days>, on a refresh, with
@@ -252,9 +250,9 @@ DATA COLLECTION DECLARATION
 The manifest declares data_collection_permissions: none. The extension collects nothing and
 transmits nothing about the user off the device: its peers besides youtube.com are two
 programs on the same computer that the user installed for this purpose (the companion server
-and Anki), and what they receive (the id and playback position of the video being watched; a
-screenshot and an audio clip of the sentence being mined) is the add-on's stated primary
-function; what the add-on reads from Anki for the word colours (one deck's notes) stays on the
+and Anki), and what they receive (the id and playback position of the video being watched, and
+the Anki field names and clip settings the server mines with; the extension sends Anki nothing)
+is the add-on's stated primary function; what the add-on reads from Anki for the word colours (one deck's notes) stays on the
 device, in memory and in the extension's storage. The one remote request, the anonymous release check against GitHub's public API
 described under PERMISSIONS, carries no data about the user, the browser or the videos
 watched. The privacy policy on the listing describes this in full.

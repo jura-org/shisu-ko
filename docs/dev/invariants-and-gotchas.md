@@ -58,7 +58,14 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   `alarms` and no `ankiAutoSync`; `portal/tests/test_portal.py` that the portal names no `sync`.
   A stored `ankiAutoSync` (0.20.0, 0.21.0) is inert, and a leftover `auto_sync` in `portal.json`
   is accepted with one warning (`RETIRED_KEYS`), where any other unknown key stops the portal.
-- The extension's permissions are pinned to the 0.19.1 lists by `ALLOWED_PERMISSIONS` in
+- The server attaches; the extension never writes to Anki. `Miner` in `server.py` fills a new
+  Yomitan note's empty picture and audio fields and never overwrites a filled one but the
+  sentence: `grow_sentence()` replaces a fragment of the matched cue (Yomitan cuts at 。！？) with
+  the cue's row, Yomitan's `<b>` kept, and leaves any other text alone (see `mining.md`); the viewer's
+  own mine reaches it as `/sync`'s `mine`, so mining added no endpoint. `addon/tests/settings.test.js`
+  holds that no file in `addon/` names `updateNoteFields`, `storeMediaFile`, `addNote` or
+  `browser.downloads`; the extension reads Anki for the word colours alone (see `mining.md`).
+- The extension's permissions are pinned to the 0.19.1 lists less `downloads` (gone in 0.22.0 with the Downloads fallback) by `ALLOWED_PERMISSIONS` in
   `scripts/tests/build.test.mjs`, for both built manifests, host permissions and content-script
   matches included. A new permission or host permission sends a release to the Chrome Web Store's
   manual review; the owner's rule is to add none and to remove one that falls out of use. A change
@@ -130,8 +137,8 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   `-w8a8` and `-w8a16` spellings (byte-identical files) are one model and one cue cache.
 - `enabled` in the settings is the master switch (the header toggle in the popup, Alt+Shift+S). Off
   must mean nothing happens on YouTube pages: no `/sync`, no overlay, no native-caption hiding, no
-  arrow-key handling, no Anki polling, no mining (the cues outlive the switch, so Alt+Shift+M would
-  still find one), no known word marked (Alt+Shift+K, `markKnown()`, would find one in them too and
+  arrow-key handling, no mining (no `/sync` means no session the server attaches for; and the cues
+  outlive the switch, so Alt+Shift+M would still find one to send as `mine`), no known word marked (Alt+Shift+K, `markKnown()`, would find one in them too and
   write the setting), no status badge switched (Alt+Shift+H), no `cardStatus` asks for the word
   colours' deck index (`wordColoursOn()` in `content.js` includes `enabled`, and the poll runs
   from `syncTick()`), so no request reaches Anki from a YouTube tab. Only the toggle command
@@ -140,9 +147,9 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
 - The overlay lives in the page's DOM, where any script on youtube.com can dispatch events on
   it, so its handlers (`onMineClick`, `onTranscriptClick`, `onSubtitleEnter`, `onSubtitleLeave`,
   the transcript's close button) act only on trusted events (`ev.isTrusted`): a synthetic click
-  must not write a card, save a file, seek or pause. The keyboard commands arrive through the
-  browser, not the page. Text from the server is written into Anki's HTML fields only through
-  `escapeHtml()` in `background.js`; the overlay shows it through `textContent`.
+  must not ask for a card, seek or pause. The keyboard commands arrive through the
+  browser, not the page. Server text is written into Anki's HTML fields only through
+  `escape_html()` in `server.py`; the overlay shows it through `textContent`.
 - Live streams run on the stream's media clock, `getProgressState().current` of YouTube's player
   (read through `wrappedJSObject`, Firefox only), never on `video.currentTime`, which restarts at
   an arbitrary point on every page load. Every place the content script reads or seeks the
@@ -321,7 +328,10 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   every `.shisuko-outside` layer on the body, before it builds its own. Its `shisuko-hide-native` class needs nothing, since the boot's
   `applySettings()` sets or clears it from the settings. Chrome's orphans keep running with a
   dead runtime and tear themselves down (`runtimeAlive()`, `shutdown()`).
-- Screenshots fail on DRM-protected videos (tainted canvas); the audio clip still works.
+- A mined card's picture comes from YouTube's stream through yt-dlp (`FrameGrabber`), not from the
+  browser: a DRM-protected video, or one yt-dlp cannot resolve, gets the audio alone. A DRM,
+  live or no-stream verdict is kept for the stream's 4 hours; any other failed resolve for
+  `FRAME_RETRY` (10 min).
 - The native server and the container both use port 8790; run one at a time.
 - Firefox runs a `.cmd` native host through `cmd.exe /s /c "<host> <manifest path> <extension id>"`,
   Chrome through `cmd.exe` too, with the extension's origin and, on Windows,
@@ -336,9 +346,6 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   (a getter); a copy taken at load read "permission missing" until the worker restarted.
 - `scripts/browser-smoke.mjs` waits for `#server-status` to read exactly `Server offline` and
   then `Server online`; keep those badge texts.
-- `browser.downloads.download()` refuses `data:` URLs ("Access denied for URL data:...", thrown
-  synchronously before any promise exists): an extension may not load a URL that inherits its
-  principal. Build a `Blob`, pass `URL.createObjectURL()` from the background page, revoke it later.
 - The toolbar popup's document dies with the click outside it that closes it, and a text field's
   `change` event fires on that very close: `flushSave()` in `popup.js` sends the save before any
   `await`, from `pagehide` and `visibilitychange` as well as the 150 ms debounce, and sends only
