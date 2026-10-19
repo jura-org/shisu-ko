@@ -72,7 +72,7 @@ the client only ever sees opaque tokens (below). Video IDs are checked against
 Which deck and note type a word goes to, and what each field holds, is set up in the page
 (Settings > Anki), stored as `card` in `portal-state.json`. `~/.shisu-ko/portal.json`, when
 present, overrides any of its keys (`deck`, `note_model`, `tags`, `duplicate_scope`, `fields`,
-`first_field`, `sentence_field`, `default_gloss_dictionary`, and `auto_sync`, below); the page then
+`first_field`, `sentence_field`, `default_gloss_dictionary`); the page then
 shows those choices as fixed. `validate_card()` checks both; an unknown key or a bad value in the file stops the portal at
 start with the reason. There are no built-in defaults: until a deck, a note type and its fields are
 set, the home screen says so and the first Mine opens the setup.
