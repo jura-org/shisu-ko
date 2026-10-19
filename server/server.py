@@ -46,6 +46,8 @@ import difflib
 import errno
 import gc
 import glob
+import hashlib
+import html
 import io
 import json
 import logging
@@ -1824,6 +1826,227 @@ def retry_prompt_skips(model, audio, options: dict, segs, offset: float, speech)
     return spliced, sum(g[2] for g in stretches), added
 
 
+# --------------------------------------------------------------------------- human subtitles
+
+# A track the video's creator uploaded (yt-dlp's `subtitles`) is better text than Whisper's: the
+# names, the kanji and the sentence ends a person chose. YouTube's own recogniser
+# (`automatic_captions`, "ja-orig" among them) never counts, punctuated or not: it makes errors
+# Whisper does not (homophones) and cuts its lines at a fixed length, mid-word. A person's timing
+# is loose by a few hundred milliseconds, so a cue takes its text and its line from the track and
+# its times from the Whisper words that text aligns with. docs/dev/cue-building.md, "Human
+# subtitles", has the rules and the measurements.
+HUMAN_SUBS_LANGUAGES = frozenset({"ja"})       # measured on Japanese, and only there
+HUMAN_SUBS_FORMATS = ("json3", "srv3", "vtt")  # json3 and srv3 time in milliseconds; vtt is the fallback
+HUMAN_SUBS_MAX_BYTES = 4 * 1024 * 1024
+HUMAN_SUBS_WORD_TIMED = 0.5   # a track with more of its lines timed word by word than this is ASR output
+HUMAN_SUBS_UNMARKED = 0.95    # ... and so is one whose rows carry no punctuation and no space at all
+HUMAN_SUBS_MIN_ROWS = 20      # a short track is too little to judge the second rule on
+
+SUBTITLE_SOUND_WORDS = ("笑", "拍手", "音楽", "bgm", "歓声", "効果音", "ため息", "咳", "泣", "se", "music",
+                        "applause", "laugh", "鳴き声", "チャイム", "物音", "沈黙", "無音", "雑音", "ノイズ", "♪")
+SUBTITLE_TURN_RE = re.compile(r"^(?:>>|＞＞|≫|»|[-－]\s)\s*")
+SUBTITLE_SQUARE_RE = re.compile(r"[\[［][^\]］\n]{0,30}[\]］]")
+SUBTITLE_MUSIC_RE = re.compile(r"[♪♫♬♩\U0001F3B5\U0001F3B6]")
+SUBTITLE_PAREN_RE = re.compile(r"[（(]([^（）()\n]{1,30})[）)]")
+SUBTITLE_LABEL_RE = re.compile(r"^【[^】\n]{1,20}】")
+SUBTITLE_NAME_RE = re.compile(r"^[^\s：:、。，,！？!?「」『』（）()0-9０-９]{1,10}[：:](?=\s*\S)")
+SUBTITLE_SPACE_RE = re.compile(r"[ \t　]+")
+SUBTITLE_MARKS = set("。、，,．.！？!?…「」『』“”\"・")
+VTT_TIME_RE = re.compile(r"(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{3})")
+VTT_INLINE_TIME_RE = re.compile(r"<(?:\d+:)?\d{1,2}:\d{2}[.,]\d{3}>")
+MARKUP_RE = re.compile(r"<[^>\n]*>")
+
+
+def human_subtitles_on(args) -> bool:
+    """--human-subtitles auto and a language the rules were measured on. A namespace without the
+    switch (the tools', the tests') reads as off, so nothing there reaches the network."""
+    return getattr(args, "human_subtitles", "off") == "auto" and getattr(args, "language", "") in HUMAN_SUBS_LANGUAGES
+
+
+def asr_format(fmt: dict) -> bool:
+    """A track YouTube itself labels as speech recognition, wherever yt-dlp filed it."""
+    query = parse_qs(urlsplit(str(fmt.get("url") or "")).query)
+    name = str(fmt.get("name") or "").lower()
+    return "asr" in query.get("kind", []) or "auto-generated" in name or "自動生成" in name
+
+
+def pick_human_track(subtitles, language: str) -> Optional[tuple]:
+    """(key, format dict) of the creator's track for `language`, or None.
+
+    `ja` before `ja-JP` and any other regional tag; never `ja-orig`, which is YouTube's own
+    recognition of the original audio. Only ever handed info["subtitles"], never
+    info["automatic_captions"].
+    """
+    if not isinstance(subtitles, dict):
+        return None
+    keys = sorted((k for k in subtitles if isinstance(k, str)
+                   and (k.lower() == language or k.lower().startswith(language + "-"))
+                   and not k.lower().endswith("-orig")), key=lambda k: (k.lower() != language, k))
+    for key in keys:
+        formats = [f for f in subtitles.get(key) or [] if isinstance(f, dict) and isinstance(f.get("url"), str)]
+        if any(asr_format(f) for f in formats):
+            continue
+        for ext in HUMAN_SUBS_FORMATS:
+            for fmt in formats:
+                if fmt.get("ext") == ext:
+                    return key, fmt
+    return None
+
+
+def parse_json3(raw: str) -> tuple:
+    """YouTube's json3 -> ([(start, end, text)], how many lines are timed word by word)."""
+    data = json.loads(raw)
+    lines, timed = [], 0
+    for ev in (data.get("events") if isinstance(data, dict) else None) or []:
+        if not isinstance(ev, dict):
+            continue
+        segs = [g for g in ev.get("segs") or [] if isinstance(g, dict)]
+        text = "".join(str(g.get("utf8") or "") for g in segs)
+        if not text.strip():
+            continue
+        start = float(ev.get("tStartMs") or 0) / 1000.0
+        if any("tOffsetMs" in g for g in segs[1:]) or any("acAsrConf" in g for g in segs):
+            timed += 1
+        lines.append((start, start + float(ev.get("dDurationMs") or 0) / 1000.0, text))
+    return lines, timed
+
+
+def parse_srv3(raw: str) -> tuple:
+    """YouTube's srv3 (timed text XML) -> ([(start, end, text)], lines timed word by word)."""
+    import xml.etree.ElementTree as ET
+
+    lines, timed = [], 0
+    for p in ET.fromstring(raw).iter("p"):
+        parts, words = [p.text or ""], 0
+        for child in p:
+            parts.append("\n" if child.tag == "br" else "".join(child.itertext()))
+            words += child.tag == "s" and (child.get("t") is not None or child.get("ac") is not None)
+            parts.append(child.tail or "")
+        text = "".join(parts)
+        if not text.strip():
+            continue
+        start = int(p.get("t") or 0) / 1000.0
+        timed += words > 1
+        lines.append((start, start + int(p.get("d") or 0) / 1000.0, text))
+    return lines, timed
+
+
+def vtt_seconds(text: str) -> Optional[float]:
+    m = VTT_TIME_RE.match(text.strip())
+    if m is None:
+        return None
+    hours, minutes, seconds, millis = m.groups()
+    return int(hours or 0) * 3600 + int(minutes) * 60 + int(seconds) + int(millis) / 1000.0
+
+
+def parse_vtt(raw: str) -> tuple:
+    """WebVTT -> ([(start, end, text)], cues timed word by word, YouTube's <00:00:01.234> tags)."""
+    lines, timed = [], 0
+    for block in re.split(r"\n[ \t]*\n", raw.replace("\r\n", "\n").replace("\r", "\n")):
+        rows = block.split("\n")
+        for i, row in enumerate(rows):
+            if "-->" not in row:
+                continue
+            head, _, tail = row.partition("-->")
+            start, end = vtt_seconds(head), vtt_seconds(tail)
+            body = "\n".join(rows[i + 1:]).strip("\n")
+            if start is not None and end is not None and body.strip():
+                timed += bool(VTT_INLINE_TIME_RE.search(body))
+                lines.append((start, end, html.unescape(MARKUP_RE.sub("", body))))
+            break
+    return lines, timed
+
+
+def is_sound_tag(inner: str) -> bool:
+    """（拍手）, [音楽], (laughs): a bracketed sound, not speech. A Latin tag counts as a whole word."""
+    low = inner.lower()
+    return len(inner) <= 12 and any(re.search(rf"\b{w}", low) if w.isascii() else w in low
+                                    for w in SUBTITLE_SOUND_WORDS)
+
+
+def is_ruby(head: str, inner: str) -> bool:
+    """（よみ） straight after kanji, all hiragana and no longer than such a reading runs: furigana."""
+    run = 0
+    for ch in reversed(head):
+        if not is_kanji(ch):
+            break
+        run += 1
+    return run > 0 and all(is_hiragana(c) for c in inner) and len(inner) <= 4 * run
+
+
+def clean_subtitle_row(row: str) -> str:
+    """One row of a person's subtitle without what is not speech: a speaker label (（田中）, 田中：,
+    【田中】, a >> or - turn mark), a sound tag ([笑], （拍手）, ♪), furigana in brackets after its
+    kanji; whitespace runs squeezed to one."""
+    row = SUBTITLE_TURN_RE.sub("", row.strip())
+    row = SUBTITLE_MUSIC_RE.sub("", SUBTITLE_SQUARE_RE.sub("", row)).strip()
+    row = SUBTITLE_LABEL_RE.sub("", row).strip()
+    out, pos = [], 0
+    for m in SUBTITLE_PAREN_RE.finditer(row):
+        inner, head = m.group(1).strip(), row[:m.start()]
+        # At the row's start it names the speaker, or is a stage note when nothing follows it.
+        drop = is_sound_tag(inner) or not head.strip() or is_ruby(head, inner)
+        out.append(row[pos:m.start()] if drop else row[pos:m.end()])
+        pos = m.end()
+    row = ("".join(out) + row[pos:]).strip()
+    row = SUBTITLE_NAME_RE.sub("", row).strip()
+    return SUBTITLE_SPACE_RE.sub(lambda m: "　" if "　" in m.group(0) else " ", row)
+
+
+def clean_subtitle_text(text: str) -> str:
+    """A track line as a cue's text: model-text cleaning (controls, private use, format characters),
+    each row through clean_subtitle_row(), empty rows gone. The track's own line breaks stay row
+    breaks: they are where the person who made it put them, often a turn between two speakers."""
+    rows = (clean_subtitle_row(r) for r in clean_model_text(text, keep_newline=True).split("\n"))
+    return "\n".join(r for r in rows if r)
+
+
+def unmarked_track(lines) -> bool:
+    """Rows without one punctuation mark or space anywhere: YouTube's recogniser's text uploaded as
+    a track, cut at a fixed length mid-word. A person marks a sentence somehow, with 。 or a space."""
+    rows = [r for _, _, t in lines for r in t.split("\n") if r.strip()]
+    if len(rows) < HUMAN_SUBS_MIN_ROWS:
+        return False
+    bare = sum(1 for r in rows if not (set(r) & SUBTITLE_MARKS) and " " not in r and "　" not in r)
+    return bare >= HUMAN_SUBS_UNMARKED * len(rows)
+
+
+def human_subtitle_lines(raw: bytes, ext: str) -> Optional[list]:
+    """A downloaded track as [[start, end, text]], cleaned and in time order, or None when it is
+    empty or reads as speech recognition (lines timed word by word, or no row marked)."""
+    parser = {"json3": parse_json3, "srv3": parse_srv3, "vtt": parse_vtt}.get(ext)
+    if parser is None:
+        return None
+    lines, timed = parser(raw.decode("utf-8-sig", errors="replace"))
+    if not lines or timed > HUMAN_SUBS_WORD_TIMED * len(lines) or unmarked_track(lines):
+        return None
+    out: list = []
+    for start, end, text in sorted(lines, key=lambda line: (line[0], line[1])):
+        text = clean_subtitle_text(text)
+        if not text or end <= start:
+            continue
+        if out and out[-1][2] == text and start <= out[-1][1] + 0.1:
+            out[-1][1] = round(max(out[-1][1], end), 2)  # one line the track split in two
+            continue
+        out.append([round(start, 2), round(end, 2), text])
+    return out or None
+
+
+def human_lines_from_record(value) -> tuple:
+    """(track, lines) out of a cache record's "human_subs", or (None, []) when it was never asked.
+
+    The track is a signature string, "" when the video was asked and has none to use."""
+    if not isinstance(value, dict):
+        return None, []
+    track = value.get("track")
+    lines = []
+    for line in value.get("lines") or []:
+        if (isinstance(line, list) and len(line) == 3 and all(isinstance(x, (int, float)) for x in line[:2])
+                and isinstance(line[2], str) and line[2] and line[1] > line[0]):
+            lines.append([float(line[0]), float(line[1]), line[2]])
+    return (track if isinstance(track, str) and track else ""), (lines if track else [])
+
+
 # --------------------------------------------------------------------------- sessions
 
 @dataclass
@@ -1879,6 +2102,12 @@ class Session:
     # language in, which a stretch carrying on from it past a window's end inherits.
     talk_rms: float = 0.0
     sung: list = field(default_factory=list)
+    # The creator's own subtitle track (human_subtitle_lines()): its signature, "" when the video
+    # was asked and has none to use, None while it has not been asked; its cleaned lines; and
+    # whether this session has asked, so a failed request is not repeated on every sync.
+    human_track: Optional[str] = None
+    human_lines: list = field(default_factory=list)
+    human_asked: bool = False
     lock: threading.RLock = field(default_factory=threading.RLock)
 
     def cache_path(self) -> Path:
@@ -2277,12 +2506,21 @@ def declared_language(info) -> Optional[str]:
     return value.strip().replace("_", "-").split("-")[0].lower() or None
 
 
+def store_human_track(s: Session, track: str, lines: list) -> None:
+    """What a Fetcher without an App does with the creator's track: keep it on the session."""
+    with s.lock:
+        s.human_track, s.human_lines = track, lines
+
+
 class Fetcher:
     def __init__(self, args, clock=time.time, sleep=time.sleep, rng=random.random):
         self.args = args
         self.clock = clock
         self.sleep = sleep
         self.rng = rng
+        # Called with (session, track, lines) once the creator's subtitles are known; without one,
+        # store_human_track() keeps them on the session.
+        self.on_human_subtitles = None
 
     def cookies_note(self) -> str:
         """What a download sends YouTube for a sign-in, in words for friendly_error(); "" for nothing."""
@@ -2421,6 +2659,7 @@ class Fetcher:
                     return True
             else:
                 log.info("[%s] using cached audio %s", s.video_id, path.name)
+                self.start_human_check(s)
             with s.lock:
                 if s.live:
                     # The stream ended and came back as a video: its clock starts over, so the cues
@@ -2563,6 +2802,8 @@ class Fetcher:
                 raise ForeignLanguage(language)
             if info.get("is_live"):
                 return None
+            # A copy: process_ie_result() goes on filling `info` on this thread.
+            self.start_human_check(s, {k: copy.deepcopy(info.get(k)) for k in ("id", "subtitles", "language")})
             try:
                 ydl.process_ie_result(info, download=True)
             except Exception as exc:  # noqa: BLE001
@@ -2580,6 +2821,61 @@ class Fetcher:
         if path is None:
             raise RuntimeError("yt-dlp finished but no audio file was produced")
         return path
+
+    def start_human_check(self, s: Session, info=None) -> None:
+        """Ask for the creator's subtitles on a thread of their own, once per session: the audio
+        never waits for them, and a video that has none, or a request that fails, costs nothing
+        but the request. `info` is the metadata download_once() already holds; without it the
+        thread asks YouTube for it, one metadata request."""
+        if not human_subtitles_on(self.args):
+            return
+        with s.lock:
+            if s.live or s.human_track is not None or s.human_asked:
+                return
+            s.human_asked = True
+        threading.Thread(target=self.check_human_subtitles, args=(s, info), daemon=True,
+                         name=f"subs-{s.video_id}").start()
+
+    def check_human_subtitles(self, s: Session, info=None) -> None:
+        try:
+            import yt_dlp
+
+            with yt_dlp.YoutubeDL(self.ytdlp_options(s.video_id)) as ydl:
+                if info is None:
+                    info = ydl.extract_info(f"https://www.youtube.com/watch?v={s.video_id}", download=False,
+                                            process=False)
+                track, lines = self.read_human_track(ydl, info)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[%s] the creator's subtitles could not be read (%s); Whisper alone", s.video_id, exc)
+            return
+        if track:
+            log.info("[%s] the creator's subtitles (%s): %d lines", s.video_id, track.split(":")[0], len(lines))
+        (self.on_human_subtitles or store_human_track)(s, track, lines)
+
+    def read_human_track(self, ydl, info) -> tuple:
+        """(signature, lines) of the creator's track for --language, ("", []) for none to use.
+
+        A video YouTube names another language gets none: a Japanese track on it is a
+        translation, not what is said. A live stream has no tracks while it is live.
+        """
+        if info.get("is_live") or declared_language(info) not in (None, self.args.language):
+            return "", []
+        picked = pick_human_track(info.get("subtitles"), self.args.language)
+        if picked is None:
+            return "", []
+        key, fmt = picked
+        resp = ydl.urlopen(fmt["url"])
+        try:
+            raw = resp.read(HUMAN_SUBS_MAX_BYTES + 1)
+        finally:
+            resp.close()
+        if len(raw) > HUMAN_SUBS_MAX_BYTES:
+            raise ValueError(f"the track is over {HUMAN_SUBS_MAX_BYTES} bytes")
+        lines = human_subtitle_lines(raw, fmt["ext"])
+        if lines is None:
+            log.info("[%s] the uploaded %s track reads as speech recognition; not used", info.get("id") or "?", key)
+            return "", []
+        return f"{key}.{fmt['ext']}:{hashlib.sha1(raw).hexdigest()[:12]}", lines
 
     def follow_live(self, s: Session) -> None:
         log.info("[%s] live stream: following the audio segments%s", s.video_id, f": {s.title}" if s.title else "")
@@ -3678,6 +3974,10 @@ class App:
                 s.fetching = True
         if need_fetch:
             threading.Thread(target=self.fetcher.fetch, args=(s,), daemon=True, name=f"fetch-{video_id}").start()
+        elif s.status == "ready" and not s.fetching and human_subtitles_on(self.args):
+            # A video the cache covers to its end is never fetched, so nothing else would ask
+            # whether it has the creator's subtitles; a fetch asks on its own.
+            self.fetcher.start_human_check(s)
         return s
 
     def retry_due(self, s: Session, now: float) -> bool:
@@ -3850,6 +4150,7 @@ class App:
         s.seg_next = max((int(c.get("seg", -1)) for c in s.cues), default=-1) + 1
         s.speech = merge_intervals(data.get("speech", []))
         s.covered = merge_intervals(data.get("covered", []))
+        s.human_track, s.human_lines = human_lines_from_record(data.get("human_subs"))
         s.duration = float(data.get("duration") or 0.0)
         watch = data.get("language_state")
         # Not restored with detection off: nothing could ever clear it again, and --language-patience 0
@@ -3923,7 +4224,7 @@ class App:
     def cache_record(self, s: Session) -> dict:
         """What save_cache() writes for a session (retranscribe.py writes the same shape elsewhere)."""
         with s.lock:
-            return {
+            record = {
                 "video_id": s.video_id, "title": s.title, "duration": s.duration,
                 "format": CACHE_FORMAT,
                 "model": self.model_name, "language": self.args.language,
@@ -3937,6 +4238,12 @@ class App:
                 "language_state": {"foreign_seconds": round(s.foreign_seconds, 2),
                                    "heard": s.heard, "paused": s.language_paused},
             }
+            if s.human_track is not None:
+                # Asked: the lines are kept, so a later window needs no second request, and a record
+                # asked once is not asked again. Absent means never asked.
+                record["human_subs"] = ({"track": s.human_track, "lines": s.human_lines} if s.human_track
+                                        else {"track": None})
+            return record
 
     def save_cache(self, s: Session) -> None:
         with s.lock:
