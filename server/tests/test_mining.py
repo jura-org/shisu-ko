@@ -611,6 +611,35 @@ def test_the_viewers_mine_grows_the_newest_cards_fragment_too(rig):
     assert event["ok"] and rig.anki.notes[nid]["Sentence"]["value"] == "これは<b>猫</b>です。とても可愛い。"
 
 
+def test_a_mine_that_fails_inside_anki_is_answered(rig):
+    s = rig.session()
+    rig.anki.add(fresh_id(), note_fields(Sentence="これはテスト字幕です"))
+    real = rig.anki.__call__
+
+    def refuse(action, params, timeout):
+        if action == "updateNoteFields":
+            raise RuntimeError("collection is not available")
+        return real(action, params, timeout)
+
+    rig.miner.call = refuse
+    event = rig.miner.mine_now(s, s.anki, {"cue_id": 1, "nonce": "n1", "session": None})
+    assert event["status"] == "error" and "collection is not available" in event["message"]
+    assert s.mined[-1]["nonce"] == "n1"
+
+
+def test_a_picture_that_fails_mid_decode_still_gives_the_audio(rig):
+    rig.session()
+
+    def broken(url, t):
+        raise OSError("Invalid data found when processing input")
+
+    rig.frames.decode = broken
+    nid = fresh_id()
+    rig.anki.add(nid, note_fields(Sentence="これはテスト字幕です"))
+    event = rig.miner.attach_new(nid)
+    assert event["ok"] and "no picture" in event["message"]
+
+
 def test_no_picture_attaches_the_audio_alone(rig):
     rig.session()
     rig.frames.resolve = lambda vid: (_ for _ in ()).throw(server.FrameUnavailable("the video is DRM-protected"))

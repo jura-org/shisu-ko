@@ -4956,11 +4956,16 @@ class Miner:
         if not ids:
             return self.outcome(s, nonce, "no_note", "No card was added today. Create the card with Yomitan first, then mine.")
         note_id = max(ids)
-        info = self.note_info(note_id)
-        if info is None:
-            return self.outcome(s, nonce, "no_note", "The newest card is no longer in Anki; nothing attached")
-        self.remember(note_id)  # the viewer's choice: the automatic attach leaves it alone from now on
-        return self.attach(s, settings, cue, note_id, info["fields"], auto=False, nonce=nonce)
+        # Every failure from here on is answered too: the tab waits for this nonce in the log.
+        try:
+            info = self.note_info(note_id)
+            if info is None:
+                return self.outcome(s, nonce, "no_note", "The newest card is no longer in Anki; nothing attached")
+            self.remember(note_id)  # the viewer's choice: the automatic attach leaves it alone from now on
+            return self.attach(s, settings, cue, note_id, info["fields"], auto=False, nonce=nonce)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[%s] anki mine: the mine into note %d failed (%s)", s.video_id, note_id, exc)
+            return self.outcome(s, nonce, "error", anki_error_text(exc), note_id)
 
     def outcome(self, s: Session, nonce: Optional[str], status: str, message: str, note=None) -> dict:
         event = {"nonce": nonce, "ok": status == "attached", "status": status, "message": message, "note": note}
@@ -5071,7 +5076,7 @@ class Miner:
             return None  # a live stream's frame at a past time is not there to seek to
         try:
             return self.frames.grab(s.video_id, frame_time(float(cue["start"]), float(cue["end"])))
-        except FrameUnavailable as exc:
+        except Exception as exc:  # noqa: BLE001 - PyAV raises its own errors mid-decode; no picture is a card without one
             log.info("[%s] anki mine: no picture for the card (%s)", s.video_id, exc)
             return None
 
