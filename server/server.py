@@ -41,11 +41,14 @@ of the venv's own CTranslate2 before anything imports it; to faster-whisper it i
 from __future__ import annotations
 
 import argparse
+import bisect
 import copy
 import difflib
 import errno
 import gc
 import glob
+import hashlib
+import html
 import io
 import json
 import logging
@@ -80,7 +83,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.20.0"
+VERSION = "0.21.0"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -1339,9 +1342,14 @@ def settle_words(cues) -> list:
     return cues
 
 
+OPT_IN_CUE_FIELDS = ("words", "src")  # what /sync sends only to a body with "words": true
+
+
 def without_words(cue: dict) -> dict:
-    """The cue as /sync sends it to a client that did not ask for word timings."""
-    return {k: v for k, v in cue.items() if k != "words"} if "words" in cue else cue
+    """The cue as /sync sends it to a client that did not ask for word timings: no `words`, and no
+    `src` ("human" on a line from the creator's subtitles), so the answer is what it always was."""
+    return {k: v for k, v in cue.items() if k not in OPT_IN_CUE_FIELDS} if any(
+        k in cue for k in OPT_IN_CUE_FIELDS) else cue
 
 
 def clean_cached_cue(cue: dict) -> Optional[dict]:
@@ -1531,6 +1539,18 @@ def carry_trailing_mark(words, kept) -> list:
     return kept
 
 
+def extend_end(cue: dict, ceiling: float, speech, limits: CueLimits) -> None:
+    """Cue out a beat after the audio (P1.4) and grow a short cue into the silence after it (P1.5),
+    never past `ceiling`, the next cue's start less the gap."""
+    sil_start, sil_end = next_silence(cue["end"], speech)
+    silence = sil_end - sil_start
+    if silence >= limits.lead_out_silence:
+        cue["end"] += min(limits.lead_out, silence - 0.1)
+    if cue["end"] - cue["start"] < limits.min_seconds:
+        cue["end"] = min(max(cue["end"], cue["start"] + limits.min_seconds), sil_end - limits.min_gap)
+    cue["end"] = min(cue["end"], max(ceiling, cue["start"] + limits.hard_min_seconds))
+
+
 def build_cues(words, speech, limits: CueLimits) -> list:
     """One Whisper segment's words -> display-ready cues [{start, end, text, words}] (P1 rules 1-7).
 
@@ -1546,14 +1566,7 @@ def build_cues(words, speech, limits: CueLimits) -> list:
                      "words": cue_words(group)})
 
     for i, cue in enumerate(cues):
-        ceiling = cues[i + 1]["start"] - limits.min_gap if i + 1 < len(cues) else float("inf")
-        sil_start, sil_end = next_silence(cue["end"], speech)
-        silence = sil_end - sil_start
-        if silence >= limits.lead_out_silence:  # P1.4: cue out a beat after the audio
-            cue["end"] += min(limits.lead_out, silence - 0.1)
-        if cue["end"] - cue["start"] < limits.min_seconds:  # P1.5: grow into the trailing silence
-            cue["end"] = min(max(cue["end"], cue["start"] + limits.min_seconds), sil_end - limits.min_gap)
-        cue["end"] = min(cue["end"], max(ceiling, cue["start"] + limits.hard_min_seconds))
+        extend_end(cue, cues[i + 1]["start"] - limits.min_gap if i + 1 < len(cues) else float("inf"), speech, limits)
 
     cues = merge_adjacent(cues, limits, limits.merge_reach, only_short=True)   # P1.5 merge
     cues = merge_adjacent(cues, limits, limits.merge_gap, only_short=False)    # P1.6 anti-flicker
@@ -1824,6 +1837,629 @@ def retry_prompt_skips(model, audio, options: dict, segs, offset: float, speech)
     return spliced, sum(g[2] for g in stretches), added
 
 
+# --------------------------------------------------------------------------- human subtitles
+
+# A track the video's creator uploaded (yt-dlp's `subtitles`) is better text than Whisper's: the
+# names, the kanji and the sentence ends a person chose. YouTube's own recogniser
+# (`automatic_captions`, "ja-orig" among them) never counts, punctuated or not: it makes errors
+# Whisper does not (homophones) and cuts its lines at a fixed length, mid-word. A person's timing
+# is loose by a few hundred milliseconds, so a cue takes its text and its line from the track and
+# its times from the Whisper words that text aligns with. docs/dev/cue-building.md, "Human
+# subtitles", has the rules and the measurements.
+HUMAN_SUBS_LANGUAGES = frozenset({"ja"})       # measured on Japanese, and only there
+HUMAN_SUBS_FORMATS = ("json3", "srv3", "vtt")  # json3 and srv3 time in milliseconds; vtt is the fallback
+HUMAN_SUBS_MAX_BYTES = 4 * 1024 * 1024
+HUMAN_SUBS_WORD_TIMED = 0.5   # a track with more of its lines timed word by word than this is ASR output
+HUMAN_SUBS_UNMARKED = 0.95    # ... and so is one whose rows carry no punctuation and no space at all
+HUMAN_SUBS_MIN_ROWS = 20      # a short track is too little to judge the second rule on
+HUMAN_MIN_SIMILARITY = 0.6    # a line aligning worse than this with what Whisper heard keeps Whisper's text
+HUMAN_TIME_SLACK = 1.5        # seconds around a line inside which a Whisper character may align with it
+HUMAN_DISPLACED_S = 15.0      # how far a line on its own times looks for Whisper having said it elsewhere
+HUMAN_CUT_LEAD = 0.3          # seconds of silence a window cut ahead of a line's speech leaves before it
+HUMAN_SLOWEST_CHARS_S = 4.0   # a line holding more text than its span could take at this rate reaches on past it
+HUMAN_MIN_LEFTOVER = MIN_PIECE_CHARS  # Whisper's words left beside an aligned line: fewer characters are its fringe
+
+SUBTITLE_SOUND_WORDS = ("笑", "拍手", "音楽", "bgm", "歓声", "効果音", "ため息", "咳", "泣", "se", "music",
+                        "applause", "laugh", "鳴き声", "チャイム", "物音", "沈黙", "無音", "雑音", "ノイズ", "♪")
+SUBTITLE_TURN_RE = re.compile(r"^(?:>>|＞＞|≫|»|[-－]\s)\s*")
+SUBTITLE_SQUARE_RE = re.compile(r"[\[［][^\]］\n]{0,30}[\]］]")
+SUBTITLE_MUSIC_RE = re.compile(r"[♪♫♬♩\U0001F3B5\U0001F3B6]")
+SUBTITLE_PAREN_RE = re.compile(r"[（(]([^（）()\n]{1,30})[）)]")
+SUBTITLE_LABEL_RE = re.compile(r"^【[^】\n]{1,20}】")
+SUBTITLE_NAME_RE = re.compile(r"^[^\s：:、。，,！？!?「」『』（）()0-9０-９]{1,10}[：:](?=\s*\S)")
+SUBTITLE_SPACE_RE = re.compile(r"[ \t　]+")
+SUBTITLE_MARKS = set("。、，,．.！？!?…「」『』“”\"・")
+VTT_TIME_RE = re.compile(r"(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{3})")
+VTT_INLINE_TIME_RE = re.compile(r"<(?:\d+:)?\d{1,2}:\d{2}[.,]\d{3}>")
+MARKUP_RE = re.compile(r"<[^>\n]*>")
+
+
+def human_subtitles_on(args) -> bool:
+    """--human-subtitles auto and a language the rules were measured on. A namespace without the
+    switch (the tools', the tests') reads as off, so nothing there reaches the network."""
+    return getattr(args, "human_subtitles", "off") == "auto" and getattr(args, "language", "") in HUMAN_SUBS_LANGUAGES
+
+
+def asr_format(fmt: dict) -> bool:
+    """A track YouTube itself labels as speech recognition, wherever yt-dlp filed it."""
+    query = parse_qs(urlsplit(str(fmt.get("url") or "")).query)
+    name = str(fmt.get("name") or "").lower()
+    return "asr" in query.get("kind", []) or "auto-generated" in name or "自動生成" in name
+
+
+def pick_human_track(subtitles, language: str) -> Optional[tuple]:
+    """(key, format dict) of the creator's track for `language`, or None.
+
+    `ja` before `ja-JP` and any other regional tag; never `ja-orig`, which is YouTube's own
+    recognition of the original audio. Only ever handed info["subtitles"], never
+    info["automatic_captions"].
+    """
+    if not isinstance(subtitles, dict):
+        return None
+    keys = sorted((k for k in subtitles if isinstance(k, str)
+                   and (k.lower() == language or k.lower().startswith(language + "-"))
+                   and not k.lower().endswith("-orig")), key=lambda k: (k.lower() != language, k))
+    for key in keys:
+        formats = [f for f in subtitles.get(key) or [] if isinstance(f, dict) and isinstance(f.get("url"), str)]
+        if any(asr_format(f) for f in formats):
+            continue
+        for ext in HUMAN_SUBS_FORMATS:
+            for fmt in formats:
+                if fmt.get("ext") == ext:
+                    return key, fmt
+    return None
+
+
+def parse_json3(raw: str) -> tuple:
+    """YouTube's json3 -> ([(start, end, text)], how many lines are timed word by word)."""
+    data = json.loads(raw)
+    lines, timed = [], 0
+    for ev in (data.get("events") if isinstance(data, dict) else None) or []:
+        if not isinstance(ev, dict):
+            continue
+        segs = [g for g in ev.get("segs") or [] if isinstance(g, dict)]
+        text = "".join(str(g.get("utf8") or "") for g in segs)
+        if not text.strip():
+            continue
+        start = float(ev.get("tStartMs") or 0) / 1000.0
+        if any("tOffsetMs" in g for g in segs[1:]) or any("acAsrConf" in g for g in segs):
+            timed += 1
+        lines.append((start, start + float(ev.get("dDurationMs") or 0) / 1000.0, text))
+    return lines, timed
+
+
+def parse_srv3(raw: str) -> tuple:
+    """YouTube's srv3 (timed text XML) -> ([(start, end, text)], lines timed word by word)."""
+    import xml.etree.ElementTree as ET
+
+    lines, timed = [], 0
+    for p in ET.fromstring(raw).iter("p"):
+        parts, words = [p.text or ""], 0
+        for child in p:
+            parts.append("\n" if child.tag == "br" else "".join(child.itertext()))
+            words += child.tag == "s" and (child.get("t") is not None or child.get("ac") is not None)
+            parts.append(child.tail or "")
+        text = "".join(parts)
+        if not text.strip():
+            continue
+        start = int(p.get("t") or 0) / 1000.0
+        timed += words > 1
+        lines.append((start, start + int(p.get("d") or 0) / 1000.0, text))
+    return lines, timed
+
+
+def vtt_seconds(text: str) -> Optional[float]:
+    m = VTT_TIME_RE.match(text.strip())
+    if m is None:
+        return None
+    hours, minutes, seconds, millis = m.groups()
+    return int(hours or 0) * 3600 + int(minutes) * 60 + int(seconds) + int(millis) / 1000.0
+
+
+def parse_vtt(raw: str) -> tuple:
+    """WebVTT -> ([(start, end, text)], cues timed word by word, YouTube's <00:00:01.234> tags)."""
+    lines, timed = [], 0
+    for block in re.split(r"\n[ \t]*\n", raw.replace("\r\n", "\n").replace("\r", "\n")):
+        rows = block.split("\n")
+        for i, row in enumerate(rows):
+            if "-->" not in row:
+                continue
+            head, _, tail = row.partition("-->")
+            start, end = vtt_seconds(head), vtt_seconds(tail)
+            body = "\n".join(rows[i + 1:]).strip("\n")
+            if start is not None and end is not None and body.strip():
+                timed += bool(VTT_INLINE_TIME_RE.search(body))
+                lines.append((start, end, html.unescape(MARKUP_RE.sub("", body))))
+            break
+    return lines, timed
+
+
+def is_sound_tag(inner: str) -> bool:
+    """（拍手）, [音楽], (laughs): a bracketed sound, not speech. A Latin tag counts as a whole word."""
+    low = inner.lower()
+    return len(inner) <= 12 and any(re.search(rf"\b{w}", low) if w.isascii() else w in low
+                                    for w in SUBTITLE_SOUND_WORDS)
+
+
+def is_ruby(head: str, inner: str) -> bool:
+    """（よみ） straight after kanji, all hiragana and no longer than such a reading runs: furigana."""
+    run = 0
+    for ch in reversed(head):
+        if not is_kanji(ch):
+            break
+        run += 1
+    return run > 0 and all(is_hiragana(c) for c in inner) and len(inner) <= 4 * run
+
+
+def clean_subtitle_row(row: str) -> str:
+    """One row of a person's subtitle without what is not speech: a speaker label (（田中）, 田中：,
+    【田中】, a >> or - turn mark), a sound tag ([笑], （拍手）, ♪), furigana in brackets after its
+    kanji; whitespace runs squeezed to one."""
+    row = SUBTITLE_TURN_RE.sub("", row.strip())
+    row = SUBTITLE_MUSIC_RE.sub("", SUBTITLE_SQUARE_RE.sub("", row)).strip()
+    row = SUBTITLE_LABEL_RE.sub("", row).strip()
+    out, pos = [], 0
+    for m in SUBTITLE_PAREN_RE.finditer(row):
+        inner, head = m.group(1).strip(), row[:m.start()]
+        # At the row's start it names the speaker, or is a stage note when nothing follows it.
+        drop = is_sound_tag(inner) or not head.strip() or is_ruby(head, inner)
+        out.append(row[pos:m.start()] if drop else row[pos:m.end()])
+        pos = m.end()
+    row = ("".join(out) + row[pos:]).strip()
+    row = SUBTITLE_NAME_RE.sub("", row).strip()
+    return SUBTITLE_SPACE_RE.sub(lambda m: "　" if "　" in m.group(0) else " ", row)
+
+
+def clean_subtitle_text(text: str) -> str:
+    """A track line as a cue's text: model-text cleaning (controls, private use, format characters),
+    each row through clean_subtitle_row(), empty rows gone. The track's own line breaks stay row
+    breaks: they are where the person who made it put them, often a turn between two speakers."""
+    rows = (clean_subtitle_row(r) for r in clean_model_text(text, keep_newline=True).split("\n"))
+    return "\n".join(r for r in rows if r)
+
+
+def unmarked_track(lines) -> bool:
+    """Rows without one punctuation mark or space anywhere: YouTube's recogniser's text uploaded as
+    a track, cut at a fixed length mid-word. A person marks a sentence somehow, with 。 or a space."""
+    rows = [r for _, _, t in lines for r in t.split("\n") if r.strip()]
+    if len(rows) < HUMAN_SUBS_MIN_ROWS:
+        return False
+    bare = sum(1 for r in rows if not (set(r) & SUBTITLE_MARKS) and " " not in r and "　" not in r)
+    return bare >= HUMAN_SUBS_UNMARKED * len(rows)
+
+
+def human_subtitle_lines(raw: bytes, ext: str) -> Optional[list]:
+    """A downloaded track as [[start, end, text]], cleaned and in time order, or None when it is
+    empty or reads as speech recognition (lines timed word by word, or no row marked)."""
+    parser = {"json3": parse_json3, "srv3": parse_srv3, "vtt": parse_vtt}.get(ext)
+    if parser is None:
+        return None
+    lines, timed = parser(raw.decode("utf-8-sig", errors="replace"))
+    if not lines or timed > HUMAN_SUBS_WORD_TIMED * len(lines) or unmarked_track(lines):
+        return None
+    out: list = []
+    for start, end, text in sorted(lines, key=lambda line: (line[0], line[1])):
+        text = clean_subtitle_text(text)
+        if not text or end <= start:
+            continue
+        if out and out[-1][2] == text and start <= out[-1][1] + 0.1:
+            out[-1][1] = round(max(out[-1][1], end), 2)  # one line the track split in two
+            continue
+        out.append([round(start, 2), round(end, 2), text])
+    return out or None
+
+
+def human_lines_from_record(value) -> tuple:
+    """(track, lines) out of a cache record's "human_subs", or (None, []) when it was never asked.
+
+    The track is a signature string, "" when the video was asked and has none to use."""
+    if not isinstance(value, dict):
+        return None, []
+    track = value.get("track")
+    lines = []
+    for line in value.get("lines") or []:
+        if (isinstance(line, list) and len(line) == 3 and all(isinstance(x, (int, float)) for x in line[:2])
+                and isinstance(line[2], str) and line[2] and line[1] > line[0]):
+            lines.append([float(line[0]), float(line[1]), line[2]])
+    return (track if isinstance(track, str) and track else ""), (lines if track else [])
+
+
+# --------------------------------------------------------------------------- aligning a track to Whisper
+
+def fold_chars(text: str) -> tuple:
+    """(folded characters, the index in `text` each came from): NFKC, lower case, katakana as
+    hiragana, and nothing but letters and digits, ー and 〜 included, since a person and Whisper
+    disagree on those far more often than on the words."""
+    chars, src = [], []
+    for i, ch in enumerate(text):
+        for c in unicodedata.normalize("NFKC", ch).lower():
+            if "ァ" <= c <= "ヶ":
+                c = chr(ord(c) - 0x60)
+            if unicodedata.category(c)[0] in "LN" and c not in "ー〜～":
+                chars.append(c)
+                src.append(i)
+    return chars, src
+
+
+def whisper_chars(cues) -> list:
+    """Every folded character of the cues' words: (char, start, end, cue index, word index), its
+    time a share of its word's. A cue without words counts as one word over its whole span."""
+    out = []
+    for ci, cue in enumerate(cues):
+        words = cue.get("words") or [{"start": cue["start"], "end": cue["end"], "text": cue["text"]}]
+        for wi, w in enumerate(words):
+            chars, _ = fold_chars(w["text"])
+            step = max(0.0, w["end"] - w["start"]) / max(len(chars), 1)
+            for k, c in enumerate(chars):
+                out.append((c, w["start"] + k * step, w["start"] + (k + 1) * step, ci, wi))
+    return out
+
+
+def align_line(line, region) -> tuple:
+    """Edit-distance alignment of one line's folded characters to a stretch of Whisper's, the
+    stretch's ends free (semi-global). Returns (pairs, matches, first, last): pairs[k] is the
+    region index line character k sits on, or -1 for one Whisper never wrote; first and last bound
+    the Whisper characters the line spans."""
+    n, m = len(line), len(region)
+    prev = [0] * (m + 1)  # a line may start anywhere in the stretch
+    back = []
+    for i in range(1, n + 1):
+        cur = [i] + [0] * m
+        ops = bytearray(m + 1)
+        ops[0] = 1
+        ch = line[i - 1]
+        for j in range(1, m + 1):
+            best, op = prev[j - 1] + (ch != region[j - 1]), 0
+            if prev[j] + 1 < best:
+                best, op = prev[j] + 1, 1
+            if cur[j - 1] + 1 < best:
+                best, op = cur[j - 1] + 1, 2
+            cur[j] = best
+            ops[j] = op
+        back.append(ops)
+        prev = cur
+    j = min(range(m + 1), key=lambda k: (prev[k], k))  # ... and end anywhere
+    last = j
+    pairs, matches, i = [-1] * n, 0, n
+    while i > 0:
+        op = back[i - 1][j] if j > 0 else 1
+        if op == 0:
+            pairs[i - 1] = j - 1
+            matches += line[i - 1] == region[j - 1]
+            i, j = i - 1, j - 1
+        elif op == 1:
+            i -= 1
+        else:
+            j -= 1
+    return pairs, matches, j, last
+
+
+def line_similarity(line, region, pairs, matches: int, spanned: int) -> float:
+    """How well a line agrees with the Whisper text it aligned with, 0 to 1: twice the matching
+    characters over both lengths (difflib's ratio), with half credit for a kanji written in kana on
+    the other side or the reverse (優しい and やさしい). That half credit alone stays at 0.5 at most,
+    under HUMAN_MIN_SIMILARITY: a line has to share real characters to pass."""
+    spelled = sum(1 for k, j in enumerate(pairs) if j >= 0 and line[k] != region[j]
+                  and (is_kanji(line[k]) and is_hiragana(region[j]) or is_hiragana(line[k]) and is_kanji(region[j])))
+    return (2 * matches + spelled) / max(len(line) + spanned, 1)
+
+
+def speech_end_before(speech, t0: float, t1: float) -> float:
+    """t1 pulled back to the end of the speech it follows when it lies in silence after t0: the
+    last word Whisper writes is stretched over the pause after the utterance."""
+    for a, b in reversed(speech):
+        if a < t1:
+            return b if t0 < b < t1 else t1
+    return t1
+
+
+def char_class(ch: str) -> str:
+    if is_kanji(ch):
+        return "k"
+    if is_hiragana(ch):
+        return "h"
+    if is_katakana(ch):
+        return "K"
+    return "a" if ch.isalnum() else ""
+
+
+def human_words(text: str, times: list) -> list:
+    """The line's text as tokens, runs of one script with what follows them attached, each timed
+    from its characters' times. Joined, they are the text exactly."""
+    tokens: list = []
+    for i, ch in enumerate(text):
+        cls = char_class(ch)
+        if tokens and (not cls or cls == tokens[-1][3] or ch in NO_LINE_START):
+            tokens[-1][0] += ch
+            tokens[-1][2] = times[i][1]
+        else:
+            tokens.append([ch, times[i][0], times[i][1], cls or "p"])
+    return [{"start": round(a, 3), "end": round(b, 3), "text": t} for t, a, b, _ in tokens]
+
+
+def aligned_cue(line, src, pairs, chars, speech, limits: CueLimits) -> dict:
+    """A cue holding a line's text, timed from the Whisper characters it aligned with."""
+    _, _, text = line
+    known: dict = {}
+    for k, j in enumerate(pairs):
+        if j >= 0:
+            a, b = chars[j][1], chars[j][2]
+            prev = known.get(src[k])
+            known[src[k]] = (min(a, prev[0]), max(b, prev[1])) if prev else (a, b)
+    t0 = min(a for a, _ in known.values())
+    t1 = max(b for _, b in known.values())
+    # Characters Whisper never wrote share the gap between the neighbours it did write.
+    times, i = [], 0
+    while i < len(text):
+        if i in known:
+            times.append(known[i])
+            i += 1
+            continue
+        k = i
+        while k < len(text) and k not in known:
+            k += 1
+        lo = times[-1][1] if times else t0
+        hi = known[k][0] if k < len(text) else (times[-1][1] if times else t1)
+        hi = max(hi, lo)
+        step = (hi - lo) / (k - i)
+        times += [(lo + (n - i) * step, lo + (n - i + 1) * step) for n in range(i, k)]
+        i = k
+    start = t0
+    onset = nearest_onset(speech, t0, limits.snap_reach)
+    if onset is not None:  # cue in at the speech onset, as build_cues() does
+        start = min(max(t0, onset - limits.lead_in), onset + 0.30)
+    end = max(speech_end_before(speech, t0, t1), start + 0.01)
+    return {"start": start, "end": end, "text": text, "words": human_words(text, times), "src": "human"}
+
+
+def leftover_cue(cue: dict, run: list, first: bool, last: bool) -> Optional[dict]:
+    """The words of a Whisper cue no aligned line claimed, as a cue of their own, or None when they
+    are only the fringe of the line beside them."""
+    words = [Word(w["text"], w["start"], w["end"]) for w in run]
+    text = word_text(words)
+    if len(fold_chars(text)[0]) < HUMAN_MIN_LEFTOVER:
+        return None
+    out = {"start": cue["start"] if first else run[0]["start"], "end": cue["end"] if last else run[-1]["end"],
+           "text": text, "words": cue_words(words)}
+    if "seg" in cue:
+        out["seg"] = cue["seg"]
+    return out
+
+
+def echoes(cue: dict, line, slack: float = HUMAN_TIME_SLACK) -> bool:
+    """Whether a Whisper cue says what a line says, within `slack` of the line's time: the edge of a
+    line whose speech runs across the window's end, which the neighbouring window shows, or the
+    speech of a line the person timed seconds away from it."""
+    start, _, text = line
+    if not (start - slack <= cue["end"] and cue["start"] <= line_reach(line) + slack):
+        return False
+    heard, region = fold_chars(cue["text"])[0], fold_chars(text)[0]
+    if not heard or not region:
+        return False
+    pairs, matches, first, last = align_line(heard, region)
+    return line_similarity(heard, region, pairs, matches, last - first) >= HUMAN_MIN_SIMILARITY
+
+
+def split_long_line(line, limits: CueLimits) -> list:
+    """A line too long for the screen (over max_lines rows of max_chars) in pieces at its own
+    sentence marks, each as long as fits, its share of the line's reach by characters. Text and
+    marks stay the person's; only where one cue ends and the next begins is chosen here."""
+    start, end, text = line
+    if len(text) <= limits.max_chars * limits.max_lines:
+        return [line]
+    sentences = [m.group(0) for m in re.finditer(r"[^。！？!?]+[。！？!?]*", text)]
+    pieces: list = []
+    for sentence in sentences:
+        if pieces and len(pieces[-1].lstrip()) + len(sentence) <= limits.max_chars * limits.max_lines:
+            pieces[-1] += sentence
+        else:
+            pieces.append(sentence)
+    pieces = [p.strip() for p in pieces if p.strip()]
+    if len(pieces) < 2:
+        return [line]
+    # Shared over line_reach(), not the line's own span: a line this long is the one whose times
+    # were too short for it (twenty seconds of speech written over three).
+    out, at, total = [], start, sum(len(p) for p in pieces)
+    reach = line_reach(line)
+    for piece in pieces:
+        span = (reach - start) * len(piece) / total
+        out.append([round(at, 2), round(at + span, 2), piece])
+        at += span
+    return out
+
+
+def assist_cues(cues, lines, speech, limits: CueLimits, seg_id: int, window_end: Optional[float] = None,
+                stats: Optional[dict] = None, neighbours=()) -> tuple:
+    """Whisper's cues with a person's subtitle lines put in where they agree with what Whisper heard.
+
+    Each line, in time order, is aligned with the Whisper characters within HUMAN_TIME_SLACK of it
+    and after the last line placed (align_line()). Agreeing at HUMAN_MIN_SIMILARITY or better, it
+    becomes a cue with its own text, timed from those characters and snapped to the speech as a
+    Whisper cue is, its words the line's tokens; the Whisper words it claimed go, and what a
+    Whisper cue has left beside it stays as a cue of its own. A line over audio Whisper wrote
+    nothing for (music, a stretch the detector missed, a segment the gates refused) keeps the
+    track's own times and has no words. A line that disagrees is dropped and Whisper's text kept.
+    Every line cue carries "src": "human" and a segment id of its own. Returns (cues, next id);
+    `neighbours` are the lines either side that other windows own: a Whisper cue that echoes()
+    one is the edge of that line's speech, shown there, and goes ("echoes" in `stats`).
+    `stats` counts "aligned", "track" and "kept_whisper" lines, and lists each aligned line's
+    similarity, text and the Whisper text it spans under "_similarity" (for replay_cues.py).
+    """
+    stats = stats if stats is not None else {}
+    lines = [piece for line in lines for piece in split_long_line(line, limits)]
+    chars = whisper_chars(cues)
+    mids, top = [], float("-inf")
+    for c in chars:
+        top = max(top, (c[1] + c[2]) / 2)
+        mids.append(top)
+    claimed = [False] * len(chars)
+    placed, aligned, floor = [], [], 0
+    for line in lines:
+        start, end, text = line
+        folded, src = fold_chars(text)
+        if not folded:
+            continue
+        # A person's times can be too short for the text (three questions in three seconds): the
+        # stretch searched reaches as far as the text could take to say.
+        reach = line_reach(line)
+        lo = max(floor, bisect.bisect_left(mids, start - HUMAN_TIME_SLACK))
+        hi = bisect.bisect_right(mids, reach + HUMAN_TIME_SLACK)
+        heard = range(bisect.bisect_left(mids, start), bisect.bisect_right(mids, end))
+        if not any(start <= (chars[j][1] + chars[j][2]) / 2 <= end for j in heard):
+            placed.append({"start": start, "end": end, "text": text, "src": "human", "_line": line})
+            continue
+        if lo >= hi:  # what Whisper heard there an earlier line has claimed
+            stats["kept_whisper"] = stats.get("kept_whisper", 0) + 1
+            continue
+        pairs, matches, first, last = align_line(folded, [c[0] for c in chars[lo:hi]])
+        similarity = line_similarity(folded, [c[0] for c in chars[lo:hi]], pairs, matches, last - first)
+        stats.setdefault("_similarity", []).append(
+            (round(similarity, 3), text, "".join(c[0] for c in chars[lo + first:lo + last])))
+        if similarity < HUMAN_MIN_SIMILARITY:
+            stats["kept_whisper"] = stats.get("kept_whisper", 0) + 1
+            continue
+        for j in range(lo + first, lo + last):
+            claimed[j] = True
+        floor = lo + last
+        placed.append(aligned_cue(line, src, [lo + j if j >= 0 else -1 for j in pairs], chars, speech, limits))
+        aligned.append((placed[-1], start, end))
+        stats["aligned"] = stats.get("aligned", 0) + 1
+    # What Whisper heard inside an aligned line's own span that no line claimed is what its maker
+    # chose to cover with that line: a sentence said twice and written once, a filler. The line's
+    # cue stretches over it instead of Whisper's text standing beside it in another spelling.
+    for cue, start, end in aligned:
+        inside = [j for j in range(bisect.bisect_left(mids, start), bisect.bisect_right(mids, end))
+                  if not claimed[j] and start <= (chars[j][1] + chars[j][2]) / 2 <= end]
+        if not inside:
+            continue
+        for j in inside:
+            claimed[j] = True
+        first, last = chars[inside[0]][1], chars[inside[-1]][2]
+        if first < cue["start"]:
+            onset = nearest_onset(speech, first, limits.snap_reach)
+            cue["start"] = min(max(first, onset - limits.lead_in), onset + 0.30) if onset is not None else first
+        cue["end"] = max(cue["end"], speech_end_before(speech, first, last))
+
+    # A Whisper word goes with the line that claimed most of its characters.
+    taken: dict = {}
+    for (_, _, _, ci, wi), done in zip(chars, claimed):
+        votes = taken.setdefault((ci, wi), [0, 0])
+        votes[done] += 1
+    kept = []
+    for ci, cue in enumerate(cues):
+        words = cue.get("words") or [{"start": cue["start"], "end": cue["end"], "text": cue["text"]}]
+        gone, state = [], False
+        for wi in range(len(words)):
+            votes = taken.get((ci, wi))
+            state = votes[1] > votes[0] if votes else state  # punctuation goes with the word before it
+            gone.append(state)
+        if not any(gone):
+            kept.append(cue)
+            continue
+        if all(gone) or "words" not in cue:
+            continue
+        i = 0
+        while i < len(words):
+            k = i
+            while k < len(words) and gone[k] == gone[i]:
+                k += 1
+            if not gone[i]:
+                piece = leftover_cue(cue, words[i:k], i == 0, k == len(words))
+                if piece is not None:
+                    kept.append(piece)
+            i = k
+
+    # A line on its own times goes where Whisper wrote this same text a few seconds off (the
+    # person's timing slipped) or wrote anything over it: Whisper heard that speech, so it was not
+    # music or a stretch the detector missed.
+    kept_lines = []
+    for h in placed:
+        line = h.pop("_line", None)
+        if line is not None:
+            if any(cue_overlaps(c, h) or echoes(c, line, HUMAN_DISPLACED_S) for c in kept):
+                stats["kept_whisper"] = stats.get("kept_whisper", 0) + 1
+                continue
+            stats["track"] = stats.get("track", 0) + 1
+        kept_lines.append(h)
+    placed = kept_lines
+
+    # Where a line's cue and Whisper's still meet, the line wins: a Whisper cue mostly under one
+    # goes, one at its edge gives way up to it.
+    out = []
+    for cue in kept:
+        for h in placed:
+            if cue is None or cue["end"] <= h["start"] or cue["start"] >= h["end"]:
+                continue
+            if cue_overlaps(cue, h):
+                cue = None
+            elif cue["start"] < h["start"]:
+                cue = dict(cue, end=h["start"] - limits.min_gap)
+            else:
+                cue = dict(cue, start=h["end"] + limits.min_gap)
+            if cue is not None and cue["end"] - cue["start"] < limits.hard_min_seconds:
+                cue = None
+        if cue is not None and any(echoes(cue, line) for line in neighbours):
+            stats["echoes"] = stats.get("echoes", 0) + 1
+            cue = None
+        if cue is not None:
+            out.append(cue)
+    for h in placed:
+        h["seg"] = seg_id
+        seg_id += 1
+    out = sorted(out + placed, key=lambda c: c["start"])
+    for i, cue in enumerate(out):
+        if "words" in cue and cue.get("src") == "human":
+            extend_end(cue, out[i + 1]["start"] - limits.min_gap if i + 1 < len(out) else float("inf"), speech, limits)
+    if window_end is not None:
+        out = [c for c in out if c["start"] < window_end - 0.05]
+        for cue in out:
+            cue["end"] = min(cue["end"], max(window_end, cue["start"] + limits.hard_min_seconds))
+    for cue in out:
+        cue["start"] = round(cue["start"], 2)
+        cue["end"] = round(max(cue["end"], cue["start"] + 0.05), 2)
+    return settle_words(normalise_gaps(out, limits)), seg_id
+
+
+def line_reach(line) -> float:
+    """Where a line's speech may run to: its own end, or as far as its text could take to say."""
+    start, end, text = line
+    return max(end, start + len(fold_chars(text)[0]) / HUMAN_SLOWEST_CHARS_S)
+
+
+def human_window_end(lines, speech, start: float, end: float, window: float) -> float:
+    """Where a window ends so that no line of the track runs across its end (from HUMAN_TIME_SLACK
+    before its start, where its speech may begin, to line_reach()): the latest onset of detected
+    speech in the window's last two thirds that no line spans (from HUMAN_TIME_SLACK past its start
+    to HUMAN_TIME_SLACK short of line_reach(), a person's times being that loose). The
+    next window starts there, after a silence, and aligns the line whole, as a segment cut at a
+    window's end is transcribed again. An onset and not the line's own start: a line often starts
+    after the speech it holds, and a cut at the line left its first words in this window, a Whisper
+    cue beside the line. With no such onset the end stays, and lines_in_window() gives the line
+    that straddles it to the window holding most of it."""
+    if not any(a - HUMAN_TIME_SLACK < end < line_reach((a, b, t)) for a, b, t in lines):
+        return end  # no line's speech, which may start that much before the line, runs across the end
+    spans = [(a + HUMAN_TIME_SLACK, line_reach((a, b, t)) - HUMAN_TIME_SLACK) for a, b, t in lines]
+    for i in range(len(speech) - 1, 0, -1):
+        onset = speech[i][0]
+        if start + window / 3 <= onset < end and not any(a < onset < b for a, b in spans):
+            # Inside the silence before it: a cue snapped a lead-in ahead of the onset would
+            # otherwise still open before this window's end, and stay in this window.
+            return onset - min(HUMAN_CUT_LEAD, (onset - speech[i - 1][1]) / 2)
+    return end
+
+
+def neighbour_lines(lines, start: float, end: float) -> list:
+    """The last line before the window and the first after it, by lines_in_window()'s rule."""
+    before = [line for line in lines if (line[0] + line_reach(line)) / 2 < start]
+    after = [line for line in lines if (line[0] + line_reach(line)) / 2 >= end]
+    return before[-1:] + after[:1]
+
+
+def lines_in_window(lines, start: float, end: float) -> list:
+    """The track lines a window owns: those whose middle, to line_reach(), lies inside it."""
+    return [line for line in lines if start <= (line[0] + line_reach(line)) / 2 < end]
+
+
 # --------------------------------------------------------------------------- sessions
 
 @dataclass
@@ -1879,6 +2515,12 @@ class Session:
     # language in, which a stretch carrying on from it past a window's end inherits.
     talk_rms: float = 0.0
     sung: list = field(default_factory=list)
+    # The creator's own subtitle track (human_subtitle_lines()): its signature, "" when the video
+    # was asked and has none to use, None while it has not been asked; its cleaned lines; and
+    # whether this session has asked, so a failed request is not repeated on every sync.
+    human_track: Optional[str] = None
+    human_lines: list = field(default_factory=list)
+    human_asked: bool = False
     lock: threading.RLock = field(default_factory=threading.RLock)
 
     def cache_path(self) -> Path:
@@ -2277,12 +2919,21 @@ def declared_language(info) -> Optional[str]:
     return value.strip().replace("_", "-").split("-")[0].lower() or None
 
 
+def store_human_track(s: Session, track: str, lines: list) -> None:
+    """What a Fetcher without an App does with the creator's track: keep it on the session."""
+    with s.lock:
+        s.human_track, s.human_lines = track, lines
+
+
 class Fetcher:
     def __init__(self, args, clock=time.time, sleep=time.sleep, rng=random.random):
         self.args = args
         self.clock = clock
         self.sleep = sleep
         self.rng = rng
+        # Called with (session, track, lines) once the creator's subtitles are known; App puts its
+        # own in, which also rebuilds cues made before the track arrived.
+        self.on_human_subtitles = None
 
     def cookies_note(self) -> str:
         """What a download sends YouTube for a sign-in, in words for friendly_error(); "" for nothing."""
@@ -2421,6 +3072,7 @@ class Fetcher:
                     return True
             else:
                 log.info("[%s] using cached audio %s", s.video_id, path.name)
+                self.start_human_check(s)
             with s.lock:
                 if s.live:
                     # The stream ended and came back as a video: its clock starts over, so the cues
@@ -2563,6 +3215,8 @@ class Fetcher:
                 raise ForeignLanguage(language)
             if info.get("is_live"):
                 return None
+            # A copy: process_ie_result() goes on filling `info` on this thread.
+            self.start_human_check(s, {k: copy.deepcopy(info.get(k)) for k in ("id", "subtitles", "language")})
             try:
                 ydl.process_ie_result(info, download=True)
             except Exception as exc:  # noqa: BLE001
@@ -2580,6 +3234,61 @@ class Fetcher:
         if path is None:
             raise RuntimeError("yt-dlp finished but no audio file was produced")
         return path
+
+    def start_human_check(self, s: Session, info=None) -> None:
+        """Ask for the creator's subtitles on a thread of their own, once per session: the audio
+        never waits for them, and a video that has none, or a request that fails, costs nothing
+        but the request. `info` is the metadata download_once() already holds; without it the
+        thread asks YouTube for it, one metadata request."""
+        if not human_subtitles_on(self.args):
+            return
+        with s.lock:
+            if s.live or s.human_track is not None or s.human_asked:
+                return
+            s.human_asked = True
+        threading.Thread(target=self.check_human_subtitles, args=(s, info), daemon=True,
+                         name=f"subs-{s.video_id}").start()
+
+    def check_human_subtitles(self, s: Session, info=None) -> None:
+        try:
+            import yt_dlp
+
+            with yt_dlp.YoutubeDL(self.ytdlp_options(s.video_id)) as ydl:
+                if info is None:
+                    info = ydl.extract_info(f"https://www.youtube.com/watch?v={s.video_id}", download=False,
+                                            process=False)
+                track, lines = self.read_human_track(ydl, info)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[%s] the creator's subtitles could not be read (%s); Whisper alone", s.video_id, exc)
+            return
+        if track:
+            log.info("[%s] the creator's subtitles (%s): %d lines", s.video_id, track.split(":")[0], len(lines))
+        (self.on_human_subtitles or store_human_track)(s, track, lines)
+
+    def read_human_track(self, ydl, info) -> tuple:
+        """(signature, lines) of the creator's track for --language, ("", []) for none to use.
+
+        A video YouTube names another language gets none: a Japanese track on it is a
+        translation, not what is said. A live stream has no tracks while it is live.
+        """
+        if info.get("is_live") or declared_language(info) not in (None, self.args.language):
+            return "", []
+        picked = pick_human_track(info.get("subtitles"), self.args.language)
+        if picked is None:
+            return "", []
+        key, fmt = picked
+        resp = ydl.urlopen(fmt["url"])
+        try:
+            raw = resp.read(HUMAN_SUBS_MAX_BYTES + 1)
+        finally:
+            resp.close()
+        if len(raw) > HUMAN_SUBS_MAX_BYTES:
+            raise ValueError(f"the track is over {HUMAN_SUBS_MAX_BYTES} bytes")
+        lines = human_subtitle_lines(raw, fmt["ext"])
+        if lines is None:
+            log.info("[%s] the uploaded %s track reads as speech recognition; not used", info.get("id") or "?", key)
+            return "", []
+        return f"{key}.{fmt['ext']}:{hashlib.sha1(raw).hexdigest()[:12]}", lines
 
     def follow_live(self, s: Session) -> None:
         log.info("[%s] live stream: following the audio segments%s", s.video_id, f": {s.title}" if s.title else "")
@@ -3309,6 +4018,12 @@ class Transcriber(threading.Thread):
             dropped = segs.pop()
             new_end = min(end, max(start + 1.0, start + float(dropped.start)))
 
+        if boundary_free and self.app.human_lines(s):
+            # No line of the creator's track straddles the window's end either: it is aligned whole
+            # in the next window, which starts on it.
+            new_end = human_window_end(self.app.human_lines(s), speech, start, new_end,
+                                       float(getattr(args, "window", 30.0)))
+
         limits = cue_limits(args)
         if lyrics:
             # No intervals to build on: the lines that pass the gates are the window's speech.
@@ -3324,6 +4039,13 @@ class Transcriber(threading.Thread):
         tail = [a for a, b in unheard_stretches(inside, [], fresh, LYRICS_MIN_STRETCH_S) if b >= new_end - 0.05]
         given_back = new_end - tail[0] if boundary_free and tail and tail[0] > start else 0.0
         new_end -= given_back
+        # Read again: the track may have come in while the window was decoded.
+        track = self.app.human_lines(s)
+        owned = lines_in_window(track, start, new_end)
+        human: dict = {}
+        if track:
+            fresh, seg_id = assist_cues(fresh, owned, speech, limits, seg_id, new_end, human,
+                                        neighbour_lines(track, start, new_end))
 
         added = 0
         with s.lock:
@@ -3343,7 +4065,7 @@ class Transcriber(threading.Thread):
         elapsed = time.time() - t0
         gated = ", ".join(f"{k}:{v}" for k, v in sorted(drops.items()) if not k.startswith("_"))
         log.info(
-            "[%s] %s-%s: %d cues in %.1fs (%.0fx realtime)%s%s%s%s%s",
+            "[%s] %s-%s: %d cues in %.1fs (%.0fx realtime)%s%s%s%s%s%s",
             s.video_id, fmt_time(start), fmt_time(new_end), added, elapsed,
             (new_end - start) / max(elapsed, 1e-3), " [lyrics]" if lyrics else "",
             f" [dropped {gated}]" if gated else "",
@@ -3351,6 +4073,10 @@ class Transcriber(threading.Thread):
             f" [its last {given_back:.0f} s left to the next window]" if given_back else "",
             f" [{skipped:.0f} s skipped with the prompt, {spliced} segments from a decode without it]"
             if skipped else "",
+            f" [creator's subtitles: {human.get('aligned', 0)} lines aligned, {human.get('track', 0)} on their own"
+            f" times, {human.get('kept_whisper', 0)} left to Whisper"
+            f"{', %d echoes of the next window dropped' % human['echoes'] if human.get('echoes') else ''}]"
+            if owned or human.get("echoes") else "",
         )
         self.app.save_cache(s)
 
@@ -3383,6 +4109,7 @@ class App:
         self.sessions: dict = {}
         self.lock = threading.Lock()
         self.fetcher = Fetcher(args)
+        self.fetcher.on_human_subtitles = self.apply_human_track
         self.last_evict = time.time()
         self.sweep = self.old_record_sweep() if sweep else iter(())  # the server's own; tools and tests sweep nothing
         self.transcriber = Transcriber(self)
@@ -3662,6 +4389,47 @@ class App:
                 })
         return {"ok": True, "sessions": out}
 
+    def human_lines(self, s: Session) -> list:
+        """The creator's lines the next window builds with: none with --human-subtitles off, on a
+        language the rules were not measured on, or live."""
+        if not human_subtitles_on(self.args):
+            return []
+        with s.lock:
+            return [] if s.live else s.human_lines
+
+    def apply_human_track(self, s: Session, track: str, lines: list) -> None:
+        """Keep the creator's track on the session and put it into the cues already made.
+
+        Those are the cache's, or the first windows', decoded before the track arrived. Each line
+        that lies wholly in covered audio goes through assist_cues() over them, as a window's lines
+        do; what lies beyond is left to the windows still to come. Built off the lock and swapped in
+        only if no window added a cue meanwhile, and under a new session token, which tells a
+        client to drop the cue ids it holds and take the list afresh.
+        """
+        with s.lock:
+            s.human_track, s.human_lines = track, lines
+        for _ in range(5):
+            with s.lock:
+                cues, token = [dict(c) for c in s.cues], s.token
+                covered, speech, seg_next = [list(iv) for iv in s.covered], list(s.speech), s.seg_next
+            if not lines or not cues or any(c.get("src") for c in cues):
+                break
+            inside = [line for line in lines
+                      if any(a <= line[0] and line[1] <= b + 0.05 for a, b in covered)]
+            stats: dict = {}
+            new, seg_next = assist_cues(cues, inside, speech, cue_limits(self.args), seg_next, None, stats)
+            with s.lock:
+                if s.token != token or len(s.cues) != len(cues):
+                    continue  # a window landed meanwhile: build again over what it added
+                for i, cue in enumerate(new):
+                    cue["id"] = i
+                s.cues, s.seg_next, s.token = new, seg_next, uuid.uuid4().hex[:12]
+            log.info("[%s] %d cues made before the creator's subtitles arrived rebuilt: %d lines aligned, "
+                     "%d on their own times, %d left to Whisper", s.video_id, len(cues), stats.get("aligned", 0),
+                     stats.get("track", 0), stats.get("kept_whisper", 0))
+            break
+        self.save_cache(s)
+
     def get_session(self, video_id: str, url: str) -> Session:
         with self.lock:
             s = self.sessions.get(video_id)
@@ -3678,6 +4446,10 @@ class App:
                 s.fetching = True
         if need_fetch:
             threading.Thread(target=self.fetcher.fetch, args=(s,), daemon=True, name=f"fetch-{video_id}").start()
+        elif s.status == "ready" and not s.fetching and human_subtitles_on(self.args):
+            # A video the cache covers to its end is never fetched, so nothing else would ask
+            # whether it has the creator's subtitles; a fetch asks on its own.
+            self.fetcher.start_human_check(s)
         return s
 
     def retry_due(self, s: Session, now: float) -> bool:
@@ -3850,6 +4622,7 @@ class App:
         s.seg_next = max((int(c.get("seg", -1)) for c in s.cues), default=-1) + 1
         s.speech = merge_intervals(data.get("speech", []))
         s.covered = merge_intervals(data.get("covered", []))
+        s.human_track, s.human_lines = human_lines_from_record(data.get("human_subs"))
         s.duration = float(data.get("duration") or 0.0)
         watch = data.get("language_state")
         # Not restored with detection off: nothing could ever clear it again, and --language-patience 0
@@ -3923,7 +4696,7 @@ class App:
     def cache_record(self, s: Session) -> dict:
         """What save_cache() writes for a session (retranscribe.py writes the same shape elsewhere)."""
         with s.lock:
-            return {
+            record = {
                 "video_id": s.video_id, "title": s.title, "duration": s.duration,
                 "format": CACHE_FORMAT,
                 "model": self.model_name, "language": self.args.language,
@@ -3937,6 +4710,12 @@ class App:
                 "language_state": {"foreign_seconds": round(s.foreign_seconds, 2),
                                    "heard": s.heard, "paused": s.language_paused},
             }
+            if s.human_track is not None:
+                # Asked: the lines are kept, so a later window needs no second request, and a record
+                # asked once is not asked again. Absent means never asked.
+                record["human_subs"] = ({"track": s.human_track, "lines": s.human_lines} if s.human_track
+                                        else {"track": None})
+            return record
 
     def save_cache(self, s: Session) -> None:
         with s.lock:
@@ -5799,6 +6578,11 @@ def parse_args(argv=None):
                         "but the audio is not silent, sung lyrics or speech over music, is transcribed without the "
                         "detector when Whisper hears the target language in it, under stricter gates; off: such "
                         "windows go through the detector as before, blank when it heard nothing")
+    p.add_argument("--human-subtitles", default="auto", choices=["auto", "off"],
+                   help="auto: when a Japanese video carries subtitles its creator uploaded (never YouTube's "
+                        "automatic captions), cues take their text and line breaks from that track and their "
+                        "timing from what Whisper heard; a line Whisper disagrees with keeps Whisper's text. "
+                        "off: Whisper alone, and no subtitle request")
     p.add_argument("--sentence-ends", default="auto", choices=["auto", "off"],
                    help="auto: write a sentence mark where Whisper left one out, when a word ending in a "
                         "sentence-final expression (よね, です, か, a plain form) is followed by a pause; "

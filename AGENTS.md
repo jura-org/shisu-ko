@@ -70,8 +70,9 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   was started by `run.cmd` / `run.sh` (`SHISUKO_LAUNCHER=1`) without `--no-update` or
   `SHISUKO_NO_UPDATE` (`App.update_blocker()`); else it exits with `EXIT_UPDATE` (4). The server
   never spawns `update.py` and never downloads a release itself; the launcher does.
-- A cue's word timings (`words`) are opt-in on `/sync`: only a body with `"words": true` gets them,
-  and the default response never changes (`without_words()`). Their texts join to the cue's text
+- A cue's word timings (`words`) and source (`src`, `"human"` on a line from the creator's
+  subtitles) are opt-in on `/sync`: only a body with `"words": true` gets them, and the default
+  response never changes (`without_words()`, `OPT_IN_CUE_FIELDS`). Their texts join to the cue's text
   exactly or the cue carries none; the field is optional in the cache, never a reason to bump
   `CACHE_FORMAT`. Detail: `docs/dev/cue-building.md`, "Word timings".
 - Model text reaches a cue only through `absolute_words()`, which cleans every word
@@ -135,6 +136,17 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   `dump_words.py` read those flags, and `transcribe_options()` builds both callers' options.
   Quantised weights are unpacked at load (16-bit on a GPU, fp32 on the CPU): every precision runs on every machine, and
   `-w8a8` / `-w8a16` spellings (byte-identical files) are one model.
+- The creator's subtitles (`--human-subtitles auto`, Japanese only): only yt-dlp's
+  `info["subtitles"]` counts as a person's track, never `automatic_captions` (`ja-orig` among
+  them) and never an upload that reads as recognition output (`human_subtitle_lines()`); a video
+  YouTube names as another language gets none, and a track is never language evidence
+  (`declared_language()` stays the only metadata the language watch reads). The request runs on its
+  own thread, once per session, with the download's cookies; the audio never waits for it and a
+  failure leaves Whisper alone. `assist_cues()` takes a line's text only where it aligns with what
+  Whisper heard (`HUMAN_MIN_SIMILARITY`), else Whisper's cue stays; a line on its own times never
+  displaces a Whisper cue. The record's `human_subs` and a cue's `src` are optional fields, no
+  `CACHE_FORMAT` bump, and `covered` still means what Whisper has seen. Detail:
+  `docs/dev/cue-building.md`, "Human subtitles".
 - `enabled` is the master switch (popup header toggle, Alt+Shift+S). Off means nothing happens on
   YouTube pages: no `/sync`, no overlay, no native-caption hiding, no arrow keys, no Anki polling,
   no mining, no known word marked, no status badge switched, no `cardStatus` ask
@@ -224,6 +236,14 @@ a lyrics window), `build_cues()` and `merge_segments()`. Rules that must not reg
 - `server/tools/cue_stats.py`, `retranscribe.py`, `dump_words.py` and `replay_cues.py` measure a
   change; keep them working (`dump_words.py` decides every window as `process()` does).
 
+**Human subtitles** (`docs/dev/cue-building.md`, "Human subtitles"; measurements in
+`docs/subtitle-quality.md`, (f)). `Fetcher.start_human_check()` / `check_human_subtitles()` /
+`read_human_track()`, `pick_human_track()`, `parse_json3()` / `parse_srv3()` / `parse_vtt()`,
+`clean_subtitle_text()`, `unmarked_track()`; `assist_cues()` with `align_line()`,
+`line_similarity()`, `aligned_cue()`, `split_long_line()`, `echoes()`; in `process()`,
+`human_window_end()` and `lines_in_window()`; `App.apply_human_track()` for cues made before the
+track arrived. `replay_cues.py --human` and `retranscribe.py --human` measure a change.
+
 **Server runtime** (`docs/dev/server-runtime.md`). Live streams: `Fetcher.follow_live()`,
 `LiveFollower`, `DashLiveSource`, `Session.live_audio`; live sessions are never cached. Model
 switching: `App.request_model()` and `App.switch_model_if_wanted()`, run before every window,
@@ -293,6 +313,8 @@ Start button's launcher is registered and which model a bare start runs).
 This machine's built-in default model: `server.py --default-model` prints it and exits, ignoring
 `config.json`, which is the choice it is about to be compared with.
 Music videos: `--lyrics auto` (default) or `--lyrics off`; see `docs/dev/cue-building.md`.
+The creator's Japanese subtitles: `--human-subtitles auto` (default) or `off`; see
+`docs/dev/cue-building.md`, "Human subtitles".
 Model download with a progress bar: `server.py --download-model NAME`; see
 `docs/dev/server-runtime.md`.
 YouTube's sign-in: `run.cmd --save-cookies-from-browser firefox` (or `none`; on Nix

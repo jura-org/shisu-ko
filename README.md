@@ -15,7 +15,8 @@ YouTube's Japanese captions are often missing, wrong, or burned into the picture
 dictionary can reach them. Shisu-ko runs OpenAI's Whisper on your GPU, keeps
 transcribing a little ahead of where you are watching, and draws the result over the player as
 ordinary page text. Everything runs locally: the only network traffic is yt-dlp fetching the
-audio from YouTube, the one-time model download, and a look at GitHub for a newer release,
+audio from YouTube (and a Japanese subtitle track the video's creator uploaded, when there is one),
+the one-time model download, and a look at GitHub for a newer release,
 by `run.cmd` / `run.sh` before each start and by the extension once a day.
 
 ## What it does
@@ -704,7 +705,12 @@ Whisper hears Japanese in it, under stricter gates on Whisper's own confidence: 
 their lyrics, and an instrumental may show a wrong line now and then (`--lyrics off` sends such
 windows through the detector as before, so a song stays blank). A loud stretch beside speech that
 the detector missed (a song after its announcement, a shriek) gets the same check, and then the
-whole window is transcribed without the detector. The reasoning and the measurements behind these rules are in
+whole window is transcribed without the detector. When a Japanese video carries subtitles its
+creator uploaded (never YouTube's automatic captions, and never a track that reads as their
+output), each line Whisper heard the same way shows the creator's text and line breaks, timed from
+Whisper's words; where the two disagree, or the track has no line, Whisper's own cue stays, and a
+line over music or speech Whisper missed keeps the track's times (`--human-subtitles off` turns
+this off). The reasoning and the measurements behind these rules are in
 [docs/subtitle-quality.md](docs/subtitle-quality.md). Cues are saved per video and per model in
 `~/.shisu-ko/cache`, so a video you have watched before shows subtitles immediately: the
 current model's cues are `<video_id>.cues.json`, and when you switch models another model's
@@ -755,6 +761,7 @@ sends the YouTube cookies of the browser chosen there (see [YouTube sign-in](#yo
 | `--initial-prompt ""` | Turn off the prompt that asks Whisper for punctuation. Japanese gets one by default (`はい、そうですね。今日はよろしくお願いします。それで、どう思いますか？`), because a window is decoded with nothing in front of it and an unprompted decode writes a sentence mark at about half of the sentence ends; any other text replaces it, and a language other than Japanese has none. The prompt now and then makes Whisper skip the first seconds of speech in a window; such a window is decoded once more without it and the skipped lines filled in |
 | `--language-patience 60` | Seconds of speech in another language before a video's subtitles stop. It governs YouTube's declaration as well: 0 means neither the declaration nor the speech is checked and everything is transcribed |
 | `--lyrics off` | Transcribe a window in which the speech detector hears under a second of speech with the detector as before (blank when it heard nothing). The default `auto` transcribes such a window without the detector when its audio is not silent (sung lyrics, speech over music) and Whisper hears the target language in it, under stricter gates |
+| `--human-subtitles off` | Build every cue from Whisper alone and ask YouTube for no subtitle track. The default `auto` uses a Japanese track the video's creator uploaded: a line Whisper heard the same way takes the creator's text and line breaks with Whisper's timing, any other stretch stays Whisper's. Cues already cached stay as they are |
 | `--sentence-ends off` | Cut and merge lines on Whisper's own punctuation alone. The default `auto` writes the sentence mark Whisper left out where a word ending in a sentence-final expression (よね, です, ます, か, or a plain form) is followed by a pause, so a run-on line breaks where the speaker ended the sentence and a mined card gets that sentence and no more |
 | `--idle-minutes 30` | Release the decoded audio of a video nobody has synced for this long |
 | `--retry-after 30` | The longest wait between two attempts at a failed audio fetch (the waits start at 2 s and double; a private or removed video is not retried), and the wait before a model name that failed to download or load is tried again |

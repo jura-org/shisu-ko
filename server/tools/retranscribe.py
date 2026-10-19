@@ -68,6 +68,8 @@ def parse_args(argv=None):
     p.add_argument("--max-cue-seconds", type=float, default=7.0)
     p.add_argument("--min-cue-seconds", type=float, default=0.8)
     p.add_argument("--limit-seconds", type=float, default=0.0, help="only transcribe the first N seconds")
+    p.add_argument("--human", help="the creator's subtitle track (.json3, .srv3, .vtt) for the one video given: "
+                                   "every window puts it in, as the server does with --human-subtitles auto")
     p.add_argument("--cpu-threads", type=int, default=0)
     args = p.parse_args(argv)
     if args.initial_prompt is None:  # the tool measures what the server does, prompt included
@@ -77,6 +79,11 @@ def parse_args(argv=None):
     args.client_timeout = 0.0
     args.idle_minutes = 10 ** 6
     args.retry_after = 10 ** 6
+    # Never a request from here: a track comes only from --human, and the session takes it as the
+    # server's own fetch would have left it.
+    args.human_subtitles = "auto" if args.human else "off"
+    if args.human and len(args.video_ids) != 1:
+        p.error("--human holds the track of one video")
     return server.resolve_default_model(args)
 
 
@@ -118,6 +125,11 @@ def run_video(app, worker, args, video_id: str, src: Path, out_dir: Path) -> dic
     s.audio = audio
     s.duration = len(audio) / server.SAMPLE_RATE
     s.status = "ready"
+    if args.human:
+        path = Path(args.human)
+        s.human_lines = server.human_subtitle_lines(path.read_bytes(), path.suffix.lstrip(".")) or []
+        s.human_track = f"{path.name}" if s.human_lines else ""
+        print(f"[{video_id}] {len(s.human_lines)} lines of the creator's track", flush=True)
     print(f"[{video_id}] {s.duration:.0f}s of audio decoded in {time.time() - t0:.1f}s", flush=True)
 
     t0 = time.time()

@@ -400,6 +400,114 @@ playhead is within the first minute, a yt-dlp progress hook already runs that pr
 `.part` file once enough bytes are in, so the first cues arrive while the download continues. The
 full decode replaces it with `Session.audio` and clears the preview.
 
+## Human subtitles
+
+A track the video's creator uploaded is better text than Whisper's: the names, the kanji and the
+sentence ends a person chose. Its timing is a person's too, loose by a few hundred milliseconds and
+now and then by seconds. So a cue takes its text and its line from the track and its times from the
+Whisper words that text aligns with. `--human-subtitles auto` (default) turns it on for `--language
+ja`, the only language it was measured on (`human_subtitles_on()`); `off` builds as before and asks
+YouTube for nothing more. A live stream never uses a track.
+
+What counts as human. Only yt-dlp's `info["subtitles"]`, the creator's uploads; never
+`automatic_captions`, `ja-orig` among them, punctuated or not: YouTube's recogniser writes
+homophones Whisper does not and cuts its lines at a fixed length, mid-word. `pick_human_track()`
+takes `ja` before `ja-JP` (any `ja-` tag but `-orig`), json3 before srv3 before vtt, and skips a
+format YouTube labels as recognition (`kind=asr`, "auto-generated"). A creator can also upload the
+recogniser's output as their own track, and `human_subtitle_lines()` refuses that too: more than
+half its lines timed word by word (json3 `tOffsetMs`/`acAsrConf`, srv3 `<s t=…>`, vtt
+`<00:00:01.234>`), or no punctuation mark and no space in 95% of 20 rows or more
+(`unmarked_track()`). The second rule is the one that fired on a real upload: a lesson channel's
+track with no mark anywhere and two rows of 8 seconds cut mid-word (行き / ましょう), which a person
+never writes. A video YouTube names as another language gets no track (`read_human_track()`): a Japanese
+track on it is a translation. The track is no evidence of the audio's language, for the same
+reason, and `declared_language()` stays the only metadata the language watch reads.
+
+The request. `Fetcher.start_human_check()` asks once per session, on a thread of its own, so the
+audio never waits for it: from `download_once()` with the metadata it already holds (a copy, since
+`process_ie_result()` goes on filling it), from `fetch_once()` for audio on disk with one
+`extract_info(process=False)` of its own, and from `App.get_session()` for a record the cache covers
+to its end, which no fetch would reach. It goes through a `YoutubeDL` built from `ytdlp_options()`,
+so it sends the download's cookies. A failed request logs a warning and leaves the video to Whisper;
+it is not repeated for that session (`Session.human_asked`). Cleaning (`clean_subtitle_text()`): the
+model-text cleaning, then per row a speaker label (（田中）, 田中：, 【田中】, a >> or - turn mark), a
+sound tag ([笑], （拍手）, ♪), furigana in brackets after its kanji (`is_ruby()`: hiragana, at most four
+per kanji), and whitespace runs squeezed to one. The track's own row breaks stay `"\n"` rows: they are
+where its maker put them, often a turn between two speakers, and the overlay, Yomitan and `match.js`
+read them as the cue builder's own.
+
+Alignment, per window (`assist_cues()`, after `build_window_cues()` in `process()`). Every character
+of the window's Whisper cues is folded (`fold_chars()`: NFKC, lower case, katakana as hiragana,
+letters and digits only, ー and 〜 dropped) and timed as its share of its word. Each line the window
+owns is aligned with the Whisper characters from `HUMAN_TIME_SLACK` (1.5 s) before it to
+`line_reach()` plus that slack, after what earlier lines claimed: an edit distance with free ends
+on the Whisper side (`align_line()`). `line_reach()` is the line's own end, or as far as its text
+takes at `HUMAN_SLOWEST_CHARS_S` (4 characters a second), since one real track wrote three questions
+over three seconds of an eight-second stretch. The score (`line_similarity()`) is difflib's ratio,
+twice the matches over both lengths, with half credit for a kanji written in kana on the other side
+(優しい / やさしい): alone that credit stays at 0.5, under the bar. At `HUMAN_MIN_SIMILARITY` (0.6) or
+better the line becomes a cue holding its own text, timed from the Whisper characters it sits on,
+snapped to the speech onset as `build_cues()` snaps, its end pulled out of the silence Whisper
+stretches a last word over (`speech_end_before()`) and given the lead-out (`extend_end()`, the step
+`build_cues()` now calls too). Its `words` are the line's own tokens, runs of one script with marks
+attached (`human_words()`), each timed from its characters; a character Whisper never wrote shares
+the gap between the neighbours it did. Their texts join to the cue's, as every cue's must. What
+Whisper heard inside an aligned line's own span that no line claimed (a sentence said twice and
+written once, a filler) goes with the line, whose cue stretches over it, rather than standing beside
+it in Whisper's spelling. Whisper's words a line claimed go; the rest of a Whisper cue stays as a
+cue of its own (`leftover_cue()`) unless under `HUMAN_MIN_LEFTOVER` (`MIN_PIECE_CHARS`) characters,
+the line's fringe. A Whisper cue mostly under a line's goes, one at its edge gives way to it.
+
+Where it falls back. A line scoring under 0.6 keeps Whisper's text for that stretch: on the
+measured tracks those are English read under `--language ja` (Whisper writes katakana or a
+translation), a line half of which the person left out, or a typo of theirs. Speech the track has no
+line for keeps Whisper's cue. A line over audio Whisper wrote nothing for (music, a stretch the
+detector missed, a window the prompt-skip retry could not fill) keeps the track's own times and no
+`words`, unless Whisper wrote anything over it, or wrote this same line within `HUMAN_DISPLACED_S`
+(15 s) of it (`echoes()`): then the person's timing slipped, which one track did by ten seconds,
+and Whisper's cue stays. A line too long for the screen (over `max_lines` rows of `max_chars`) is cut at its own
+sentence marks first (`split_long_line()`), its time shared by characters. The gates still judge
+every Whisper segment; a line's text is never gated, since a person wrote it.
+
+Windows. A line is owned by the window holding its middle (`lines_in_window()`, to `line_reach()`).
+`human_window_end()` ends a window, as the segment rule does, where no line's speech runs across the
+end: at the latest onset of detected speech in the window's last two thirds that no line spans,
+less up to `HUMAN_CUT_LEAD` (0.3 s) of the silence before it, so a cue snapped a lead-in ahead of
+the onset does not open inside this window. An onset and not the line's start: lines start after
+their speech often enough that a cut at the line left the head of its speech here as a Whisper cue
+beside the next window's line (a cue うん。 just before the next window's うん。\nそれで…; 14 of 35
+window ends of a 14-minute run before the cut moved into the silence and echoes went). With no such onset the end stays; a Whisper cue that echoes() the line either
+side the neighbouring windows own is dropped (`neighbour_lines()`). The log line gains
+` [creator's subtitles: N lines aligned, K on their own times, M left to Whisper]`.
+
+A track that arrives late. The first window usually decodes before the track lands, and a cached
+record was built without one. `App.apply_human_track()` runs `assist_cues()` over the cues already
+made, with the lines that lie wholly in covered audio, builds off the lock and swaps the result in
+only if no window added a cue meanwhile, under a new session token: the client drops the ids it
+holds and takes the list afresh. A list already carrying a line is never rebuilt.
+
+The cache. `CACHE_FORMAT` stays 6. A record gains `"human_subs"`: `{"track": "<key>.<ext>:<sha1
+prefix>", "lines": [[start, end, text], ...]}` when a track was used, `{"track": null}` when the
+video was asked and has none, nothing when it was never asked. The lines are kept so a partly
+covered video needs no second request, and a record asked once is not asked again. A line's cue
+carries `"src": "human"`; Whisper's carry none. `/sync` strips `src` with `words`
+(`OPT_IN_CUE_FIELDS`, `without_words()`): a client that does not ask for word timings sees exactly
+what it saw before, byte for byte, on any video. A bump would have thrown away every watched video
+to add a field nothing displays; instead an old record loads unchanged, is asked once, and with a
+track found is rebuilt in place as above. `covered` still means "Whisper has seen this": a line
+on its own times extends nothing. The rebuild is permanent like everything in the cache; deleting
+the record, or `retranscribe.py`, gives Whisper's cues back, and `--human-subtitles off` only stops
+new windows from using a track.
+
+Measuring. `replay_cues.py --human TRACK` builds a `dump_words.py` file twice, Whisper alone and
+with the track, and scores both against it (CER, sentence ends marked and seen, the share of cues
+from each source, word sanity, the start shift); `--human-scope whole` puts the lines in as
+`apply_human_track()` does, `--human-raw` skips the recognition test. Handed a cue record instead
+(`retranscribe.py --human TRACK` drives the real `process()`, window cuts included), it scores the
+record as it is. `dump_words.py` is untouched: a dump has no track, and `process()` without one
+decides every window as before. Numbers: `docs/subtitle-quality.md`, (f). Tests:
+`server/tests/test_human_subtitles.py`.
+
 ## Runtime data and the cue cache
 
 The runtime-data invariant in full:
