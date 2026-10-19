@@ -149,8 +149,8 @@ fresh cursor. A body without either field gets exactly the answer it got before 
 
 `takeMined()` in `content.js` reads the log: the entry with its nonce ends the viewer's mine and
 is toasted; an automatic attach that worked is toasted, one that failed is the server log's
-business. Every entry that wrote a note sends `minedNote` to the background, which calls
-`rememberDeck()` for the word colours and asks for their index soon (see `word-colours.md`).
+business. The word colours need nothing from the tab: `Miner.outcome()` hands each note it
+attached to to `DeckIndexes.note_mined()`, which learns the note's deck (see `word-colours.md`).
 
 ### What a mined card gets
 
@@ -238,8 +238,9 @@ background's `premined`) is gone with it; `downloads` and the Downloads fallback
 default is off unless `--anki-url` names an Anki, as for the sync: 127.0.0.1 there is the
 container. `start_anki_watcher(args, app)` starts the miner's thread (`anki-mine`) beside the
 watcher's (`anki-sync`); `--anki-sync off` with mining on runs the watcher for the miner alone
-(`AnkiWatcher.sync_on` False, and `/health`'s `anki_sync` says `off`). A mine asked of a server
-whose mining is off is answered `off`.
+(`AnkiWatcher.sync_on` False, and `/health`'s `anki_sync` says `off`), and so does the word
+colours' deck thread (`anki-deck`, `resolve_word_colours()`) with both off. A mine asked of a
+server whose mining is off is answered `off`.
 
 ## The Anki sync after mining
 

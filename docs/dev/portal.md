@@ -8,7 +8,7 @@ services that already run on the computer.
 
 ```
 phone browser ──HTTP──► portal/portal.py (127.0.0.1 / LAN / Tailscale, port 8791)
-                          ├─► Shisu-ko server  127.0.0.1:8790  /sync (cues, words), /clip (sentence audio), /health
+                          ├─► Shisu-ko server  127.0.0.1:8790  /sync (cues, words, the deck's rows), /clip (sentence audio), /health
                           ├─► Yomitan API      127.0.0.1:19633 /tokenize, /termEntries, /ankiFields (fields, word audio)
                           ├─► AnkiConnect      127.0.0.1:8765  deckNames, modelNames, modelFieldNames, canAddNotes, storeMediaFile, addNote, sync
                           ├─► yt-dlp (in-process)              YouTube's HLS stream, proxied
@@ -18,7 +18,7 @@ phone browser ──HTTP──► portal/portal.py (127.0.0.1 / LAN / Tailscale,
 Files: `portal/portal.py` (the server; stdlib plus yt-dlp and PyAV, imported lazily), `portal/qr.py`
 (a small QR encoder for the pairing code), `portal/static/` (the page: `index.html`, `app.js`,
 `app.css`; `lib.js` holds its pure helpers and every UI string; `pair.html`, `pair.js` the pairing
-page), `portal/tests/`. Launchers: `server/portal.cmd`, `server/portal.sh`, `nix run .#portal`. They
+page; `/words.js` is the extension's `addon/words.js`, served from the checkout), `portal/tests/`. Launchers: `server/portal.cmd`, `server/portal.sh`, `nix run .#portal`. They
 run the server's own Python environment (`~/.shisu-ko/venv`), which has yt-dlp and PyAV.
 
 ## Who may use it
@@ -187,6 +187,16 @@ signed in to AnkiWeb", "Anki sync: off on the server", nothing for a server from
 0.20.0 and 0.21.0 had a scheduler here, a switch and an `auto_sync` key in `portal.json`. A
 leftover `auto_sync` is accepted, warned about once at start and ignored (`RETIRED_KEYS`), where
 any other unknown key stops the portal; one left in `portal-state.json` is never read.
+
+## Word colours
+
+Settings > Word colours (off by default, like the extension's) underlines each word by the state
+of its Anki card, with the extension's own matcher. The server reads the deck: the page's
+`/api/sync` carries `deck: {since}`, `portal.py` names the card setup's deck (none: the server's
+automatic deck) and the token, and the answer's `deck` brings every row the first time and the
+changed rows after that. The page builds words.js's index from them and marks each line, cut into
+Yomitan's tokens. The page sends a token only; the deck is the portal's choice. Detail:
+`word-colours.md`, "The portal".
 
 ## Positions and the home screen
 

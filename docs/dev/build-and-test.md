@@ -10,7 +10,7 @@ and how the server tests keep away from the real data folder.
 it never maintains a second application copy. `npm run watch` rebuilds after edits; reload the
 unpacked extension in `chrome://extensions` and reload the YouTube tab. The build writes
 versioned Firefox and Chrome ZIPs and excludes `addon/tests`, dotfiles, and development metadata.
-Chrome's `service-worker.js` loads `browser-api.js`, `settings.js`, `words.js` and
+Chrome's `service-worker.js` loads `browser-api.js`, `settings.js` and
 `background.js` in that order with classic `importScripts`, so settings globals retain the same
 behavior as Firefox; `addon/tests/settings.test.js` and `scripts/tests/build.test.mjs` hold that
 order. Chrome refuses an extension whose `commands` suggest more than four shortcuts, so
@@ -35,10 +35,9 @@ PNG file in the package.
 folder first ("Server tests" below). `addon/tests/_loadBackground.js` runs
 `background.js` in a Node `vm` sandbox with `browser`/`fetch` stubbed out — top-level
 `function` declarations become sandbox properties, but `const`/`let` (`DEFAULT_SETTINGS`,
-`REQUEST_TIMEOUT_MS`, `CARD_STATUS_TTL_MS`, `DECK_SEEN_KEY`, `DECK_NOTES_KEY`, `DECK_NOTES_FORMAT`) need an extra
+`REQUEST_TIMEOUT_MS`, `SERVER_TOO_OLD_TEXT`, `deckState`) need an extra
 script run in the same context to expose them, since they live in the global lexical environment
-rather than as globalThis properties; it loads `settings.js` and `words.js` first,
-like the manifest. `addon/tests/_loadContent.js` does the same for `content.js` by rewriting
+rather than as globalThis properties; it loads `settings.js` first, like the manifest. `addon/tests/_loadContent.js` does the same for `content.js` by rewriting
 its IIFE to return its pure helpers (`shouldSync`, `mergeCues`, `findActiveCue`, `jumpTarget`,
 `fontStack`, `modelForSync`, ...), the handlers that drive them (`sync`, `takeMined`, `pendingMine`,
 `onKeyDown`, `onMineClick`, `discover`, ...), the word-colour functions (`renderText`,
@@ -61,9 +60,12 @@ Chrome build against local fixtures: a fixture server answering `/health` and `/
 fixture AnkiConnect. Since 0.22.0 its fixture server keeps a mining log the way `server.py` does
 (one entry per mine nonce, `mined` / `mined_next` from the cursor): a line's pickaxe must put
 `mine` on the next `/sync` with the popup's `anki` settings, stop sending it once the log answers
-it, and toast the answer, and the popup's field names must reach the server in `/sync`. The
-fixture AnkiConnect answers only reads (`requestPermission`, `findCards`, `getDecks` for the deck
-a mined note went to) and the run fails on any write or `sync` from the extension. The attach
+it, and toast the answer, and the popup's field names must reach the server in `/sync`. Since
+0.23.0 the fixture server also answers `/sync`'s `deck` (every row, then a delta) and
+`/health?decks=1`: the line must show the words in their card's colours and follow the delta, and
+the popup's deck list and hint must come from the server. The fixture AnkiConnect refuses every
+call, the stored settings name it under 0.22.0's `ankiUrl`, and the run fails on any request to
+it (the 0.22.0 extension fails there). The attach
 itself is the server's and is tested in `server/tests/test_mining.py` and `test_mining_sync.py`.
 
 ## Server tests

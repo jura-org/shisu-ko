@@ -652,9 +652,11 @@ switch has no say: it governs what the extension does on YouTube pages, and the 
 nothing from it. Tests: `server/tests/test_anki_sync.py`, on a fake clock and a fake AnkiConnect,
 and the request's headers against a local fake server; they never reach a real Anki.
 
-Three hooks serve the miner (below): `sync` (False when `--anki-sync off` leaves the watcher
-running for the miner alone; `status()` then answers `off`, and no new note schedules a sync),
-`on_new(ids)` (every id a look finds that is not in `seen`, the baseline never), and `fast()`
+Three hooks serve the miner (below) and the word colours' deck indexes: `sync` (False when
+`--anki-sync off` leaves the watcher running for the miner or the deck indexes alone; `status()`
+then answers `off`, and no new note schedules a sync), `on_new(ids)` (every id a look finds that
+is not in `seen`, the baseline never; `start_anki_watcher()` hands it to `Miner.notes_added()` and
+`DeckIndexes.notes_added()` alike, `word-colours.md`), and `fast()`
 (a client is mining: the next look comes after `ANKI_POLL_MINING`, 3 s, instead of `ANKI_POLL`).
 
 ## How mining works on the server

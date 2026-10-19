@@ -36,8 +36,8 @@ by `run.cmd` / `run.sh` before each start and by the extension once a day.
   transcript line, or Alt+Shift+M, does the same on demand, into the newest card.
 - **Word colours** (optional). With Anki running, every word of a line that has a card in your
   deck is coloured by the card's state, green to red, and can carry an overbar in the colour of
-  its pitch accent, read from the card. The deck follows your mining, and a verb is found in its
-  conjugations.
+  its pitch accent, read from the card. The server reads the deck, which follows your mining, and
+  a verb is found in its conjugations. The phone portal underlines words the same way.
 - **Your hardware, your model.** Setup offers the model your machine runs best — large-v3 on an
   NVIDIA GPU, large-v3-turbo on an Apple Silicon one, where the weights share memory with the
   browser — or small, or a [Kitsune-Transcribe](#kitsune-transcribe-models) model (small
@@ -377,16 +377,23 @@ The Shisu-ko server uses port 8790 precisely so that AnkiConnect can keep its de
 ## Word colours
 
 Two optional colourings, both off by default, both in the popup's **Word colours** section. They
-need Anki running with AnkiConnect, as mining does, and ask through AnkiConnect's permission
-dialog: click **Yes** once. Nothing leaves your computer; the extension only reads your deck.
+need Anki running with AnkiConnect, as mining does, and the Shisu-ko server 0.23.0 or newer: the
+server reads your deck (through its `--anki-url`, like the mining) and sends each card's word,
+state and pitch accent with the subtitles, every card the first time and the changed ones after
+that. The extension never talks to AnkiConnect, so there is no permission dialog to click. Nothing
+leaves your computer, and nothing is written to Anki for the colours. A card reviewed in Anki shows
+its new colour within about half a minute, a card just made within seconds.
 
 **Colour words by their Anki card** colours each word of a subtitle line, and of the transcript
 panel, by the state of its card: green for a card you have learned (in review), yellow for one you
 are still learning, orange for a suspended card, red for a new one. A word with no card keeps the
 text colour, unless it is a word on your list of known words, or a particle, katakana word or name
-you chose to colour (below). The cards come from one deck. Left on *Automatic*, that is the deck your
-last mined card went to: nothing is looked up until you have mined a card, and the first mine then
-names the deck (the hint under the **Deck** select says which, or "no card mined yet"). Choose a
+you chose to colour (below). The cards come from one deck. Left on *Automatic*, that is the deck the
+last card the server put media into went to: nothing is looked up until a card is mined, and the
+first mine then names the deck (the hint under the **Deck** select says which, or "no card mined
+yet"). The server remembers it across restarts in `~/.shisu-ko/anki-deck.json`. It does not
+inherit the deck the extension remembered before 0.23.0: after the update, *Automatic* waits for
+the next card mined, or choose the deck in the select. Choose a
 deck in the select to look at that one instead; its subdecks count. Words are taken from the note's
 word field (the popup's **Word field**, else the note's first field), and a verb or adjective is
 found in its usual conjugations and in its noun form: a card for 食べる colours 食べました,
@@ -583,7 +590,7 @@ age of the daily check, and the line under it keeps the result ("Newest release:
 | Left/Right jump between subtitles | Arrow keys move between cues instead of seeking five seconds |
 | Transcript panel | List of all cues so far, with jump and mine buttons |
 | Auto-attach to new Yomitan cards | Watches AnkiConnect and fills the new card by itself; off means Alt+Shift+M or the pickaxe |
-| Colour words by their Anki card | Colours each word of a line by the state of its card in the deck below: green learned, yellow learning, orange suspended, red new; green for your known words and, as the three switches under More word colour options say, green for particles and katakana words and blue for names and Latin text; other words keep the text colour. Needs Anki with AnkiConnect, see [Word colours](#word-colours) |
+| Colour words by their Anki card | Colours each word of a line by the state of its card in the deck below: green learned, yellow learning, orange suspended, red new; green for your known words and, as the three switches under More word colour options say, green for particles and katakana words and blue for names and Latin text; other words keep the text colour. Needs Anki with AnkiConnect, which the server reads, see [Word colours](#word-colours) |
 | Deck | The deck whose cards are looked at. Automatic means the deck your last mined card went to; nothing is looked up before a card was mined or a deck chosen. The hint under it names the deck, or says what stands in the way |
 | Particles, katakana, names, known words | Under More word colour options, closed by default |
 | Particles count as known | Off by default. On: particles and their combinations with the copula and the auxiliaries (は, には, です, という …) and the grammar words (ある, いる, する, この, こと, まだ …) are green, as grammar you know; off, they keep the text colour |
@@ -633,8 +640,8 @@ during a switch, and the hint under the field carries the server's verdict on th
 With the experimental AMD engine on Windows the swap is a restart of the server (see
 [AMD graphics cards](#amd-graphics-cards-experimental)).
 
-The last drawer, **Anki, clips and server**, holds the AnkiConnect URL (for the word colours;
-the server mines through its own `--anki-url`), the image, audio, sentence, word and pitch accent field names (the last one
+The last drawer, **Anki, clips and server**, holds the image, audio, sentence, word and pitch
+accent field names (the last one
 empty means the first field named pitch or accent that holds a readable value), the audio
 padding around the sentence, the clip format (MP3 or WAV), the Shisu-ko server URL (default
 `http://127.0.0.1:8790`) and the **Check for updates** link with the result of the last check.
@@ -646,16 +653,16 @@ Firefox (addon/)                                 Local server (server/), http://
 +----------------------------------+             +------------------------------------------------+
 | content script on youtube.com    |  POST /sync | 1. yt-dlp downloads the audio track once       |
 |  - video id, playhead, model 1x/s| ----------> |    (a live stream: follows its audio segments) |
-|  - Anki field names, a mine      | <---------- | 2. PyAV decodes it to 16 kHz mono              |
-|  - renders cues as DOM text      |   new cues, | 3. Silero VAD + faster-whisper transcribe      |
-|  - hover pauses, Yomitan scans   |   mined log |    windows at the playhead, then ahead of it   |
-+----------------------------------+             | 4. Miner: a new card's line audio + a frame    |
-        |                                        +------------------------------------------------+
-        | AnkiConnect (http://127.0.0.1:8765): findNotes + notesInfo on one deck for the word
-        | colours, and the deck a mined card went to; never a write
-        v
-      Anki  <-- the server: findNotes every 15 s (3 s while mining), storeMediaFile + updateNoteFields
-                on a new card's empty fields (--mine), sync a minute after new notes (--anki-sync)
+|  - Anki field names, a mine,     | <---------- | 2. PyAV decodes it to 16 kHz mono              |
+|    the deck token (word colours) |   new cues, | 3. Silero VAD + faster-whisper transcribe      |
+|  - renders cues as DOM text      |   mined log,|    windows at the playhead, then ahead of it   |
+|  - hover pauses, Yomitan scans   |   the deck's| 4. Miner: a new card's line audio + a frame    |
++----------------------------------+   rows      | 5. the deck index: one deck's words and states |
+                                                 +------------------------------------------------+
+      Anki  <-- the server, through AnkiConnect (http://127.0.0.1:8765); the extension never calls it:
+                findNotes every 15 s (3 s while mining), storeMediaFile + updateNoteFields on a new
+                card's empty fields (--mine), sync a minute after new notes (--anki-sync), and
+                findNotes + notesInfo on the word colours' deck every 30 s while a tab shows them
 ```
 
 Why a local server instead of running the model in the browser: Whisper large-v3 has 1.5
@@ -770,7 +777,7 @@ sends the YouTube cookies of the browser chosen there (see [YouTube sign-in](#yo
 | `--human-subtitles off` | Build every cue from Whisper alone and ask YouTube for no subtitle track. The default `auto` uses a Japanese track the video's creator uploaded: a line Whisper heard the same way takes the creator's text and line breaks with Whisper's timing, any other stretch stays Whisper's. Cues already cached stay as they are |
 | `--sentence-ends off` | Cut and merge lines on Whisper's own punctuation alone. The default `auto` writes the sentence mark Whisper left out where a word ending in a sentence-final expression (よね, です, ます, か, or a plain form) is followed by a pause, so a run-on line breaks where the speaker ended the sentence and a mined card gets that sentence and no more |
 | `--anki-sync off` | Never sync Anki. The default `auto` watches Anki through AnkiConnect and syncs it with AnkiWeb a minute after new notes appear, then every 30 s while they keep coming (see [Sentence mining](#sentence-mining)); `/health` reports how the last sync went. Off by default inside the Docker image, where 127.0.0.1 is the container, unless `--anki-url` is given |
-| `--anki-url http://127.0.0.1:8765` | AnkiConnect's address for that sync and for mining (the default shown) |
+| `--anki-url http://127.0.0.1:8765` | AnkiConnect's address for that sync, for mining and for the word colours' deck (the default shown) |
 | `--mine off` | Never write to Anki. The default `auto` gives a card Yomitan makes from a subtitle line that line's audio and picture, in the fields it left empty (and grows a sentence Yomitan cut short to the whole line), and takes the extension's Alt+Shift+M (see [Sentence mining](#sentence-mining)). Off by default inside the Docker image unless `--anki-url` is given |
 | `--mine-picture off` | A mined card gets the audio alone. The default `on` adds a frame of the video at the line, from YouTube's stream (one yt-dlp resolve per video, kept 4 hours) |
 | `--idle-minutes 30` | Release the decoded audio of a video nobody has synced for this long |
@@ -1048,8 +1055,8 @@ Windows:
 
 The extension does not change between native and Docker; both listen on `127.0.0.1:8790`.
 
-The server's mining and its Anki sync are off in the container: 127.0.0.1 there is the
-container itself, not the computer running Anki. To turn them on, add `--anki-url` with an address the
+The server's mining, its Anki sync and the word colours' deck are off in the container: 127.0.0.1
+there is the container itself, not the computer running Anki. To turn them on, add `--anki-url` with an address the
 container reaches Anki at to the `command:` line, for example
 `http://host.docker.internal:8765` (Docker Desktop; on Linux add
 `extra_hosts: ["host.docker.internal:host-gateway"]` to the service), and set AnkiConnect's
@@ -1127,10 +1134,11 @@ Planned: a distilled, smaller Japanese model that could eventually run in the br
 addon/                Firefox extension (Manifest V3, plain JS, no build step)
   content.js          overlay, sync loop, hover-pause, transcript, live clock, mine requests in /sync
   background.js       server proxy, settings, server start, release check (GitHub), badge and
-                      notification, the server's update, the word colours' AnkiConnect reads
+                      notification, the server's update, the word colours' rows from /sync
   settings.js         the one place settings and their defaults are declared
-  words.js            shared by background.js and content.js: the word colours (reading a note's
-                      word and pitch, finding words in a line)
+  words.js            the word colours' matcher (finding words in a line), for content.js and the
+                      phone portal; its note reading has a twin in server.py, held equal by the
+                      golden test
   popup.*             settings UI with the server status, the Start and Update buttons and the update
                       banner, also the preferences page
   tests/              Node tests for background.js, popup.js, words.js and the pure helpers
@@ -1244,10 +1252,14 @@ per session, the `/update` request with its record, and the `/health` polls that
 version coming back, the 120 s deadline, Not now and Check for updates. The word colours are
 covered in `words.test.js` (reading a note's fields and pitch accent, the card states, the
 conjugation matcher with its boundaries and the words it must not colour), `background.test.js`
-(the deck's five searches, the index and its time to live, the deck of the last mined card, Anki
-away or refusing, a hostile note), `content.test.js` (the spans a line is drawn with, the poll, a
-deck change, the refresh that redraws only the changed lines) and `popup.test.js` (the deck list,
-its hints and when Anki is asked).
+(the rows a /sync brings, a delta, a deck change, the server's verdicts, the deck list, and a grep
+that finds no AnkiConnect call in the extension), `content.test.js` (the spans a line is drawn
+with, the poll, a deck change, the refresh that redraws only the changed lines), `popup.test.js`
+(the deck list, its hints and when Anki is asked), `test_deck_index.py` (the server's deck: the
+five searches, the edits, a deleted note, a deck switch, the new-note trigger, Anki away, and its
+note reading against words.js over random fields) and the golden test
+(`deck-golden.test.js` with `test_deck_golden.py`: one invented deck, the extension's old path and
+the server's give the same entries).
 
 ## Acknowledgements
 

@@ -14,7 +14,8 @@ plus sentence audio into the newest Anki card via AnkiConnect.
 
 ```
 addon/        Firefox source extension, Manifest V3, plain JS; directly loadable without a build
-              (words.js is shared by background.js and content.js and loaded before both)
+              (words.js, the word colours' matcher, is loaded before content.js and served to
+              the phone portal)
 server/       server.py (single file) + setup/run scripts + update.py; runtime data in ~/.shisu-ko
               native_host.py: the native-messaging host behind the popup's "Start server" button
               (stdlib only); Firefox and Chrome run it through native-host.cmd / native-host.sh
@@ -71,7 +72,9 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   never spawns `update.py` and never downloads a release itself; the launcher does. Mining added
   no endpoint: `/sync` takes the optional `anki`, `mine` and `mined_since` and answers `mined`,
   `mined_next` and `anki_error` only to a body carrying `anki` or `mined_since`, so every other
-  client's answer is unchanged.
+  client's answer is unchanged. Nor did the word colours: `/sync`'s optional `deck: {name, word,
+  pitch, since}` is answered `deck` only when its token moved, and `/health?decks=1` alone adds
+  `anki_decks`.
 - A cue's word timings (`words`) and source (`src`, `"human"` on a line from the creator's
   subtitles) are opt-in on `/sync`: only a body with `"words": true` gets them, and the default
   response never changes (`without_words()`, `OPT_IN_CUE_FIELDS`). Their texts join to the cue's text
@@ -152,7 +155,8 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
 - `enabled` is the master switch (popup header toggle, Alt+Shift+S). Off means nothing happens on
   YouTube pages: no `/sync`, no overlay, no native-caption hiding, no arrow keys, no mining (no
   `/sync` means no session the server attaches for, and no `mine`), no known word marked, no status badge switched, no `cardStatus` ask
-  (`wordColoursOn()` includes `enabled`). Only the toggle command keeps working.
+  and no `deck` asked of the server (`wordColoursOn()` includes `enabled` in `content.js` and
+  `background.js`). Only the toggle command keeps working.
 - Anki sync after mining is the server's job; clients never call AnkiConnect `sync`. `AnkiWatcher`
   in `server.py` looks at `findNotes` `added:2` every 15 s (the first answer is the baseline,
   never synced for) and syncs 60 s after new ids, then 30 s after each sync began while they keep
@@ -165,10 +169,18 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   field is `grow_sentence()`: a sentence that is a fragment of the matched cue (Yomitan cuts at
   。！？) becomes the cue's row, escaped, with Yomitan's `<b>` kept and never past the newline
   seam; any other text stays. A field that changed between the first read and the write is never
-  written. The viewer's own mine reaches it as `/sync`'s `mine`. The extension reads Anki for the word colours
-  alone; `addon/tests/settings.test.js` holds that no file in `addon/` names `updateNoteFields`,
+  written. The viewer's own mine reaches it as `/sync`'s `mine`. `addon/tests/settings.test.js` holds that no file in `addon/` names `updateNoteFields`,
   `storeMediaFile`, `addNote` or `browser.downloads`. `--mine auto|off` decides it, off by default
   in the container unless `--anki-url` is given. Detail: `docs/dev/mining.md`.
+- The server reads Anki; the extension makes no AnkiConnect call, has no AnkiConnect address and
+  no permission dialog. The word colours' deck is `DeckIndexes` in `server.py` (on except in the
+  container without `--anki-url`, `resolve_word_colours()`); its note reading (`wc_plain_word()`,
+  `wc_pitch_of()`, `wc_kana_reading_of()`, `wc_status_of()`, ...) is a line-for-line port of
+  words.js's, with JavaScript's string rules, and the golden test (`deck-golden.test.js` with
+  `test_deck_golden.py`) plus `test_deck_index.py`'s run over random fields hold the two equal: a
+  change to one is a change to both. The matcher (`buildIndex()`, `markWords()`, the particle
+  ruling) stays in words.js alone; the server never marks a line. `background.test.js` greps
+  `addon/` for AnkiConnect's port and actions. Detail: `docs/dev/word-colours.md`.
 - The extension's permissions are pinned: `ALLOWED_PERMISSIONS` in `scripts/tests/build.test.mjs`
   holds both built manifests to the 0.19.1 lists less `downloads`, which went in 0.22.0 with the
   Downloads fallback (`storage`, `tabs`, `notifications`; optional `nativeMessaging`; the YouTube
@@ -188,7 +200,8 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   `SHISUKO_CONTAINER` only, since toolbox and distrobox share the home folder's Firefox; and
   `engine`, whose `"rocm"` only a passed `server.py --probe-gpu` writes), `server-<port>.lock`,
   `server.log`, the AMD engine's `rocm/` (with its marker `shisuko-rocm.json`), `rocm-starts` and
-  `next-model`, the portal's `portal-state.json` (positions, the card setup, paired devices'
+  `next-model`, `anki-deck.json` (the word colours' automatic deck, `DeckIndexes.save_seen()`),
+  the portal's `portal-state.json` (positions, the card setup, paired devices'
   token hashes), `portal.json` (an optional card override) and `portal-thumbs/`, and, on Windows,
   `native-messaging/shisuko.json` (Firefox's host manifest) and
   `native-messaging/shisuko-chrome.json` (Chrome's). Detail: `docs/dev/cue-building.md`, "Runtime
@@ -227,8 +240,9 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   Host check; POSTs are JSON only and refuse a foreign `Origin`. The portal never fetches a URL a
   client names: video streams are resolved by yt-dlp on the computer and reach the page only as
   opaque, expiring `/api/hls/<token>/` paths. It talks to the server only through `/sync`, `/clip`
-  and `/health`, using `/sync`'s opt-in `words` and its `retrying` / `retry_in` fields, and
-  works without them. It has no built-in card setup: a deck, note type and fields come from the
+  and `/health`, using `/sync`'s opt-in `words` and `deck` and its `retrying` / `retry_in` fields,
+  and works without them. The page's word colours run the extension's own `addon/words.js`, which
+  `portal.py` serves from the checkout (`WORDS_JS`), never a copy. It has no built-in card setup: a deck, note type and fields come from the
   page (or `portal.json`) or nothing is mined. Detail: `docs/dev/portal.md`.
 - No absolute personal paths, no secrets and no `.env` in tracked files. `.env.example` documents it.
 - Line endings: LF everywhere, CRLF only for `*.cmd` (`.gitattributes` enforces this).
@@ -291,13 +305,15 @@ its empty fields; `Miner.mine_now()` takes `/sync`'s `mine`; `FrameGrabber` take
 YouTube's stream. A mined card gets exactly the cue: `Miner.clip()` cuts that cue's start to end,
 `grow_sentence()` grows Yomitan's fragment to that cue and no further, and cues are never
 rejoined by `seg`. In `content.js`, `ankiForSync()` builds `/sync`'s `anki`,
-`mineCue()` / `pendingMine()` send a mine until `takeMined()` reads its answer, and `minedNote`
-tells the background a note's deck.
+`mineCue()` / `pendingMine()` send a mine until `takeMined()` reads its answer.
 
-**Word colours** (`docs/dev/word-colours.md`). `addon/words.js` (`SHISUKO_WORDS`, pure) parses
-fields and marks words (`buildIndex()`, `markWords()`); `cardStatus()` / `fetchDeckIndex()` in
-`background.js` build the deck's entries; `pollWordIndex()`, `renderText()` and
-`refreshWordMarks()` in `content.js` draw them. A particle never takes the colour of the word
+**Word colours** (`docs/dev/word-colours.md`). `DeckIndexes` / `DeckIndex` in `server.py` read
+the deck (`DECK_TTL` 30 s, `notes_added()` on a new note, `note_mined()` for the automatic deck)
+into rows, which `/sync`'s `deck` carries; `syncRequest()` / `takeDeck()` / `deckEntries()` in
+`background.js` keep them for every tab and `cardStatus()` hands them out as entries;
+`addon/words.js` (`SHISUKO_WORDS`, pure) builds the index and marks words (`buildIndex()`,
+`markWords()`); `pollWordIndex()`, `renderText()` and `refreshWordMarks()` in `content.js` draw
+them, and the portal's `takeDeck()` / `fillCue()` do the same in the lyrics view. A particle never takes the colour of the word
 before it: 領域まで reads `[領域]まで`. That is the owner's ruling; never re-add the rule that
 coloured particles with the word before them.
 
@@ -457,8 +473,9 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
   Windows (AMD's runtime has no gfx1030 kernels). Linux reads `LD_LIBRARY_PATH` only at process
   start (one re-exec, `SHISUKO_ROCM_REEXEC=1`). `ROCM_PATH`, `HSA_OVERRIDE_GFX_VERSION` and
   `HIP_VISIBLE_DEVICES` go where every start sees them, not in a terminal. It runs on HIP device 0.
-- AnkiConnect: send requests without a `Content-Type` header, call `requestPermission` first, find
-  the newest card with `findNotes("added:1")`.
+- AnkiConnect: send requests without a `Content-Type` header and without an `Origin` (the server's
+  `anki_connect()`: then AnkiConnect asks no `requestPermission`), find the newest card with
+  `findNotes("added:1")`.
 - `data_collection_permissions` in the manifest requires `strict_min_version` 140 or later.
 - `notifications` is required, not optional: the start-up check has no popup to ask for a grant.
   GitHub allows sixty unauthenticated API requests an hour per address, hence one check a day.

@@ -1890,7 +1890,7 @@ test("Reset style takes a pending deck edit with it, and the ask it carried foll
 // The options page and the toolbar popup are two copies of this form. A deck chosen in one has no
 // option in the other until Anki lists it there, and a select given a value it has no option for
 // shows none: the option is built from Anki's last answer here. The hint then follows the deck,
-// the features and the AnkiConnect URL by the rules of an edit made here (onChange), less the
+// and the features by the rules of an edit made here (onChange), less the
 // save, which is the other copy's; the popup's own save, echoed, asks nothing more.
 test("the word colours edited in the other copy of the form land in the select and the hint", async () => {
   const state = { health: offline, settings: {}, anki: decksOk("Mining::JP") };

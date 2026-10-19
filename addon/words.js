@@ -489,7 +489,7 @@ const SHISUKO_WORDS = (() => {
   }
 
   // The field the word is read from: the one the settings name, else the first, the same rule
-  // as the background's noteSummary().
+  // as the server's wc_note_word().
   function wordFieldOf(list, settings) {
     const wordName = str((settings || {}).ankiWordField).trim();
     if (!wordName) return list.find((field) => field.order === 0);

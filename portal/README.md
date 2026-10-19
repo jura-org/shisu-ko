@@ -29,6 +29,9 @@ A `portal.json` that fixes the card setup, for example:
 }
 ```
 
+Settings > Word colours underlines each word by its Anki card (the card setup's deck), with the
+extension's own matcher; the Shisu-ko server reads the deck.
+
 The Shisu-ko server, not the portal, syncs Anki with AnkiWeb after mining; Settings > Anki shows
 how its last sync went. An `"auto_sync"` key left from 0.20.0 or 0.21.0 is ignored, with a warning
 at start.
