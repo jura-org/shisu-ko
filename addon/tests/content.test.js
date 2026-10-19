@@ -3485,6 +3485,14 @@ test("with no Anki to mine into, the line goes to Downloads with the frame taken
   }
   await settled();
   assert.equal(sent.filter((m) => m.type === "saveMine").length, 0);
+  // The switch turned off while the answer was on its way: the answer ends the mine, nothing is saved.
+  api.mineCurrent();
+  api.state.settings.enabled = false;
+  api.takeMined({ mined: [{ seq: 2, nonce: api.state.mining.nonce, ok: false, status: "unreachable", message: "why", note: null }], mined_next: 3 });
+  assert.equal(api.state.mining, null);
+  await settled();
+  assert.equal(sent.filter((m) => m.type === "saveMine").length, 0);
+  api.state.settings.enabled = true;
   // A video that cannot be drawn (DRM, or no frame yet) still saves the audio: the frame is null.
   api.state.video = { currentTime: 5, paused: true, videoWidth: 0, videoHeight: 0 };
   api.mineCurrent();

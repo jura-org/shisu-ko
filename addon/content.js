@@ -2448,7 +2448,8 @@
       if (!event || typeof event !== "object") continue;
       const own = !!state.mining && event.nonce === state.mining.nonce;
       if (own && !event.ok && NO_ANKI.has(event.status)) {
-        saveMine(state.mining);
+        // An answer that lands after the switch went off saves nothing: off is off.
+        if (state.settings.enabled) saveMine(state.mining);
         state.mining = null;
         continue;
       }
