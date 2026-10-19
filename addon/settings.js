@@ -47,9 +47,6 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   // Attach screenshot + audio automatically when a new Anki note appears while a video is open.
   autoMine: true,
   mineFallbackDownload: true,
-  // Ask Anki to sync with AnkiWeb a minute after a card is mined (AnkiConnect's sync), again
-  // every 30 s while mining goes on. Needs Anki signed in to AnkiWeb.
-  ankiAutoSync: true,
   ankiUrl: "http://127.0.0.1:8765",
   ankiImageField: "Picture",
   ankiAudioField: "SentenceAudio",

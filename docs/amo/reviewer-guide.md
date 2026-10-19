@@ -143,8 +143,7 @@ PERMISSIONS
   deck means) and the result of the update check (below); browser.storage.session holds a few
   records for the browser session (the launch and update records below, and the words and
   pitch accents read from the deck for the word colours, "deckNotes", so a restarted
-  background page need not read the deck again, and the Anki sync's schedule, "ankiSync": when
-  the next sync is due, how many mined cards wait for it, and how the last one went).
+  background page need not read the deck again).
 - downloads: the Downloads fallback for mined screenshot/audio files (browser.downloads.download
   with a blob: URL created in the background script; the URL is revoked when the download ends).
 - tabs: the popup calls browser.tabs.query({url: <youtube origins>}) to reload the open YouTube
@@ -170,10 +169,6 @@ PERMISSIONS
   does nothing. It is a required permission because the first notification comes from the
   check at browser start, where no popup is open to ask for a grant. A failed check never
   notifies.
-- alarms: one alarm, "shisuko-anki-sync", set for when the Anki sync after mining is due (a
-  minute after a card is filled, 30 s after the previous sync while mining goes on, later after a
-  failure) and cleared when nothing is planned. A timer alone would die with the stopped event
-  page; the alarm wakes it to send the one AnkiConnect "sync" request. No install prompt.
 - The update check itself needs no permission: background.js fetches
   https://api.github.com/repos/Multysquid/shisu-ko/releases/latest (GET, header Accept:
   application/vnd.github+json, no cookies, no token, no account, nothing about the user or
@@ -222,9 +217,7 @@ CODE THAT MAY NEED A WORD
   update.py and starts it again, or 409 {ok: false, error} when it cannot); anki():
   AnkiConnect JSON requests. For mining: requestPermission, findNotes ("added:1"),
   storeMediaFile, updateNoteFields, notesInfo for the one note being filled, and after it
-  findCards / getDecks for that note, to remember its deck; a minute later, unless "Sync Anki
-  after mining" is off, sync, which makes Anki run its own sync with the user's AnkiWeb account
-  (the extension sends nothing to AnkiWeb itself). For the word colours (only while
+  findCards / getDecks for that note, to remember its deck. For the word colours (only while
   one of the two options is on; the "word colours" section of background.js): deckNames for
   the popup's deck list, findNotes on the one deck with is:suspended / -is:suspended / is:new /
   is:learn / is:review clauses (five searches, and a sixth, edited:<days>, on a refresh, with

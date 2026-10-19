@@ -223,24 +223,6 @@ function setHint(el, text, kind) {
   if (el.className !== cls) el.className = cls;
 }
 
-// ------------------------------------------------------------------ Anki sync
-
-// The background's last word on the Anki sync, as one quiet line under the switch: when it last
-// went through, or why it did not. Nothing before the first sync, nothing with the switch off.
-function ankiSyncLine(status) {
-  if (!status || !status.on) return "";
-  if (status.running) return "Anki sync: syncing…";
-  const last = status.last;
-  if (!last) return "";
-  if (!last.ok) return `Anki sync failed: ${last.error}`;
-  return `Anki sync: last ${new Date(last.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
-}
-
-async function refreshAnkiSync() {
-  const status = await browser.runtime.sendMessage({ type: "ankiSyncStatus" }).catch(() => null);
-  setText(document.getElementById("anki-sync-status"), ankiSyncLine(status));
-}
-
 // ------------------------------------------------------------------ font family
 
 function fontFamilyName(value) {
@@ -1061,11 +1043,8 @@ async function init() {
   // The toolbar popup is in view for its whole life; the same page as the options page lives on
   // in a tab, and a status line nobody sees is not worth a request every two seconds, nor a deck
   // hint nobody sees a knock at Anki every thirty.
-  refreshAnkiSync();
   setInterval(() => {
-    if (document.hidden) return;
-    checkServer(false);
-    refreshAnkiSync();
+    if (!document.hidden) checkServer(false);
   }, HEALTH_REFRESH_MS);
   setInterval(() => {
     if (!document.hidden) retryDecks();

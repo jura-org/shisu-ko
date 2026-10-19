@@ -60,7 +60,7 @@ function loadBackground(overrides = {}) {
   // second loadBackground to play a restarted page, or null for a browser without the area.
   const session = overrides.session === null ? undefined : overrides.session || makeMemoryStorage();
   const listeners = { onMessage: [], onCommand: [], onChanged: [], onTabRemoved: [], onStartup: [], onInstalled: [], onNotificationClicked: [],
-    onTabActivated: [], onWindowFocusChanged: [], onAlarm: [] };
+    onTabActivated: [], onWindowFocusChanged: [] };
   // What the update nudges did: the badge calls and the notifications, in order. A test passes
   // null for `action` or `notifications` to play a browser (or a service worker) without the API.
   const badge = [];
@@ -81,26 +81,9 @@ function loadBackground(overrides = {}) {
     onClicked: { addListener: (fn) => listeners.onNotificationClicked.push(fn) },
   };
 
-  // The alarms the background set ({name -> info}) and cleared, for a test to fire by hand.
-  const alarms = new Map();
-  const alarmsApi = overrides.alarms === null ? undefined : {
-    create: async (name, info) => {
-      alarms.set(name, { ...info });
-    },
-    clear: async (name) => alarms.delete(name),
-    onAlarm: { addListener: (fn) => listeners.onAlarm.push(fn) },
-  };
-  // A timer as long as the Anki sync's (a minute) outlives every test that sets one, and would
-  // hold the test process open after its last test: such a timer does not keep Node alive here.
-  const realSetTimeout = (fn, ms, ...args) => {
-    const timer = setTimeout(fn, ms, ...args);
-    if (ms >= 30000 && timer && typeof timer.unref === "function") timer.unref();
-    return timer;
-  };
-
   const sandbox = {
     console,
-    setTimeout: overrides.setTimeout || realSetTimeout,
+    setTimeout: overrides.setTimeout || setTimeout,
     clearTimeout,
     AbortController,
     Uint8Array,
@@ -150,7 +133,6 @@ function loadBackground(overrides = {}) {
       },
       action,
       notifications: notificationsApi,
-      alarms: alarmsApi,
     },
   };
   sandbox.globalThis = sandbox;
@@ -182,10 +164,7 @@ function loadBackground(overrides = {}) {
       " globalThis.DECK_NOTES_KEY = DECK_NOTES_KEY; globalThis.DECK_NOTES_FORMAT = DECK_NOTES_FORMAT;" +
       " globalThis.ankiWatch = ankiWatch; globalThis.premined = premined;" +
       " globalThis.HOLD_TIMEOUT_MS = HOLD_TIMEOUT_MS; globalThis.FOCUS_STALE_MS = FOCUS_STALE_MS;" +
-      " globalThis.syncers = syncers; globalThis.activeTabs = activeTabs;" +
-      " globalThis.ANKI_SYNC_FIRST_MS = ANKI_SYNC_FIRST_MS; globalThis.ANKI_SYNC_REPEAT_MS = ANKI_SYNC_REPEAT_MS;" +
-      " globalThis.ANKI_SYNC_BACKOFF_MS = ANKI_SYNC_BACKOFF_MS; globalThis.ANKI_SYNC_KEY = ANKI_SYNC_KEY;" +
-      " globalThis.ANKI_SYNC_ALARM = ANKI_SYNC_ALARM; globalThis.ankiSyncTiming = ankiSyncTiming;",
+      " globalThis.syncers = syncers; globalThis.activeTabs = activeTabs;",
     { filename: SOURCE_PATH }
   ).runInContext(sandbox);
 
@@ -229,14 +208,8 @@ function loadBackground(overrides = {}) {
     return Promise.all(listeners.onWindowFocusChanged.slice().map((fn) => fn(windowId)));
   }
 
-  // An alarm going off: what wakes the event page when the Anki sync is due.
-  function fireAlarm(name) {
-    alarms.delete(name);
-    return Promise.all(listeners.onAlarm.slice().map((fn) => fn({ name })));
-  }
-
   return { sandbox, storage, session, listeners, dispatch, closeTab, badge, notifications, startup, clickNotification, setNow,
-    activateTab, focusWindow, alarms, fireAlarm };
+    activateTab, focusWindow };
 }
 
 module.exports = { loadBackground, makeMemoryStorage };

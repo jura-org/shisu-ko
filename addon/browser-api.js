@@ -97,12 +97,6 @@
     browser.downloads.download = promiseMethod(chromeApi.downloads, "download");
     browser.downloads.onChanged = chromeApi.downloads.onChanged;
   }
-  // The Anki sync's wake-up call (background.js): an alarm outlives a stopped service worker.
-  if (chromeApi.alarms) {
-    browser.alarms = Object.create(chromeApi.alarms);
-    for (const name of ["create", "clear"]) browser.alarms[name] = promiseMethod(chromeApi.alarms, name);
-    browser.alarms.onAlarm = chromeApi.alarms.onAlarm;
-  }
   if (chromeApi.commands) {
     browser.commands = Object.create(chromeApi.commands);
     browser.commands.onCommand = chromeApi.commands.onCommand;
