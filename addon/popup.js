@@ -16,8 +16,8 @@ const MODEL_NAME_HINT = "Use a model such as kitsune-0.6b or large-v3, or a Hugg
 // A model load takes seconds to minutes; while the popup is open its status line follows along.
 const HEALTH_REFRESH_MS = 2000;
 // The deck hint is a snapshot of Anki at the last ask, and the options page (the same popup.html)
-// lives for hours: a verdict that Anki is away, or has not allowed the extension yet, is asked
-// again this often while a word-colour feature is on (see retryDecks).
+// lives for hours: a verdict that Anki or the server is away is asked again this often while a
+// word-colour feature is on (see retryDecks).
 const DECKS_RETRY_MS = 30000;
 const OFFLINE_HINT = "start server/run.cmd or docker/up.cmd";
 
