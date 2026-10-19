@@ -299,13 +299,16 @@ test("closing the dictionary sheet never does anything else", () => {
   assert.equal(L.dismissAction({ ...closed, wordCue: 8, sinceCloseMs: 600 }), "pass"); // later: an ordinary tap
 });
 
-test("ankiSyncText says when the last sync went through, or why not, and nothing otherwise", () => {
+test("ankiSyncText shows the server's Anki sync: off, syncing, the error, the last sync, or waiting", () => {
   const clock = () => "12:04";
-  assert.equal(L.ankiSyncText(null, clock), "");
-  assert.equal(L.ankiSyncText({ auto_sync: false, last: { at: 1, ok: true } }, clock), "");
-  assert.equal(L.ankiSyncText({ auto_sync: true, last: null }, clock), "");
-  assert.equal(L.ankiSyncText({ auto_sync: true, running: true, last: null }, clock), "Anki sync: syncing…");
-  assert.equal(L.ankiSyncText({ auto_sync: true, last: { at: 1, ok: true } }, clock), "Anki sync: last 12:04");
-  assert.equal(L.ankiSyncText({ auto_sync: true, last: { at: 1, ok: false, error: "not signed in to AnkiWeb" } }, clock),
+  assert.equal(L.ankiSyncText(null, clock), "", "a server from before the sync moved there says nothing");
+  assert.equal(L.ankiSyncText({}, clock), "");
+  assert.equal(L.ankiSyncText({ state: "off", last: null, error: null }, clock), "Anki sync: off on the server");
+  assert.equal(L.ankiSyncText({ state: "syncing", last: 1, error: null }, clock), "Anki sync: syncing…");
+  assert.equal(L.ankiSyncText({ state: "watching", last: 1, error: null }, clock), "Anki sync: last 12:04");
+  assert.equal(L.ankiSyncText({ state: "watching", last: null, error: null }, clock), "Anki sync: on, after the next new card");
+  assert.equal(L.ankiSyncText({ state: "halted", last: 1, error: "not signed in to AnkiWeb" }, clock),
     "Anki sync failed: not signed in to AnkiWeb");
+  assert.equal(L.ankiSyncText({ state: "unreachable", last: null, error: "AnkiConnect is not answering" }, clock),
+    "Anki sync failed: AnkiConnect is not answering");
 });

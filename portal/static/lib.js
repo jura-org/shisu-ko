@@ -146,11 +146,11 @@
     ankiLoadFailed: "Anki is not answering. Start Anki with AnkiConnect, then open this again.",
     ankiNoDecks: "Anki has no decks yet.",
     ankiOverride: (keys, file) => `${file} sets ${keys}; those choices are fixed here.`,
-    ankiSync: "Sync Anki after mining",
+    ankiSyncOff: "Anki sync: off on the server",
+    ankiSyncWaiting: "Anki sync: on, after the next new card",
     ankiSyncRunning: "Anki sync: syncing…",
     ankiSyncLast: (when) => `Anki sync: last ${when}`,
     ankiSyncFailed: (why) => `Anki sync failed: ${why}`,
-    ankiSyncFixed: (file) => `${file} sets this switch.`,
     fieldEmpty: "Empty",
     fieldCustom: "Custom template…",
     groupPortal: "From the video",
@@ -553,15 +553,16 @@
     return parts;
   }
 
-  // The line under Settings > Anki's sync switch: when the last sync went through, or why it
-  // did not; "" before the first one and with the switch off. `clock(ms)` writes the time.
-  function ankiSyncText(info, clock = (at) => new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })) {
+  // Settings > Anki's line: the server's Anki sync (its /health anki_sync, {state, last, error}).
+  // "" for a server without one. `clock(ms)` writes the time.
+  function ankiSyncText(sync, clock = (at) => new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })) {
     const S = STRINGS;
-    if (!info || !info.auto_sync) return "";
-    if (info.running) return S.ankiSyncRunning;
-    const last = info.last;
-    if (!last) return "";
-    return last.ok ? S.ankiSyncLast(clock(last.at)) : S.ankiSyncFailed(last.error);
+    if (!sync || typeof sync.state !== "string") return "";
+    if (sync.state === "off") return S.ankiSyncOff;
+    if (sync.state === "syncing") return S.ankiSyncRunning;
+    if (sync.error) return S.ankiSyncFailed(sync.error);
+    if (typeof sync.last === "number") return S.ankiSyncLast(clock(sync.last));
+    return S.ankiSyncWaiting;
   }
 
   function hasKanji(text) {

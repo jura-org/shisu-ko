@@ -121,3 +121,17 @@ test("notifications is a required permission, and the manifest names no update_u
     assert.ok(html.includes(`id="${id}"`), `popup.html has no element with id="${id}"`);
   }
 });
+
+// The Anki sync after mining is the server's job (AnkiWatcher in server/server.py): the extension
+// never asks AnkiConnect for `sync`, needs no alarm, and has no setting for it. 0.20.0 and 0.21.0
+// stored `ankiAutoSync`; nothing reads it now, so a stored value is inert. The permissions
+// themselves are pinned in scripts/tests/build.test.mjs.
+test("the extension never calls AnkiConnect's sync, holds no alarms and no ankiAutoSync", () => {
+  const files = fs.readdirSync(ADDON).filter((name) => /\.(js|html|json)$/.test(name));
+  for (const name of files) {
+    const text = fs.readFileSync(path.join(ADDON, name), "utf8");
+    assert.doesNotMatch(text, /["'`]sync["'`]/, `${name} names the AnkiConnect action "sync"`);
+    assert.doesNotMatch(text, /\balarms\b/, `${name} uses alarms`);
+    assert.doesNotMatch(text, /ankiAutoSync|ankiSync/, `${name} still knows the old Anki sync`);
+  }
+});

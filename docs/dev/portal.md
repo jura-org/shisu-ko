@@ -72,7 +72,7 @@ the client only ever sees opaque tokens (below). Video IDs are checked against
 Which deck and note type a word goes to, and what each field holds, is set up in the page
 (Settings > Anki), stored as `card` in `portal-state.json`. `~/.shisu-ko/portal.json`, when
 present, overrides any of its keys (`deck`, `note_model`, `tags`, `duplicate_scope`, `fields`,
-`first_field`, `sentence_field`, `default_gloss_dictionary`, and `auto_sync`, below); the page then
+`first_field`, `sentence_field`, `default_gloss_dictionary`); the page then
 shows those choices as fixed. `validate_card()` checks both; an unknown key or a bad value in the file stops the portal at
 start with the reason. There are no built-in defaults: until a deck, a note type and its fields are
 set, the home screen says so and the first Mine opens the setup.
@@ -177,33 +177,14 @@ stream shows "LIVE" instead. The list centres its line in the space above it.
 
 ## The Anki sync after mining
 
-A note the portal adds reaches AnkiWeb, and so Anki on the phone, without anyone pressing Sync.
-After a successful `/api/mine` (`addNote`, its media stored first), `mine_once()` calls
-`AnkiSync.card_added()`; a job the page repeats is answered from `jobs` and adds nothing. The
-scheduler's thread (`run_forever()`, started by `main()`) asks AnkiConnect for `sync` when it is
-due, which runs Anki's own sync with AnkiWeb, media included. The rule is the extension's
-(`docs/dev/mining.md`, "The Anki sync after mining"):
-
-- the first note after a quiet spell syncs `SYNC_FIRST_DELAY` (60 s) later, and notes mined in
-  that minute ride along;
-- a note mined after a sync began goes with the next one, `SYNC_REPEAT` (30 s) after that start,
-  or at once when that has passed, so steady mining syncs every 30 s;
-- once a sync's 30 s pass with no new note, the round is over;
-- one sync at a time (`tick()` holds `running` under the lock); a note mined during one goes with
-  the next.
-
-A failed sync (`sync_failure()`) keeps its notes owed and is tried again after `SYNC_BACKOFF` (1, 2,
-then 5 minutes); "sync: auth not configured" (Anki not signed in to AnkiWeb) and "Sync status ...
-not one of" (a full sync to confirm in Anki) wait for the next note. Every sync and failure is one
-line in the log ("anki sync: 1 new note(s), syncing", "anki sync: done in 0.4 s", "anki sync
-failed: Anki is not running; trying again in 60 s"); the page shows one line under the switch.
-
-The switch is Settings > Anki > **Sync Anki after mining**, on by default and stored as `auto_sync`
-in `portal-state.json` (`GET` / `POST /api/anki/sync`, `sync_info()`, `save_sync()`); off clears
-what is planned. `portal.json`'s `auto_sync` (true or false) fixes it: `read_config_file()` takes
-it apart from the card keys, the page shows the switch disabled, and a `POST` is refused with 409.
-The extension runs its own scheduler: when both mine at once each may sync, and Anki runs
-AnkiConnect's requests one after the other.
+The portal runs none: the server syncs Anki a minute after a note appears, the portal's included
+(`server-runtime.md`, "How the Anki sync after mining works"). Settings > Anki shows the server's
+`anki_sync` from its `/health`, read-only: `health()` passes it on under `services.shisuko`, and
+`ankiSyncText()` in `lib.js` writes the line ("Anki sync: last 12:04", "Anki sync failed: not
+signed in to AnkiWeb", "Anki sync: off on the server", nothing for a server from before 0.21.1).
+0.20.0 and 0.21.0 had a scheduler here, a switch and an `auto_sync` key in `portal.json`. A
+leftover `auto_sync` is accepted, warned about once at start and ignored (`RETIRED_KEYS`), where
+any other unknown key stops the portal; one left in `portal-state.json` is never read.
 
 ## Positions and the home screen
 

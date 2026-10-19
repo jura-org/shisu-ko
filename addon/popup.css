@@ -265,11 +265,6 @@ h2 {
   display: none;
 }
 
-/* The Anki sync's last outcome: a line under its switch, and no room taken before the first sync. */
-#anki-sync-status:empty {
-  display: none;
-}
-
 /* Amber for "this will fall back", red for "the server refused it": both readable, neither loud. */
 .hint.warn {
   color: var(--warn);

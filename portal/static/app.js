@@ -1692,7 +1692,6 @@
     bindSwitch("set-sweep", "sweep");
     $("settings-backdrop").addEventListener("click", closeSettings);
     $("set-anki").addEventListener("click", openAnkiSetup);
-    $("set-anki-sync").addEventListener("change", saveAnkiSync);
     bindAnkiSetup();
     makeDraggable($("settings"), $("settings").querySelector(".sheet-scroll"), closeSettings);
     applySettings();
@@ -2029,27 +2028,20 @@
     $("set-anki-text").textContent = card ? `${card.deck} · ${card.note_model}` : S.setupAnki;
   }
 
-  // ---- Settings > Anki: the sync after mining, kept on the computer like the card setup
-
-  function paintAnkiSync(info) {
-    const box = $("set-anki-sync");
-    box.checked = !!(info && info.auto_sync);
-    box.disabled = !info || info.locked;
-    const line = info && info.locked ? S.ankiSyncFixed(info.override_file) : "";
-    const text = [line, L.ankiSyncText(info)].filter(Boolean).join(" ");
-    $("set-anki-sync-status").textContent = text;
-    $("set-anki-sync-status").hidden = !text;
-  }
+  // ---- Settings > Anki: the server's Anki sync after mining, read-only (its --anki-sync sets it)
 
   async function renderAnkiSync() {
-    const res = await getJSON("/api/anki/sync").catch(() => null);
-    paintAnkiSync(res && res.status === 200 ? res.data : null);
-  }
-
-  async function saveAnkiSync(ev) {
-    const res = await api("/api/anki/sync", { auto_sync: ev.target.checked }).catch(() => null);
-    if (res && res.status === 200) paintAnkiSync(res.data);
-    else renderAnkiSync();
+    let sync = null;
+    try {
+      const res = await getJSON("/api/health");
+      const server = res.status === 200 && res.data.services ? res.data.services.shisuko : null;
+      sync = server && server.ok ? server.anki_sync : null;
+    } catch {
+      sync = null;
+    }
+    const text = L.ankiSyncText(sync);
+    $("set-anki-sync-status").textContent = text;
+    $("set-anki-sync-status").hidden = !text;
   }
 
   // ---- Settings > Paired devices (lan mode, or a device paired in tailscale mode)

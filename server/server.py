@@ -17,7 +17,7 @@ player, so cues line up whatever latency the viewer is watching at.
 
 Endpoints
   GET  /health   -> {ok, version, model, default_model, model_loading, model_error, models, device, compute_type,
-                     engine, language, launcher}
+                     engine, language, launcher, anki_sync: {state, last, error}}
   POST /sync     -> {ok, session, status, error, duration, title, live, covered, speech, cues, next, busy,
                      model, model_loading, model_error, heard, language_paused}
   GET  /clip?video_id=..&start=..&end=..&format=mp3|wav -> audio clip of a sentence (mining)
@@ -26,6 +26,10 @@ Endpoints
                      run update.py and start it again; 409 {ok, error} when nothing would (Docker, Nix,
                      a hand start, --no-update, SHISUKO_NO_UPDATE). Extension and local non-browser
                      clients only: a loopback page may not restart the server (update_origin_allowed())
+
+With --anki-sync auto (the default outside the Docker image) a thread watches Anki's newest notes
+through AnkiConnect and asks Anki to sync with AnkiWeb after new ones (AnkiWatcher); /health
+reports how that goes. No client calls AnkiConnect's `sync`.
 
 Everything lives under ~/.shisu-ko (override with the SHISUKO_HOME environment variable):
 the Python environment, downloaded models, cached audio and cue files, and config.json with
@@ -83,7 +87,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.21.0"
+VERSION = "0.21.1"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -4081,6 +4085,278 @@ class Transcriber(threading.Thread):
         self.app.save_cache(s)
 
 
+# --------------------------------------------------------------------------- Anki sync after mining
+#
+# A card mined anywhere (Yomitan with the extension, the portal, Anki itself) reaches AnkiWeb, and
+# so the phone, without anyone pressing Sync. The server watches Anki's newest notes through
+# AnkiConnect and asks it for `sync`, which runs Anki's own sync, media included. No client tells
+# it anything, and no client calls `sync`.
+#
+# The schedule: the first new note after a quiet spell syncs ANKI_SYNC_FIRST later, and notes made
+# in that minute ride along. A note made after a sync began goes with the next one,
+# ANKI_SYNC_REPEAT after that start (at once when that has passed), so steady mining syncs every
+# 30 s; once a sync's 30 s pass with no new note, the round is over. One sync at a time: the
+# watcher's one thread runs it.
+
+ANKI_DEFAULT_URL = "http://127.0.0.1:8765"
+ANKI_POLL = 15.0  # seconds between two looks at Anki's newest notes
+ANKI_POLL_MAX = 60.0  # Anki closed: the looks back off to this
+# Today and yesterday. Anki's day boundary empties `added:1`, so a note made seconds before it
+# would leave the query before the next look found it; across two days it is still there. A
+# note that leaves the query was seen long ago: only ids that appear count.
+ANKI_QUERY = "added:2"
+ANKI_SYNC_FIRST = 60.0
+ANKI_SYNC_REPEAT = 30.0
+# A failed sync is tried again while its notes are unsynced, later each time, never later than
+# the last step. One only the user can mend (no AnkiWeb login, a full sync to confirm) waits for
+# the next new note.
+ANKI_SYNC_BACKOFF = (60.0, 120.0, 300.0)
+ANKI_SYNC_TIMEOUT = 120.0  # a sync uploads; a large collection takes its time
+ANKI_REQUEST_TIMEOUT = 10.0
+
+
+class AnkiUnreachable(Exception):
+    """AnkiConnect did not answer: Anki is closed, or it is busy past the timeout."""
+
+
+def anki_connect(url: str, action: str, params: Optional[dict] = None, timeout: float = ANKI_REQUEST_TIMEOUT):
+    """One AnkiConnect request; its result, or AnkiUnreachable / RuntimeError(its error).
+
+    http.client, not urllib: urllib adds a Content-Type to every POST, and AnkiConnect requests go
+    without one. No Origin either, so AnkiConnect treats the server as a local program and asks no
+    permission (requestPermission is for browser origins).
+    """
+    import http.client
+
+    parts = urlsplit(url)
+    body = json.dumps({"action": action, "version": 6, "params": params or {}}).encode("utf-8")
+    conn = http.client.HTTPConnection(parts.hostname or "127.0.0.1", parts.port or 8765, timeout=timeout)
+    try:
+        conn.request("POST", parts.path or "/", body=body)
+        response = conn.getresponse()
+        raw = response.read()
+    except (OSError, http.client.HTTPException) as exc:  # refused, reset, timed out
+        raise AnkiUnreachable(str(exc) or type(exc).__name__) from exc
+    finally:
+        conn.close()
+    try:
+        answer = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:
+        raise RuntimeError(f"AnkiConnect answered HTTP {response.status} with no JSON") from exc
+    if not isinstance(answer, dict) or set(answer) != {"result", "error"}:
+        raise RuntimeError("AnkiConnect is too old (no API version 6)")
+    if answer["error"]:
+        raise RuntimeError(str(answer["error"]))
+    return answer["result"]
+
+
+def anki_sync_failure(exc: Exception) -> tuple:
+    """(what went wrong, in words for /health; whether retrying can help before a new note)."""
+    message = str(exc)
+    if isinstance(exc, AnkiUnreachable):
+        return ("Anki did not answer in time" if "timed out" in message.lower() else "Anki is not running"), False
+    if re.search(r"auth not configured|not logged in|login", message, re.I):
+        return "not signed in to AnkiWeb", True
+    # AnkiConnect refuses a sync that needs a one-way (full) sync: only the user can choose its direction.
+    if re.search(r"sync status", message, re.I):
+        return "Anki asks for a full sync; press Sync in Anki once", True
+    return message[:160] or "unknown error", False
+
+
+class AnkiWatcher:
+    """Watches Anki for new notes and syncs after them; see the section comment above.
+
+    `call(action, params, timeout)` is AnkiConnect; `clock` monotonic seconds, `wall` the time
+    /health shows. step() does what is due and says how long to sleep; run_forever() is the
+    thread that calls it. Only that thread changes the state; status() is read by /health.
+    """
+
+    def __init__(self, call, url: str = ANKI_DEFAULT_URL, clock=time.monotonic, wall=time.time):
+        self.call, self.url, self.clock, self.wall = call, url, clock, wall
+        self.lock = threading.Lock()
+        self.seen: Optional[set] = None  # note ids already counted; None until the first answer (the baseline)
+        self.next_poll = clock()
+        self.poll_wait = ANKI_POLL  # grows while Anki does not answer
+        self.reachable: Optional[bool] = None  # None: not asked yet
+        self.poll_error: Optional[str] = None  # why the last look failed
+        self.due: Optional[float] = None  # clock time of the next sync; None: none planned
+        self.running = False
+        self.started: Optional[float] = None  # clock time the last sync began
+        self.after_sync = False  # the next look is the first since a sync ended
+        self.cards = 0  # new notes no sync has taken yet
+        self.failures = 0
+        self.halted = False
+        self.last: Optional[int] = None  # wall time (ms) of the last sync that went through
+        self.error: Optional[str] = None  # why the last sync failed; None once one goes through
+
+    # ---- looking at Anki
+
+    def poll(self) -> int:
+        """One look at the newest notes; the number of new ones. Plans the sync they ask for."""
+        now = self.clock()
+        try:
+            ids = self.call("findNotes", {"query": ANKI_QUERY}, ANKI_REQUEST_TIMEOUT)
+            if not isinstance(ids, list):
+                raise RuntimeError("findNotes did not answer a list")
+        except Exception as exc:  # noqa: BLE001 - Anki closed or busy: look again later, quietly
+            self.poll_wait = min(ANKI_POLL_MAX, self.poll_wait * 2)
+            self.next_poll = now + self.poll_wait
+            text = "AnkiConnect is not answering" if isinstance(exc, AnkiUnreachable) else f"AnkiConnect: {str(exc)[:160]}"
+            if self.reachable is not False or text != self.poll_error:
+                log.info("anki sync: %s at %s; looking again quietly", text, self.url)
+            with self.lock:
+                self.reachable, self.poll_error = False, text
+            return 0
+        self.poll_wait = ANKI_POLL
+        self.next_poll = now + ANKI_POLL
+        current = set(ids)
+        with self.lock:
+            back = self.reachable is False
+            self.reachable, self.poll_error = True, None
+        if self.seen is None:
+            # The baseline: notes made before the server started are never synced for.
+            self.seen = current
+            log.info("anki sync: watching %s (%d note(s) from today and yesterday taken as synced)",
+                     self.url, len(current))
+            return 0
+        if back:
+            log.info("anki sync: AnkiConnect answers again")
+        new = len(current - self.seen)
+        # Only the notes still in the query are kept: the set stays two days long, and a note
+        # that left it is old, never new.
+        self.seen = current
+        after_sync, self.after_sync = self.after_sync, False
+        if new:
+            self.note_added(new, now, during_sync=after_sync)
+        return new
+
+    def note_added(self, count: int, now: float, during_sync: bool = False) -> None:
+        with self.lock:
+            self.cards += count
+            self.halted = False
+            if self.due is not None:
+                return
+            repeat = None if self.started is None else self.started + ANKI_SYNC_REPEAT
+            if during_sync and repeat is not None:
+                self.due = max(now, repeat)  # made while a sync ran: the next one, 30 s after that start
+            else:
+                self.due = repeat if repeat is not None and now < repeat else now + ANKI_SYNC_FIRST
+
+    # ---- syncing
+
+    def sync(self) -> bool:
+        """Run the sync if one is due; True when it ran. While Anki does not answer the looks, a due
+        sync waits for the look that finds it back, instead of failing every backoff step."""
+        with self.lock:
+            if self.running or self.due is None or self.clock() < self.due or self.reachable is False:
+                return False
+            self.running, self.started = True, self.clock()
+            carried, self.cards, self.due = self.cards, 0, None
+            retry = self.error is not None
+        if not retry:  # a retry says nothing until it goes through or fails another way
+            log.info("anki sync: %d new note(s), syncing", carried)
+        error = None
+        try:
+            self.call("sync", {}, ANKI_SYNC_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 - a failed sync is reported and retried, never raised
+            error = exc
+        with self.lock:
+            now = self.clock()
+            self.running = False
+            if error is None:
+                self.failures, self.halted, self.error = 0, False, None
+                self.last = int(self.wall() * 1000)
+                log.info("anki sync: done in %.1f s", now - self.started)
+            else:
+                text, halt = anki_sync_failure(error)
+                repeated = text == self.error
+                self.cards += carried
+                self.failures += 1
+                self.halted, self.error = halt, text
+                if isinstance(error, AnkiUnreachable):
+                    self.reachable = False  # Anki closed mid-sync: the looks find it back
+                if halt:
+                    if not repeated:
+                        log.info("anki sync failed: %s; not retried until the next new note", text)
+                else:
+                    wait = ANKI_SYNC_BACKOFF[min(self.failures, len(ANKI_SYNC_BACKOFF)) - 1]
+                    self.due = now + wait
+                    if not repeated:
+                        log.info("anki sync failed: %s; trying again in %d s", text, wait)
+        # Notes made while it ran are found by a look right after it.
+        self.after_sync, self.next_poll = True, self.clock()
+        return True
+
+    # ---- the thread
+
+    def step(self) -> float:
+        """Look at Anki when that is due, sync when that is due; the seconds until the next thing to do."""
+        now = self.clock()
+        due = self.due
+        if now >= self.next_poll or (due is not None and now >= due):
+            self.poll()  # before a sync too: its log line counts the notes made since the last look
+        self.sync()
+        now = self.clock()
+        wake = self.next_poll if self.due is None or self.reachable is False else min(self.next_poll, self.due)
+        return max(0.0, wake - now)
+
+    def run_forever(self) -> None:
+        while True:
+            try:
+                wait = self.step()
+            except Exception:  # noqa: BLE001 - the watcher never takes the server down
+                log.exception("anki sync: unexpected error")
+                wait = ANKI_POLL_MAX
+            time.sleep(wait)
+
+    def status(self) -> dict:
+        """/health's anki_sync: {state, last, error}. last is the wall time (ms) of the last sync that
+        went through; error why the last sync, or the last look at Anki, failed."""
+        with self.lock:
+            if self.running:
+                state = "syncing"
+            elif self.reachable is False:
+                state = "unreachable"
+            elif self.halted:
+                state = "halted"
+            elif self.due is not None:
+                state = "pending"
+            elif self.reachable is None:
+                state = "starting"
+            else:
+                state = "watching"
+            error = self.error or (self.poll_error if self.reachable is False else None)
+            return {"state": state, "last": self.last, "error": error}
+
+
+ANKI_SYNC_OFF = {"state": "off", "last": None, "error": None}
+
+
+def resolve_anki_sync(args, environ=os.environ) -> tuple:
+    """(on, url) for this start. --anki-sync off is off. Inside the Docker image (in_container()) the
+    default is off as well, unless --anki-url names an Anki: 127.0.0.1 there is the container itself,
+    not the host's Anki."""
+    given = getattr(args, "anki_url", None)
+    url = given or ANKI_DEFAULT_URL
+    mode = getattr(args, "anki_sync", None)
+    if mode == "off":
+        return False, url
+    if mode is None and in_container(environ) and not given:
+        return False, url
+    return True, url
+
+
+def start_anki_watcher(args) -> Optional[AnkiWatcher]:
+    on, url = resolve_anki_sync(args)
+    if not on:
+        log.info("anki sync: off%s", " (inside the container; pass --anki-url to turn it on)"
+                 if getattr(args, "anki_sync", None) is None else "")
+        return None
+    watcher = AnkiWatcher(lambda action, params, timeout: anki_connect(url, action, params, timeout), url=url)
+    threading.Thread(target=watcher.run_forever, daemon=True, name="anki-sync").start()
+    return watcher
+
+
 # --------------------------------------------------------------------------- application
 
 class App:
@@ -4112,6 +4388,7 @@ class App:
         self.fetcher.on_human_subtitles = self.apply_human_track
         self.last_evict = time.time()
         self.sweep = self.old_record_sweep() if sweep else iter(())  # the server's own; tools and tests sweep nothing
+        self.anki_watcher: Optional[AnkiWatcher] = None  # main() starts it: tools and tests watch nothing
         self.transcriber = Transcriber(self)
         self.transcriber.start()
 
@@ -4129,8 +4406,10 @@ class App:
                 "compute_type": self.compute_type,
                 "engine": "kitsune" if getattr(self.model, "family", None) else "whisper",
             }
+        watcher = self.anki_watcher
         return {"ok": True, "version": VERSION, **state, "language": self.args.language,
-                "launcher": self.update_blocker() is None}
+                "launcher": self.update_blocker() is None,
+                "anki_sync": watcher.status() if watcher else dict(ANKI_SYNC_OFF)}
 
     def update_blocker(self) -> Optional[str]:
         """Why POST /update would achieve nothing, or None when run.cmd / run.sh would act on the exit.
@@ -6556,6 +6835,18 @@ def port_number(text: str) -> int:
     return value
 
 
+def anki_url(text: str) -> str:
+    """--anki-url's type: AnkiConnect's http:// address."""
+    parts = urlsplit(text)
+    try:
+        port = parts.port
+    except ValueError:
+        port = -1
+    if parts.scheme != "http" or not parts.hostname or port == -1:
+        raise argparse.ArgumentTypeError(f"{text} is not an http:// address (AnkiConnect's is {ANKI_DEFAULT_URL})")
+    return text
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Shisu-ko: local transcription server for the Firefox extension")
     p.add_argument("--host", default="127.0.0.1", help="bind address (keep it local)")
@@ -6583,6 +6874,11 @@ def parse_args(argv=None):
                         "automatic captions), cues take their text and line breaks from that track and their "
                         "timing from what Whisper heard; a line Whisper disagrees with keeps Whisper's text. "
                         "off: Whisper alone, and no subtitle request")
+    p.add_argument("--anki-sync", default=None, choices=["auto", "off"],
+                   help="auto (default): watch Anki through AnkiConnect and sync it with AnkiWeb a minute after new notes "
+                        "appear, then every 30 s while they keep coming; off: never. Off by default inside the Docker image "
+                        "unless --anki-url is given")
+    p.add_argument("--anki-url", type=anki_url, default=None, help=f"AnkiConnect's address for the Anki sync (default {ANKI_DEFAULT_URL})")
     p.add_argument("--sentence-ends", default="auto", choices=["auto", "off"],
                    help="auto: write a sentence mark where Whisper left one out, when a word ending in a "
                         "sentence-final expression (よね, です, か, a plain form) is followed by a pause; "
@@ -6722,6 +7018,7 @@ def main() -> None:
         log.error("Cannot listen on %s:%d (%s). Is another server already running?", args.host, args.port, exc)
         finish(2)
     server.daemon_threads = True
+    app.anki_watcher = start_anki_watcher(args)
     log.info("Listening on http://%s:%d  (Ctrl+C to stop)", args.host, args.port)
     try:
         server.serve_forever()

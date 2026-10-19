@@ -1,6 +1,6 @@
-# Mining: one tab at a time, automatic mining, matching, pre-mining, the Anki sync
+# Mining: one tab at a time, automatic mining, matching, pre-mining
 
-How the add-on elects the tab that talks to the server, how a card gets its sentence, frame and clip, and how it reaches AnkiWeb (`addon/background.js`, `addon/content.js`, `addon/match.js`).
+How the add-on elects the tab that talks to the server, how a card gets its sentence, frame and clip (`addon/background.js`, `addon/content.js`, `addon/match.js`).
 
 ## One tab at a time
 
@@ -240,50 +240,11 @@ does not remove an entry: two words from one line make two cards.
 
 ## The Anki sync after mining
 
-A card the add-on wrote into reaches AnkiWeb without the viewer pressing Sync. Right after a
-successful `updateNoteFields`, `addToAnki()` calls `noteAnkiCard()` (not awaited, like
-`rememberDeck()`), which hands the card to a scheduler in `background.js`; when it is due,
-`runAnkiSync()` asks AnkiConnect for `sync` (version 6, no `Content-Type`, `ankiPermission()`
-first), which runs Anki's own sync with AnkiWeb, media included. A Downloads mine, a mismatch and a
-mine that wrote nothing count for nothing.
-
-The rule, in `ANKI_SYNC_FIRST_MS` (60 s) and `ANKI_SYNC_REPEAT_MS` (30 s):
-
-- The first card after a quiet spell plans a sync a minute later. More cards in that minute ride
-  along and do not push it back.
-- A card made after a sync began goes with the next one, 30 s after that start, or at once when
-  that has passed. Steady mining therefore syncs every 30 s: a card every 10 s for three minutes
-  syncs at 60, 90, 120, 150 and 180 s.
-- Once a sync's 30 s pass with no new card, the round is over, and the next card waits its minute.
-- One sync at a time (`ankiSyncRun`; the record's `running`). A card made during one counts for
-  the next.
-
-Failures (`ankiSyncFailure()`): a failed sync keeps its cards owed and is planned again after
-`ANKI_SYNC_BACKOFF_MS` (1, 2, then 5 minutes, the last step repeating) while they are. Three
-failures only the viewer can mend stop the retries until the next card (`halted`): AnkiConnect's
-"sync: auth not configured" (Anki is not signed in to AnkiWeb), its "Sync status ... not one of"
-(Anki wants a one-way full sync confirmed) and a denied permission. Nothing is toasted or
-notified; a failure is a `console.debug` line, and the popup shows one line under **Sync Anki after
-mining** (`ankiSyncLine()` in `popup.js`, from the `ankiSyncStatus` message): "Anki sync: last
-12:04", "Anki sync failed: not signed in to AnkiWeb", or nothing before the first sync.
-
-The scheduler is pure steps over a plain record (`ankiSyncIdle()`, `ankiSyncCard()`,
-`ankiSyncStart()`, `ankiSyncEnd()`, `ankiSyncOff()`, `ankiSyncResume()`; tested on a fake clock in
-`addon/tests/ankisync.test.js`). `ankiSyncCommit()` is the one writer: the record, its copy in
-`storage.session` (`ANKI_SYNC_KEY`) and the two clocks. Firefox's event page and Chrome's service
-worker are stopped when idle, and a pending `setTimeout` dies with them, so every deadline has a
-timer, for precision, and an alarm (`ANKI_SYNC_ALARM`, the `alarms` permission), which wakes a
-stopped page; Chrome runs an alarm no sooner than 30 s ahead in a packed build, so a follow-up
-due sooner can come late when the worker was stopped meanwhile. Whichever fires first runs the
-sync, and the other finds nothing due. A page that reads a record still marked running was
-stopped mid-sync: `ankiSyncResume()` makes the sync due at once, its cards still owed.
-
-`ankiAutoSync` (default on) and the master switch decide it (`ankiSyncOn()`): off plans nothing,
-and turning either off clears what was planned and owed (the `storage.onChanged` listener), the
-alarm included. A sync already running finishes and plans nothing after it.
-`ankiSyncTiming` holds the delays in force; it is no setting, and the browser smoke test shortens
-it from the service worker's console to see one `sync` reach its fixture AnkiConnect after a mine.
-
-The phone portal runs the same rule on its own (`AnkiSync` in `portal/portal.py`, see
-`portal.md`). When both mine at once each may sync; AnkiConnect runs requests on Anki's main thread,
-one after the other, and a sync with nothing new is cheap.
+The add-on does none. The server watches Anki and asks it to sync after new notes, whoever made
+them (`AnkiWatcher` in `server/server.py`; `server-runtime.md`, "How the Anki sync after mining
+works"). 0.20.0 and 0.21.0 ran a scheduler here, kept alive across a stopped event page by the
+`alarms` permission; that permission held 0.21.0 at the Chrome Web Store's review, and the
+add-on is a thin client of the server. `addon/tests/settings.test.js` holds that no file in
+`addon/` names the action `sync`, `alarms` or the old `ankiAutoSync` setting, which a viewer's
+storage may still hold and nothing reads; the browser smoke test mines with that stale setting
+stored and sees no `sync` reach its fixture AnkiConnect.

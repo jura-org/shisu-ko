@@ -92,6 +92,30 @@ test("the Chrome package is one the Chrome Web Store takes at upload", async () 
   }
 });
 
+// The permissions are pinned. A new permission or host permission sends a release to the Chrome
+// Web Store's manual review, as "alarms" held 0.21.0 there, so the owner's rule is: never add one,
+// and remove one that falls out of use. These are the 0.19.1 lists. A change to them must be a
+// deliberate edit of this allowlist, never a side effect of a feature.
+const ALLOWED_PERMISSIONS = Object.freeze({
+  permissions: ["storage", "downloads", "tabs", "notifications"],
+  optional_permissions: ["nativeMessaging"],
+  host_permissions: ["*://www.youtube.com/*", "*://m.youtube.com/*", "*://youtube.com/*", "http://127.0.0.1/*", "http://localhost/*"],
+  optional_host_permissions: undefined,
+});
+const YOUTUBE = ["*://www.youtube.com/*", "*://m.youtube.com/*", "*://youtube.com/*"];
+
+test("both built manifests ask for exactly the allowlisted permissions", async () => {
+  await import("../build.mjs");
+  for (const browser of ["firefox", "chrome"]) {
+    const manifest = JSON.parse(readFileSync(join(dist, browser, "manifest.json")));
+    for (const [key, allowed] of Object.entries(ALLOWED_PERMISSIONS)) {
+      assert.deepEqual(manifest[key], allowed, `${browser} ${key}: edit ALLOWED_PERMISSIONS only on purpose`);
+    }
+    // A content script's matches grant host access as well.
+    for (const script of manifest.content_scripts) assert.deepEqual(script.matches, YOUTUBE, browser);
+  }
+});
+
 test("built trees contain no development tests", () => {
   for (const browser of ["firefox", "chrome"]) {
     assert.equal(existsSync(join(dist, browser, "tests")), false);

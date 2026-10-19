@@ -20,7 +20,6 @@
  *     Store install, from the store; an unpacked Chrome build, only from the viewer).
  *  8. Word colours: turn one Anki deck's notes into [word, status, pitch] entries for the
  *     content script, which colours the words of every line by them.
- *  9. Anki sync: a minute after a card is mined, ask Anki to sync with AnkiWeb.
  */
 
 const DEFAULT_SETTINGS = SHISUKO_DEFAULT_SETTINGS; // from settings.js
@@ -1403,7 +1402,6 @@ async function addToAnki(settings, cue, image, audio, explicitNoteId, fullSenten
     }
     await anki(url, "updateNoteFields", { note: { id: noteId, fields: update } }, ANKI_REQUEST_TIMEOUT_MS);
     rememberDeck(url, noteId); // not awaited: the mine is done, the deck is for the word colours
-    noteAnkiCard().catch(() => {}); // nor this: the sync comes a minute later
     let message = `Added ${Object.keys(update).join(" + ")} to the ${what} Anki card`;
     if (extended) message += " (sentence extended to what was spoken)";
     if (missing.length) message += ` (no field named ${missing.join(", ")})`;
@@ -1571,202 +1569,6 @@ async function mineCueNow(msg, tabId) {
   if (result.ok && warnings.length) result.message += ` (${warnings.join("; ")})`;
   return result;
 }
-
-// ------------------------------------------------------------------ Anki sync
-
-// A card the add-on wrote into reaches AnkiWeb, and so the phone, without the viewer pressing
-// Sync: AnkiConnect's `sync` runs Anki's own. The first card after a quiet spell waits
-// ANKI_SYNC_FIRST_MS, and cards made in that minute ride along. A card made after a sync began
-// is carried by the next one, ANKI_SYNC_REPEAT_MS after that start (at once when that has
-// passed), so steady mining syncs every 30 s; once a sync's 30 s pass with no new card, the
-// round is over and the next card waits its minute again. One sync at a time; a card made
-// during one counts for the next.
-const ANKI_SYNC_FIRST_MS = 60000;
-const ANKI_SYNC_REPEAT_MS = 30000;
-// A failed sync is tried again while its cards are unsynced, later each time, never later than
-// the last step. A failure only the viewer can mend (no AnkiWeb login, a full sync to confirm,
-// access denied) is not retried until the next card.
-const ANKI_SYNC_BACKOFF_MS = Object.freeze([60000, 120000, 300000]);
-const ANKI_SYNC_TIMEOUT_MS = 120000; // a sync uploads; a large collection takes its time
-const ANKI_SYNC_KEY = "ankiSync"; // storage.session: the scheduler's state, which outlives an event page
-const ANKI_SYNC_ALARM = "shisuko-anki-sync";
-// The delays in force. Not a setting: the browser smoke test shortens them from the worker's
-// own console, which nothing in the extension can reach.
-const ankiSyncTiming = { firstMs: ANKI_SYNC_FIRST_MS, repeatMs: ANKI_SYNC_REPEAT_MS, backoffMs: ANKI_SYNC_BACKOFF_MS };
-
-// The scheduler is these pure steps over a plain record: `due` is when the next sync starts
-// (null: none planned), `cards` the cards no sync has taken yet, `inFlight` those the running one
-// carries, `last` the outcome the popup shows.
-function ankiSyncIdle() {
-  return { due: null, running: false, startedAt: null, cards: 0, inFlight: 0, failures: 0, halted: false, last: null };
-}
-
-function ankiSyncOn(settings) {
-  return !!(settings && settings.enabled && settings.ankiAutoSync);
-}
-
-function ankiSyncCard(state, now, timing) {
-  const next = { ...state, cards: state.cards + 1, halted: false };
-  if (next.running || next.due !== null) return next;
-  const repeat = state.startedAt === null ? null : state.startedAt + timing.repeatMs;
-  next.due = repeat !== null && now < repeat ? repeat : now + timing.firstMs;
-  return next;
-}
-
-function ankiSyncStart(state, now) {
-  return { ...state, running: true, startedAt: now, inFlight: state.cards, cards: 0, due: null };
-}
-
-function ankiSyncEnd(state, now, failure, timing) {
-  const next = { ...state, running: false, inFlight: 0 };
-  if (!failure) {
-    next.failures = 0;
-    next.last = { at: now, ok: true };
-    next.due = next.cards ? Math.max(now, state.startedAt + timing.repeatMs) : null;
-    return next;
-  }
-  next.cards += state.inFlight;
-  next.failures = state.failures + 1;
-  next.halted = !!failure.halt;
-  next.last = { at: now, ok: false, error: failure.text };
-  const steps = timing.backoffMs;
-  next.due = next.halted ? null : now + steps[Math.min(next.failures, steps.length) - 1];
-  return next;
-}
-
-// Off (the master switch or the setting): nothing planned, nothing owed. A sync under way runs
-// out; ankiSyncEnd() after it plans nothing once this has run again.
-function ankiSyncOff(state) {
-  return { ...ankiSyncIdle(), running: state.running, startedAt: state.startedAt, inFlight: state.inFlight, last: state.last };
-}
-
-// A record that says a sync is running, read by an event page that did not start it: the page
-// that did was stopped mid-sync. Its cards are still owed, and the sync is due now.
-function ankiSyncResume(state, now) {
-  if (!state.running) return state;
-  return { ...state, running: false, cards: state.cards + state.inFlight, inFlight: 0, due: now };
-}
-
-function ankiSyncFailure(err) {
-  const message = String((err && err.message) || err || "");
-  if (err && err.name === "AbortError") return { text: "Anki did not answer in time", halt: false };
-  if (err && err.name === "TypeError") return { text: "Anki is not running", halt: false };
-  if (/auth not configured|not logged in|login/i.test(message)) return { text: "not signed in to AnkiWeb", halt: true };
-  // AnkiConnect refuses a sync that needs a one-way (full) sync: only the viewer can choose its direction.
-  if (/sync status/i.test(message)) return { text: "Anki asks for a full sync; press Sync in Anki once", halt: true };
-  return { text: message.slice(0, 160) || "unknown error", halt: false };
-}
-
-let ankiSyncState = null; // the scheduler's record, once read back from storage.session
-let ankiSyncLoading = null;
-let ankiSyncRun = null; // the sync this event page is running
-let ankiSyncTimer = null;
-
-function ankiSyncLoad() {
-  if (ankiSyncState) return Promise.resolve(ankiSyncState);
-  if (!ankiSyncLoading) {
-    ankiSyncLoading = sessionGet(ANKI_SYNC_KEY).then((stored) => {
-      if (!ankiSyncState) ankiSyncState = ankiSyncResume({ ...ankiSyncIdle(), ...(stored || {}) }, Date.now());
-      ankiSyncLoading = null;
-      return ankiSyncState;
-    });
-  }
-  return ankiSyncLoading;
-}
-
-// Every change goes through here: the record, its copy in storage.session, and the clocks. The
-// step reads the record as it is after the await, so two changes in one turn both count.
-async function ankiSyncCommit(step) {
-  await ankiSyncLoad();
-  const state = step(ankiSyncState);
-  ankiSyncState = state;
-  armAnkiSync(state);
-  await sessionSet(ANKI_SYNC_KEY, state);
-  return state;
-}
-
-// Two clocks for one deadline: a timer, which is on time but dies with the event page, and an
-// alarm, which wakes a stopped page (Chrome runs it no sooner than 30 s ahead). Whichever fires
-// first runs the sync; the other finds nothing due.
-function armAnkiSync(state) {
-  if (ankiSyncTimer) clearTimeout(ankiSyncTimer);
-  ankiSyncTimer = null;
-  const alarms = browser.alarms;
-  if (state.running || state.due === null) {
-    if (alarms) alarms.clear(ANKI_SYNC_ALARM).catch(() => {});
-    return;
-  }
-  ankiSyncTimer = setTimeout(() => {
-    ankiSyncTimer = null;
-    runAnkiSync();
-  }, Math.max(0, state.due - Date.now()));
-  if (alarms) alarms.create(ANKI_SYNC_ALARM, { when: state.due }).catch(() => {});
-}
-
-async function ankiSyncOnce(settings) {
-  const url = normalizeBase(settings.ankiUrl, DEFAULT_SETTINGS.ankiUrl);
-  try {
-    if (!(await ankiPermission(url))) return { text: "AnkiConnect denied access", halt: true };
-    await anki(url, "sync", {}, ANKI_SYNC_TIMEOUT_MS);
-    return null;
-  } catch (err) {
-    return ankiSyncFailure(err);
-  }
-}
-
-function runAnkiSync() {
-  if (ankiSyncRun) return ankiSyncRun;
-  ankiSyncRun = (async () => {
-    for (;;) {
-      const state = await ankiSyncLoad();
-      // Not due yet: the clocks the last change set stand. Re-arming here would spin a timer
-      // that fired a moment early; the alarm, set for the deadline itself, is still there.
-      if (state.running || state.due === null || Date.now() < state.due) {
-        if (!browser.alarms) armAnkiSync(state);
-        return;
-      }
-      if (!ankiSyncOn(await getSettings())) {
-        await ankiSyncCommit(ankiSyncOff);
-        return;
-      }
-      await ankiSyncCommit((current) => ankiSyncStart(current, Date.now()));
-      const failure = await ankiSyncOnce(await getSettings());
-      if (failure) console.debug("Shisu-ko: Anki sync failed:", failure.text);
-      const on = ankiSyncOn(await getSettings());
-      await ankiSyncCommit((current) => {
-        const next = ankiSyncEnd(current, Date.now(), failure, ankiSyncTiming);
-        return on ? next : ankiSyncOff(next);
-      });
-    }
-  })()
-    .catch((err) => console.debug("Shisu-ko: Anki sync:", err))
-    .finally(() => {
-      ankiSyncRun = null;
-    });
-  return ankiSyncRun;
-}
-
-// A card the add-on has just written its material into.
-async function noteAnkiCard() {
-  if (!ankiSyncOn(await getSettings())) return;
-  await ankiSyncCommit((state) => ankiSyncCard(state, Date.now(), ankiSyncTiming));
-}
-
-async function ankiSyncStatus() {
-  const state = await ankiSyncLoad();
-  return { on: ankiSyncOn(await getSettings()), running: state.running, due: state.due, halted: state.halted, last: state.last };
-}
-
-if (browser.alarms) {
-  browser.alarms.onAlarm.addListener((alarm) => {
-    if (alarm && alarm.name === ANKI_SYNC_ALARM) runAnkiSync();
-  });
-}
-
-browser.storage.onChanged.addListener((changes, area) => {
-  if (area !== "local" || !changes || !changes.settings) return;
-  if (!ankiSyncOn({ ...DEFAULT_SETTINGS, ...(changes.settings.newValue || {}) })) ankiSyncCommit(ankiSyncOff).catch(() => {});
-});
 
 // ------------------------------------------------------------------ word colours
 
@@ -2211,8 +2013,6 @@ browser.runtime.onMessage.addListener((msg, sender) => {
       return cardStatus(msg);
     case "ankiDecks":
       return ankiDecks();
-    case "ankiSyncStatus":
-      return ankiSyncStatus();
     default:
       return undefined;
   }
