@@ -94,15 +94,14 @@ const typedBaseline = new Map();
 // The debounced save only remembers the last event, so a server-address or model edit leaves a
 // note here that the save flushes: "server" starts the status over, "model" refreshes the hint.
 let serverCheckPending = null;
-// The same for the word colours: a feature just turned on or another AnkiConnect URL ("feature")
-// or another deck chosen ("deck") asks Anki for its decks once the save is through. The save
-// judges "feature" again against the form it writes: a checkbox ticked and unticked inside the
-// debounce is off, and the ask would bring up AnkiConnect's permission dialog for a viewer who
-// uses neither feature.
+// The same for the word colours: a feature just turned on ("feature") or another deck chosen
+// ("deck") asks the server for Anki's decks once the save is through. The save judges "feature"
+// again against the form it writes: a checkbox ticked and unticked inside the debounce is off, and
+// a viewer who uses neither feature has Anki asked nothing on their behalf.
 let decksCheckPending = null;
 let decksAsked = 0; // questions to Anki so far: an answer overtaken by a later question is dropped
-// The newest question's answer: true when Anki listed its decks, false when it could not (away,
-// permission not granted, an error), null while none has answered (nothing asked, or an ask out).
+// The newest question's answer: true when Anki listed its decks, false when it could not (Anki or
+// the server away, an error), null while none has answered (nothing asked, or an ask out).
 let decksOk = null;
 // That answer as the select shows it: the decks Anki listed ([] while it could not) and the deck
 // of the last mined card (undefined before any answer). A deck chosen in the other copy of this
@@ -384,14 +383,14 @@ function wordColoursOn() {
   return document.getElementById("cardStatus").checked || document.getElementById("pitchAccent").checked;
 }
 
-// Ask Anki for its decks and say under the select which one the word colours look at, or what
-// stands in the way. Only asked while one of the two features is on, or when one was just turned
-// on, another deck chosen or another Anki named: the first ask brings up AnkiConnect's permission
-// dialog, which a viewer who never uses the feature must not meet. The answer names the deck the
-// last mined card went to as well, which is what "automatic" means; without an answer the select
+// Ask the server for Anki's decks (the background's ankiDecks, /health?decks=1) and say under the
+// select which one the word colours look at, or what stands in the way. Only asked while one of
+// the two features is on, or when one was just turned on or another deck chosen: a viewer who
+// never uses the feature has Anki asked nothing. The answer names the deck the last mined card
+// went to as well, which is what "automatic" means; without an answer the select
 // keeps the stored deck and the hint says why the colours will not come. The hint is about the
 // colours, so it is painted only while a feature is on: an answer that lands after the viewer
-// unticked both (Anki's dialog clicked later, a slow list) fills the list and says nothing.
+// unticked both (a slow list) fills the list and says nothing.
 async function refreshDecks() {
   const asked = ++decksAsked;
   decksOk = null;
@@ -420,13 +419,11 @@ async function refreshDecks() {
   else setHint(hint, DECK_NONE_HINT, "warn");
 }
 
-// The slow clock behind the deck hint. A failed verdict (Anki closed when the page opened, its
-// permission dialog not clicked yet) would otherwise stay on an options page or a popup left
-// open until a word-colour control is touched, while the tab's colours, asking on a clock of
-// their own, already work: so it is asked again while a feature is on. A good answer is left
-// alone (the viewer's own edits ask for what changes it), and so is an ask still out. The
-// background answers "denied" from memory for a minute before it puts Anki's dialog up again, so
-// this clock cannot make the dialog reappear more often than the tab's own asks already do.
+// The slow clock behind the deck hint. A failed verdict (Anki or the server closed when the page
+// opened) would otherwise stay on an options page or a popup left open until a word-colour
+// control is touched, while the tab's colours already work: so it is asked again while a feature
+// is on. A good answer is left alone (the viewer's own edits ask for what changes it), and so is
+// an ask still out.
 function retryDecks() {
   if (decksOk === false && wordColoursOn()) refreshDecks();
 }
@@ -456,11 +453,9 @@ function onChange(ev) {
   if (ev.target.id === "serverUrl") serverCheckPending = "server";
   else if (ev.target.id === "model" && serverCheckPending !== "server") serverCheckPending = "model";
   // A word-colour feature turned on, or another deck: the ask waits for the save, like the checks.
-  // Another AnkiConnect URL is another Anki, whose decks the list and the hint should describe;
-  // the ask goes out for it only while a feature is on, so it needs no branch of its own.
   const id = ev.target.id;
   if (id === "cardStatusDeck") decksCheckPending = "deck";
-  else if (((id === "cardStatus" || id === "pitchAccent") && ev.target.checked) || id === "ankiUrl") {
+  else if ((id === "cardStatus" || id === "pitchAccent") && ev.target.checked) {
     if (decksCheckPending !== "deck") decksCheckPending = "feature";
   }
   clearTimeout(saveTimer);
@@ -472,7 +467,7 @@ function onChange(ev) {
 // too: this document dies with a click outside the popup, and a text field's change event fires
 // on that very close, with none of the 150 ms left for the timer. The check the edit asked for
 // follows the save, so the background already reads the new address; the deck ask follows it the
-// same way, for the AnkiConnect URL and the deck the background reads.
+// same way, for the deck the hint describes.
 function flushSave() {
   clearTimeout(saveTimer);
   saveTimer = null;
@@ -543,7 +538,7 @@ function onStorageChanged(changes, area) {
   // other feature keeps the hint up (the answer would only repaint what it says).
   const on = wordColoursOn();
   const turnedOn = (key) => landed.has(key) && document.getElementById(key).checked;
-  if (landed.has("cardStatusDeck") || turnedOn("cardStatus") || turnedOn("pitchAccent") || (on && landed.has("ankiUrl"))) refreshDecks();
+  if (landed.has("cardStatusDeck") || turnedOn("cardStatus") || turnedOn("pitchAccent")) refreshDecks();
   else if (!on && (landed.has("cardStatus") || landed.has("pitchAccent"))) setHint(document.getElementById("deck-hint"), "", "");
 }
 

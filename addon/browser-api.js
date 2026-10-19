@@ -56,7 +56,7 @@
   if (chromeApi.storage && chromeApi.storage.local) {
     browser.storage = Object.create(chromeApi.storage);
     browser.storage.local = Object.create(chromeApi.storage.local);
-    for (const name of ["get", "set"]) browser.storage.local[name] = promiseMethod(chromeApi.storage.local, name);
+    for (const name of ["get", "set", "remove"]) browser.storage.local[name] = promiseMethod(chromeApi.storage.local, name);
     // The launch record of the "Start server" button and the update records live here;
     // background.js does without the area when the browser has none.
     if (chromeApi.storage.session) {

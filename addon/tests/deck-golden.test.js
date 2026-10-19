@@ -2,9 +2,10 @@
 
 // The word colours' golden test, the extension's half. The fixture's invented notes go through the
 // deck path the extension ran until 0.22.0 (oldDeckEntries(), its background page's note reading
-// and entry loop, kept here as it was) and must give the fixture's entries, which
-// server/tests/test_deck_golden.py holds the server's DeckIndex to. Same entries, same
-// buildIndex(), same marks. UPDATE_GOLDEN=1 writes the entries anew from the old path.
+// and entry loop, kept here as it was) and must give the fixture's entries. The fixture's rows are
+// what the server's DeckIndex reads from the same notes (server/tests/test_deck_golden.py holds
+// it to them), and the background's deckEntries() must turn them into those entries. Same
+// entries, same buildIndex(), same marks. UPDATE_GOLDEN=1 writes the entries anew from the old path.
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -82,30 +83,19 @@ test("the golden entries exercise every status, pitch and the kana reading", () 
   assert.ok(all.some((e) => e[0] === "さらに"), "a word usually written in kana has its reading");
 });
 
-// A fake AnkiConnect over the fixture, for the background page's own fetchDeckIndex().
-function fixtureAnki() {
-  return async (url, init) => {
-    const { action, params } = JSON.parse(init.body);
-    let result;
-    if (action === "requestPermission") result = { permission: "granted" };
-    else if (action === "findNotes") {
-      const [, deck, clause] = /^"deck:(.*)" (.*)$/.exec(params.query);
-      const wanted = { "is:suspended": ["suspended"], "-is:suspended": ["new", "learning", "review"], "is:new -is:suspended": ["new"], "is:learn -is:suspended": ["learning"], "is:review -is:learn -is:suspended": ["review"] }[clause] || [];
-      result = fixture.notes.filter((n) => (n.deck === deck || n.deck.startsWith(deck + "::")) && wanted.includes(n.status)).map((n) => n.noteId).reverse();
-    } else if (action === "notesInfo") {
-      result = params.notes.map((id) => {
-        const n = fixture.notes.find((x) => x.noteId === id);
-        return { noteId: id, fields: n.fields, mod: n.mod };
-      });
-    } else throw new Error(action);
-    return { json: async () => ({ result, error: null }) };
-  };
-}
-
-test("the fixture's old path is what the background page's fetchDeckIndex() answered", async () => {
+test("the server's rows, turned into entries by the background, are the old path's entries", () => {
+  const { sandbox } = loadBackground();
   for (const c of fixture.cases) {
-    const bg = loadBackground({ fetch: fixtureAnki() });
-    const index = await bg.sandbox.fetchDeckIndex("http://127.0.0.1:8765", fixture.deck, c.settings);
-    assert.deepEqual(JSON.parse(JSON.stringify(index.entries)), c.entries, JSON.stringify(c.settings));
+    assert.deepEqual(JSON.parse(JSON.stringify(sandbox.deckEntries(c.rows))), c.entries, JSON.stringify(c.settings));
   }
+});
+
+test("both paths mark a line alike", () => {
+  const line = "更に猫は食べる。さらに魚を見る";
+  const { sandbox } = loadBackground();
+  for (const c of fixture.cases) {
+    const marks = (entries) => W.markWords(line, W.buildIndex(entries, []));
+    assert.deepEqual(marks(JSON.parse(JSON.stringify(sandbox.deckEntries(c.rows)))), marks(oldDeckEntries(fixture.notes, fixture.deck, c.settings)));
+  }
+  assert.ok(W.markWords(line, W.buildIndex(fixture.cases[0].entries, [])).some((run) => run.status === "learning" && run.text === "さらに"));
 });

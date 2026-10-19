@@ -5,8 +5,7 @@
  *  1. Proxy API calls from content scripts to the local Whisper server.
  *  2. Own the settings object in browser.storage.local.
  *  3. Sentence mining is the server's (Miner in server.py): it attaches the audio and the picture
- *     to the note Yomitan made, and takes the viewer's own mine through /sync. The background
- *     only remembers the deck a mined note went to, for the word colours (minedNote).
+ *     to the note Yomitan made, and takes the viewer's own mine through /sync.
  *  4. Start the server for the popup: an extension cannot spawn a process, so the request goes
  *     to the "shisuko" native host (server/native_host.py), which runs the project's launcher.
  *  5. Updates: ask GitHub for the newest release once a day, tell the viewer (toolbar badge, one
@@ -14,8 +13,9 @@
  *     POST /update makes it exit so that run.cmd / run.sh run update.py and start it again. The
  *     extension never installs itself; its updates come from addons.mozilla.org (a Chrome Web
  *     Store install, from the store; an unpacked Chrome build, only from the viewer).
- *  6. Word colours: turn one Anki deck's notes into [word, status, pitch] entries for the
- *     content script, which colours the words of every line by them.
+ *  6. Word colours: the server reads the Anki deck; the rows it sends with /sync are kept here
+ *     and handed to the content script as [word, status, pitch] entries, which colours the words
+ *     of every line by them. The extension makes no AnkiConnect call.
  */
 
 const DEFAULT_SETTINGS = SHISUKO_DEFAULT_SETTINGS; // from settings.js
@@ -41,12 +41,6 @@ const START_KEY = "startServer";
 const LAUNCHER_HINT = "Run server\\setup.cmd (Windows) or bash server/setup.sh once, or start the server by hand once: run.cmd / run.sh register the launcher";
 const NATIVE_PERMISSION_HINT = "Allow Shisu-ko to talk to its launcher when the browser asks";
 const UPDATE_RUNNING_HINT = "The launcher restarts the server itself once update.py is done";
-
-// How long a permission verdict holds: a viewer who clicked No in Anki's dialog is asked again
-// after a minute.
-const ANKI_PERMISSION_RECHECK_MS = 60000;
-
-const ankiWatch = { permission: null, permissionAskAt: 0, permissionPending: null };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -801,503 +795,126 @@ if (browser.notifications && browser.notifications.onClicked && typeof browser.n
   });
 }
 
-// ------------------------------------------------------------------ AnkiConnect, for the word colours
-
-// Mining is the server's: it attaches the audio and the picture to the note Yomitan made
-// (Miner in server.py). The extension reads Anki for the word colours alone and never writes to it.
-
-async function anki(url, action, params, timeoutMs) {
-  // No Content-Type header on purpose: a "simple" request needs no CORS preflight, which
-  // matters for the very first requestPermission call from a not-yet-allowed origin.
-  // requestPermission blocks until the viewer answers Anki's dialog, so it gets no timeout.
-  const controller = new AbortController();
-  const timer = timeoutMs ? setTimeout(() => controller.abort(), timeoutMs) : null;
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      body: JSON.stringify({ action, version: 6, params: params || {} }),
-      signal: controller.signal,
-    });
-    const data = await res.json();
-    if (data && data.error) throw new Error(data.error);
-    return data ? data.result : null;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-// A field's text by a name from the settings, in whatever case the note type spells it
-// (SHISUKO_WORDS.fieldKey); "" when the note has no such field.
-function noteField(fields, name) {
-  const key = SHISUKO_WORDS.fieldKey(fields, name);
-  return key ? String((fields[key] && fields[key].value) || "").trim() : "";
-}
-
-// The two fields that say what a card is about. The word is whatever the viewer configured, else
-// the note's first field, which is where every Yomitan template puts the expression.
-function noteSummary(info, settings) {
-  const fields = (info && info.fields) || {};
-  const read = (name) => noteField(fields, name);
-  const sentenceName = String(settings.ankiSentenceField || "").trim() || "Sentence";
-  const wordName = String(settings.ankiWordField || "").trim();
-  let word = "";
-  if (wordName) {
-    word = read(wordName);
-  } else {
-    for (const value of Object.values(fields)) {
-      if (value && Number(value.order) === 0) {
-        word = String(value.value || "").trim();
-        break;
-      }
-    }
-  }
-  return { sentence: read(sentenceName), word };
-}
-
-// One requestPermission at a time: Anki shows a dialog for it, and every caller that arrives
-// while it is up (the popup's deck list, a tab's word colours) waits for the same
-// answer (`permissionPending`) rather than asking for a second dialog or being told "denied" by
-// the minute's recheck. `permissionAskAt` is when the next request may go: a minute after a
-// verdict (ANKI_PERMISSION_RECHECK_MS, for a viewer who clicked No), stamped again when the
-// verdict arrives, since the dialog can be up for longer than that. A request Anki never
-// answered (closed, not installed) is no refusal and counts for nothing, or the next ask would
-// report a dialog nobody saw: its error reaches every waiting caller, and the next ask (a tab's
-// words, the popup's deck list) may try again at once.
-async function ankiPermission(url) {
-  if (ankiWatch.permission === "granted") return true;
-  if (ankiWatch.permissionPending) return ankiWatch.permissionPending;
-  const now = Date.now();
-  if (now < ankiWatch.permissionAskAt) return false;
-  // Set before the request: it blocks on Anki's dialog, and a caller landing meanwhile joins
-  // the request under way rather than queue a dialog of its own.
-  ankiWatch.permissionAskAt = now + ANKI_PERMISSION_RECHECK_MS;
-  ankiWatch.permissionPending = (async () => {
-    let perm;
-    try {
-      perm = await anki(url, "requestPermission", {});
-    } catch (err) {
-      // No verdict came (Anki not running, or still starting). The minute's wait is for a viewer
-      // who clicked No; here it would turn Anki's absence into a minute of "denied" during which
-      // a card it makes is never looked at.
-      ankiWatch.permissionAskAt = 0;
-      throw err;
-    } finally {
-      ankiWatch.permissionPending = null;
-    }
-    ankiWatch.permission = (perm && perm.permission) || "denied";
-    // From the verdict, not the request: a No clicked after the dialog was up for over a
-    // minute would otherwise be followed by a second dialog on the next poll.
-    ankiWatch.permissionAskAt = Date.now() + ANKI_PERMISSION_RECHECK_MS;
-    return ankiWatch.permission === "granted";
-  })();
-  return ankiWatch.permissionPending;
-}
-
 // ------------------------------------------------------------------ word colours
 
-// The content script colours the words of a line by their Anki cards. It asks here for one
-// deck's notes as [word, status, pitch] entries (words.js reads the fields and turns the five
-// searches below into a status) and builds its own index from them. The deck is the one the
-// popup names, else the one the last mined card went to, remembered under DECK_SEEN_KEY: a
-// viewer who mines into a deck wants that deck's colours without setting anything up.
-const CARD_STATUS_TTL_MS = 30000; // an index this fresh is answered from memory
-const CARD_STATUS_TIMEOUT_MS = 20000; // per AnkiConnect request: a large deck takes its time
-const NOTES_INFO_CHUNK = 200; // notes per notesInfo call
-const DECK_SEEN_KEY = "ankiDeckSeen"; // storage.local: {deck, at, noteId}
-const DECK_NOTES_KEY = "deckNotes"; // storage.session: {format, deck, wordField, pitchField, at, checkedAt, entries, notes: [[id, word, pitch, mod, reading]]}
-// A record of another format is dropped whole: its notes lack what this one reads (the kana
-// reading), and a restored note is never read again unless edited.
-const DECK_NOTES_FORMAT = 2;
-const DAY_MS = 86400000;
-const ANKI_OFFLINE_TEXT = "Anki is not running or AnkiConnect is not installed";
-const ANKI_DENIED_TEXT = "AnkiConnect denied access. Click Yes in Anki's permission dialog.";
+// The server reads the viewer's Anki deck (DeckIndexes in server.py); the extension makes no
+// AnkiConnect call. The tab that holds the server asks for the deck in its /sync (`deck`: the
+// popup's deck and fields, and the token of the rows held here), and the answer carries `deck`
+// only when the token moved: every row the first time, the rows that changed after that. The rows
+// live here, one copy for every tab: each content script asks for them as buildIndex() entries
+// (cardStatus), a tab standing by for another included.
+const SERVER_TOO_OLD_TEXT = "The word colours need Shisu-ko server 0.23.0 or newer";
 
-// The searches that tell a card's state apart; suspended and unsuspended together are the deck.
-// Since Anki 2.1.44 is:new, is:learn and is:review go by the card's type, which a suspended card
-// keeps (and a buried learning card is in is:learn too), so each of the three leaves suspended
-// cards out, and a note whose every card is suspended is caught by the suspended set alone.
-const STATUS_QUERIES = Object.freeze({
-  suspended: "is:suspended",
-  unsuspended: "-is:suspended",
-  new: "is:new -is:suspended",
-  learning: "is:learn -is:suspended",
-  review: "is:review -is:learn -is:suspended",
-});
+// The deck of the last mined card, which 0.22.0 and earlier kept here: the server keeps it now.
+browser.storage.local.remove("ankiDeckSeen").catch(() => {});
 
-// The deck's index. `wordField` and `pitchField` are the fields it was read with: an index or a
-// fetch for the same deck under other fields is about something else, and is never answered,
-// joined or built on. `at` stamps the entries and stays while a refetch finds them the same, so a
-// tab holding them is answered "unchanged"; `fetchedAt` is the clock the time to live runs on
-// (rememberDeck sets it back to expire the index); `checkedAt` is when the notes were last
-// looked through for edits; `notes` is what notesInfo said about each note, with the note's
-// modification time, kept across refreshes and mines.
-let cardIndex = null; // {deck, wordField, pitchField, at, fetchedAt, checkedAt, entries, notes: Map<noteId, {word, pitch, mod}>}
-let cardIndexInFlight = null; // {deck, wordField, pitchField, promise, controller, expired}: the fetch under way, shared by every ask for that deck and those fields
-// Counts the drops: an ask that read its settings before one, and only then got past Anki's
-// permission dialog, reads them again rather than fetch the deck as it was set a moment ago.
-let cardIndexGeneration = 0;
+// key: the deck and fields the rows are about; rows: note id -> [id, word, reading, status, pitch];
+// at: stamps `entries`, moved only when they change, so a tab holding them hears "unchanged".
+let deckState = freshDeck("");
 
-// The search clause for one deck and its subdecks. Anki reads a quoted name as a whole, and
-// `\`, `"`, `*` and `_` mean something to it inside one.
-function deckSearch(name) {
-  return `"deck:${String(name).replace(/[\\"*_]/g, (ch) => "\\" + ch)}"`;
-}
-
-// Two names Anki reads as keywords rather than decks, with no way to escape them: "current" is
-// the deck selected in its main window and "filtered" every filtered deck. Those two are searched
-// by id instead, the deck's own and its subdecks'; null when no deck of that name exists, which
-// is the empty deck any other missing name gives.
-async function deckScope(url, deck) {
-  if (deck !== "current" && deck !== "filtered") return deckSearch(deck);
-  const named = await anki(url, "deckNamesAndIds", {}, CARD_STATUS_TIMEOUT_MS);
-  const ids = [];
-  for (const [name, id] of Object.entries(named && typeof named === "object" ? named : {})) {
-    if ((name === deck || name.startsWith(deck + "::")) && Number.isFinite(Number(id))) ids.push(Number(id));
-  }
-  return ids.length ? `did:${ids.join(",")}` : null;
+function freshDeck(key) {
+  return { key, token: null, status: null, error: null, deck: null, automatic: false, rows: new Map(), entries: [], at: 0 };
 }
 
 function wordColoursOn(settings) {
-  return !!settings.cardStatus || !!settings.pitchAccent;
+  return !!settings.enabled && (!!settings.cardStatus || !!settings.pitchAccent);
 }
 
-const noteIds = (ids) => (Array.isArray(ids) ? ids : []).map(Number).filter(Number.isFinite);
-const fieldSetting = (settings, key) => String((settings && settings[key]) || "").trim();
-// Whether an index, or a fetch under way, is about this deck read with the fields set now.
-const indexFor = (index, deck, settings) =>
-  !!index && index.deck === deck && index.wordField === fieldSetting(settings, "ankiWordField") && index.pitchField === fieldSetting(settings, "ankiPitchField");
+const trimmed = (settings, key) => String((settings && settings[key]) || "").trim();
 
-// Forgotten along with the fetch under way, which stops at its next request: it lands with the
-// deck or the fields of a moment ago, and the next ask must start over, notes included.
-function dropCardIndex() {
-  cardIndex = null;
-  cardIndexGeneration++;
-  if (cardIndexInFlight) {
-    cardIndexInFlight.controller.abort();
-    cardIndexInFlight = null;
-  }
-  sessionSet(DECK_NOTES_KEY, null);
+// The `deck` of the next /sync. Another deck or another field to read a word or its pitch from is
+// another index: what is held goes, and the server sends every row of the new one.
+function deckRequest(settings) {
+  const name = trimmed(settings, "cardStatusDeck");
+  const word = trimmed(settings, "ankiWordField");
+  const pitch = trimmed(settings, "ankiPitchField");
+  const key = JSON.stringify([name, word, pitch]);
+  if (deckState.key !== key) deckState = freshDeck(key);
+  return { name, word, pitch, since: deckState.token };
 }
 
-// Expired, not forgotten: the next ask runs the searches again and reads only the notes it has
-// not seen, while the notes it has stay. A fetch under way may have searched before the card
-// existed, so its index lands expired too.
-function expireCardIndex() {
-  if (cardIndex) cardIndex.fetchedAt = 0;
-  if (cardIndexInFlight) cardIndexInFlight.expired = true;
-}
-
-// The deck a note's cards sit in (the one with most of them, should a note type spread its
-// cards). Best effort, after every note the server attached to (minedNote): a failure here is
-// nothing the viewer asked about, and the mine is already done.
-async function rememberDeck(url, noteId) {
-  try {
-    const cards = await anki(url, "findCards", { query: `nid:${noteId}` }, CARD_STATUS_TIMEOUT_MS);
-    const decks = await anki(url, "getDecks", { cards: Array.isArray(cards) ? cards : [] }, CARD_STATUS_TIMEOUT_MS);
-    let deck = null;
-    let most = 0;
-    for (const [name, ids] of Object.entries(decks && typeof decks === "object" ? decks : {})) {
-      const count = Array.isArray(ids) ? ids.length : 0;
-      if (count > most) {
-        most = count;
-        deck = name;
-      }
-    }
-    if (!deck) return;
-    await browser.storage.local.set({ [DECK_SEEN_KEY]: { deck, at: Date.now(), noteId } });
-    // The card just made must show up red at once, not after the index's time to live.
-    expireCardIndex();
-  } catch (err) {
-    console.debug("Shisu-ko: could not tell the new card's deck:", String((err && err.message) || err));
-  }
-}
-
-// A tab heard from the server (/sync's `mined`) that a note got its media: its deck is the one
-// the word colours look at when the popup names none. Not awaited by the tab.
-async function minedNote(msg) {
-  const noteId = Number(msg && msg.noteId);
-  if (!Number.isSafeInteger(noteId) || noteId <= 0) return { ok: false, error: "No note" };
-  const settings = await getSettings();
-  await rememberDeck(normalizeBase(settings.ankiUrl, DEFAULT_SETTINGS.ankiUrl), noteId);
-  return { ok: true };
-}
-
-async function seenDeck() {
-  try {
-    const stored = (await browser.storage.local.get(DECK_SEEN_KEY))[DECK_SEEN_KEY];
-    return stored && typeof stored === "object" && typeof stored.deck === "string" && stored.deck ? stored : null;
-  } catch (err) {
-    return null;
-  }
-}
-
-// The deck to look at: the popup's choice, else the last mined card's; automatic and nothing
-// mined yet means no deck at all, so a viewer's whole collection is never searched by guesswork.
-async function resolveDeck(settings) {
-  const chosen = String(settings.cardStatusDeck || "").trim();
-  if (chosen) return { deck: chosen, automatic: false };
-  const seen = await seenDeck();
-  return { deck: seen ? seen.deck : null, automatic: true };
-}
-
-// The notes read so far outlive the event page in storage.session, so a return to YouTube after
-// the page ended does not read the whole deck again. The record names the deck and the two
-// fields the words and pitches were read with: one for anything else is worth nothing. It
-// carries the entries and their stamp too, so a page that finds the deck as the last one left
-// it keeps the stamp, and the tabs holding those entries hear "unchanged" rather than get them
-// all again.
-function notesRecord(index) {
-  const notes = [];
-  for (const [id, note] of index.notes) notes.push([id, note.word, note.pitch, note.mod, note.reading]);
-  return { format: DECK_NOTES_FORMAT, deck: index.deck, wordField: index.wordField, pitchField: index.pitchField, at: index.at, checkedAt: index.checkedAt, entries: index.entries, notes };
-}
-
-async function restoreNotes(deck, settings) {
-  const record = await sessionGet(DECK_NOTES_KEY);
-  if (!record || typeof record !== "object" || record.format !== DECK_NOTES_FORMAT || !Array.isArray(record.notes)) return null;
-  if (!indexFor(record, deck, settings)) return null;
-  const notes = new Map();
-  for (const row of record.notes) {
-    const id = Array.isArray(row) ? Number(row[0]) : NaN;
-    if (Number.isFinite(id)) notes.set(id, { word: String(row[1] || ""), reading: String(row[4] || ""), pitch: row[2] || null, mod: Number(row[3]) || 0 });
-  }
-  // A stamp of 0 is what a tab holding nothing sends: entries under it would never reach one.
-  const at = typeof record.at === "number" && record.at > 0 ? record.at : 0;
-  const entries = at && Array.isArray(record.entries) && record.entries.every(Array.isArray) ? record.entries : undefined;
-  return { notes, checkedAt: typeof record.checkedAt === "number" ? record.checkedAt : 0, at, entries };
-}
-
-// The notes edited since the previous look (`edited:` counts days back from the coming day
-// rollover, so one more than the days elapsed always reaches it). A search Anki does not know
-// (before 2.1.28) finds nothing: the words then lag an edit, as they did.
-async function editedNotes(url, scope, previous, now) {
-  const days = Math.max(2, Math.ceil((now - previous.checkedAt) / DAY_MS) + 1);
-  try {
-    return new Set(noteIds(await anki(url, "findNotes", { query: `${scope} edited:${days}` }, CARD_STATUS_TIMEOUT_MS)));
-  } catch (err) {
-    if (err && (err.name === "TypeError" || err.name === "AbortError")) throw err;
-    console.debug("Shisu-ko: could not search for edited notes:", String((err && err.message) || err));
-    return new Set();
-  }
-}
-
-// Which of the notes the edit search listed really changed, by modification time: AnkiConnect
-// answers {} for a note that vanished, and an older one without the action fails as a whole,
-// which reads every note listed again.
-async function changedNotes(url, ids, known) {
-  const changed = new Set();
-  let times;
-  try {
-    times = await anki(url, "notesModTime", { notes: ids }, CARD_STATUS_TIMEOUT_MS);
-  } catch (err) {
-    if (err && (err.name === "TypeError" || err.name === "AbortError")) throw err;
-    console.debug("Shisu-ko: notesModTime failed for", ids.length, "notes:", String((err && err.message) || err));
-    return new Set(ids);
-  }
-  const reported = new Map();
-  (Array.isArray(times) ? times : []).forEach((row, k) => {
-    const id = Number(row && row.noteId);
-    reported.set(Number.isFinite(id) ? id : ids[k], Number(row && row.mod) || 0);
-  });
-  for (const id of ids) {
-    if (reported.get(id) !== known.get(id).mod) changed.add(id);
-  }
-  return changed;
-}
-
-// One deck as entries. notesInfo is the expensive call, so what it said about a note is kept
-// across refreshes (`notes`) for as long as the note is in the deck and unedited; the five
-// searches are cheap and run every time, since they are what changes when the viewer reviews,
-// and a sixth lists the notes edited since the last look, of which those whose modification
-// time moved are read again. `signal` is the drop of the index: the walk ends at its next request.
-async function fetchDeckIndex(url, deck, settings, signal) {
-  const started = Date.now();
-  const wordField = fieldSetting(settings, "ankiWordField");
-  const pitchField = fieldSetting(settings, "ankiPitchField");
-  const dropped = () => {
-    if (signal && signal.aborted) throw Object.assign(new Error("index dropped"), { dropped: true });
-  };
-  dropped();
-  const scope = await deckScope(url, deck);
-  const sets = {};
-  for (const [name, clause] of Object.entries(STATUS_QUERIES)) {
-    dropped();
-    const ids = scope === null ? [] : await anki(url, "findNotes", { query: `${scope} ${clause}` }, CARD_STATUS_TIMEOUT_MS);
-    sets[name] = new Set(noteIds(ids));
-  }
-  // By note id, whatever order the searches answered in: Anki's has none (no ORDER BY, so a
-  // review that moves a card's due may move its note), and the entries must come out the same
-  // for the same deck, or every tab would take them in again for nothing.
-  const ids = new Set([...sets.suspended, ...sets.unsuspended].sort((a, b) => a - b));
-  // What is known already: this page's index, else the notes an earlier page left behind.
-  const remembered = indexFor(cardIndex, deck, settings) ? cardIndex : null;
-  const previous = remembered || (await restoreNotes(deck, settings));
-  const restored = !remembered && !!previous;
-  const known = previous ? previous.notes : new Map();
-  dropped();
-  const edited = previous && scope !== null && known.size ? await editedNotes(url, scope, previous, started) : new Set();
-  const suspect = [...ids].filter((id) => edited.has(id) && known.has(id));
-  dropped();
-  const reread = suspect.length ? await changedNotes(url, suspect, known) : new Set();
-  const notes = new Map();
-  const missing = [];
-  for (const id of ids) {
-    const note = known.get(id);
-    if (note && !reread.has(id)) notes.set(id, note);
-    else missing.push(id);
-  }
-  let read = 0;
-  for (let i = 0; i < missing.length; i += NOTES_INFO_CHUNK) {
-    const chunk = missing.slice(i, i + NOTES_INFO_CHUNK);
-    dropped();
-    let infos;
-    try {
-      infos = await anki(url, "notesInfo", { notes: chunk }, CARD_STATUS_TIMEOUT_MS);
-    } catch (err) {
-      // Anki gone, or not answering: the ask fails as a whole. Anki's own complaint about a
-      // chunk (a note deleted since the search) costs those notes alone, and a note read again
-      // for an edit keeps what it said before rather than lose its colour until the next try.
-      if (err && (err.name === "TypeError" || err.name === "AbortError")) throw err;
-      console.debug("Shisu-ko: notesInfo failed for", chunk.length, "notes:", String((err && err.message) || err));
-      for (const id of chunk) {
-        const old = known.get(id);
-        if (old) notes.set(id, old);
-      }
-      continue;
-    }
-    (Array.isArray(infos) ? infos : []).forEach((info, k) => {
-      // Answers come in the order asked; a note that vanished answers as an empty object.
-      const reported = Number(info && info.noteId);
-      const id = Number.isFinite(reported) ? reported : chunk[k];
-      if (!ids.has(id) || !info || !info.fields || typeof info.fields !== "object") return;
-      // A word longer than the content script's index keeps is a sentence in the word field:
-      // stored as no word, so it is neither kept nor sent to every tab only to be dropped there.
-      const word = SHISUKO_WORDS.plainWord(noteSummary(info, settings).word);
-      notes.set(id, {
-        word: word.length > SHISUKO_WORDS.MAX_WORD_LEN ? "" : word,
-        reading: SHISUKO_WORDS.kanaReadingOf(info.fields, settings),
-        pitch: SHISUKO_WORDS.pitchOf(info.fields, settings),
-        mod: Number(info.mod) || 0,
-      });
-      read++;
-    });
-  }
-  // A fetch dropped during its last request answers nobody either: what it read is about a deck
-  // or fields no longer asked for.
-  dropped();
-  // In the order of the ids, whenever a note was read: a note read again for an edit that left
-  // its word, status and pitch as they were must not move, or the entries would compare as
-  // changed twice over, and every tab would take them in twice.
+// The entries buildIndex() takes, by note id: the word, then the kana reading of a word usually
+// written in kana (更に is subtitled さらに), each with the note's status and pitch. Pure.
+function deckEntries(rows) {
   const entries = [];
-  for (const id of ids) {
-    const note = notes.get(id);
-    if (!note || !note.word) continue;
-    const status = SHISUKO_WORDS.statusOf(sets, id);
-    if (!status) continue;
-    entries.push([note.word, status, note.pitch]);
-    // A word usually written in kana is subtitled in kana: 更に is heard as さらに.
-    if (note.reading) entries.push([note.reading, status, note.pitch]);
+  for (const [, word, reading, status, pitch] of [...rows].sort((a, b) => a[0] - b[0])) {
+    entries.push([word, status, pitch]);
+    if (reading) entries.push([reading, status, pitch]);
   }
-  // The same entries keep their stamp, so a tab holding them hears "unchanged" rather than
-  // getting them all again. The notes changed when one was read or dropped (a chunk that
-  // failed changed nothing, so its notes are asked for again without the record being written
-  // again), and a record another page left is written once more with what this one found.
-  const same = !!(previous && previous.entries && sameEntries(previous.entries, entries));
-  const changed = read > 0 || notes.size !== known.size || restored;
-  return { deck, wordField, pitchField, at: same ? previous.at : started, fetchedAt: started, checkedAt: started, entries, notes, changed };
+  return entries;
 }
 
-function sameEntries(a, b) {
-  return a.length === b.length && a.every((e, i) => e[0] === b[i][0] && e[1] === b[i][1] && e[2] === b[i][2]);
-}
+const validRow = (row) => Array.isArray(row) && row.length === 5 && Number.isSafeInteger(row[0]) && typeof row[1] === "string" && row[1];
 
-// One fetch at a time per deck and fields; asks that overlap wait for it. A fetch dropped while
-// under way (a settings change, or another deck or field asked for: the last mined card went
-// elsewhere) is abandoned and whoever waited asks again; one expired meanwhile (rememberDeck)
-// is kept, but lands expired.
-function refreshCardIndex(url, deck, settings) {
-  if (!indexFor(cardIndexInFlight, deck, settings)) {
-    if (cardIndexInFlight) cardIndexInFlight.controller.abort();
-    const controller = new AbortController();
-    const flight = { deck, wordField: fieldSetting(settings, "ankiWordField"), pitchField: fieldSetting(settings, "ankiPitchField"), promise: null, controller, expired: false };
-    flight.promise = fetchDeckIndex(url, deck, settings, controller.signal)
-      .then((index) => {
-        if (cardIndexInFlight === flight) {
-          if (flight.expired) index.fetchedAt = 0;
-          cardIndex = index;
-          if (index.changed) sessionSet(DECK_NOTES_KEY, notesRecord(index));
-        }
-        return index;
-      })
-      .finally(() => {
-        if (cardIndexInFlight === flight) cardIndexInFlight = null;
-      });
-    cardIndexInFlight = flight;
+// The server's `deck` answer. A delta is applied to the rows held for the token it answered.
+function takeDeck(answer) {
+  if (!answer || typeof answer !== "object" || typeof answer.token !== "string") return;
+  const state = deckState;
+  state.token = answer.token;
+  state.status = typeof answer.status === "string" ? answer.status : "error";
+  state.error = typeof answer.error === "string" ? answer.error : null;
+  state.automatic = !!answer.automatic;
+  state.deck = typeof answer.deck === "string" ? answer.deck : null;
+  if (state.status !== "ok") {
+    // The server holds no rows for this deck (none read yet, or Anki away from the start).
+    state.rows = new Map();
+  } else {
+    if (answer.full) state.rows = new Map();
+    for (const row of Array.isArray(answer.notes) ? answer.notes : []) if (validRow(row)) state.rows.set(row[0], row);
+    for (const id of Array.isArray(answer.removed) ? answer.removed : []) state.rows.delete(id);
   }
-  return cardIndexInFlight.promise;
+  const entries = deckEntries(state.rows.values());
+  if (JSON.stringify(entries) !== JSON.stringify(state.entries)) {
+    state.entries = entries;
+    state.at = Date.now();
+  }
 }
 
-// The content script's ask: the deck's entries, or why there are none. `since` is the `at` of
-// the index it holds; the same index again is answered without the entries. A failed refresh
-// keeps and answers the old index (`stale`): colours a minute old beat none.
-async function cardStatus(msg, retried) {
-  const generation = cardIndexGeneration;
+// A /sync from the tab that holds the server: the deck asked for when a colour is on, and the
+// answer's `deck` taken here rather than handed to the tab.
+async function syncRequest(body) {
+  const settings = await getSettings();
+  const deck = wordColoursOn(settings) ? deckRequest(settings) : null;
+  const asked = deckState;
+  const res = await apiRequest("/sync", deck && body && typeof body === "object" ? { ...body, deck } : body);
+  const data = res && res.ok && res.data && typeof res.data === "object" ? res.data : null;
+  if (deck && data && deckState === asked) {
+    // A server that knows `deck` always answers one held nothing for: none at all is a server
+    // from before the word colours moved there.
+    if ("deck" in data) takeDeck(data.deck);
+    else if (asked.token === null) Object.assign(asked, { status: "old", error: SERVER_TOO_OLD_TEXT });
+  }
+  if (data) delete data.deck;
+  return res;
+}
+
+// The content script's ask: the deck's entries, or why there are none. `since` is the `at` of the
+// entries it holds; the same entries again are answered without them.
+async function cardStatus(msg) {
   const settings = await getSettings();
   if (!wordColoursOn(settings)) return { ok: false, reason: "off" };
-  const { deck, automatic } = await resolveDeck(settings);
-  if (!deck) return { ok: false, reason: "noDeck", error: "No card mined yet; pick a deck in the popup" };
-  const url = normalizeBase(settings.ankiUrl, DEFAULT_SETTINGS.ankiUrl);
-  const since = msg && typeof msg.since === "number" ? msg.since : null;
-  const answer = (index, stale) => {
-    const res = since === index.at ? { ok: true, unchanged: true, at: index.at, deck } : { ok: true, deck, automatic, at: index.at, entries: index.entries };
-    if (stale) res.stale = true;
-    return res;
-  };
-  try {
-    if (!(await ankiPermission(url))) return { ok: false, reason: "denied", error: ANKI_DENIED_TEXT };
-    // The index was dropped while this ask waited (Anki's permission dialog can be up for as
-    // long as it likes): once more, for the deck and fields set now, not the ones read above.
-    if (generation !== cardIndexGeneration && !retried) return cardStatus(msg, true);
-    const fresh = indexFor(cardIndex, deck, settings) && Date.now() - cardIndex.fetchedAt < CARD_STATUS_TTL_MS ? cardIndex : null;
-    return answer(fresh || (await refreshCardIndex(url, deck, settings)), false);
-  } catch (err) {
-    // Dropped under the ask, another deck or field having been chosen: once more, for what is set now.
-    if (err && err.dropped && !retried) return cardStatus(msg, true);
-    const stale = indexFor(cardIndex, deck, settings) && cardIndex.entries.length ? cardIndex : null;
-    if (stale) return answer(stale, true);
-    const network = err && err.name === "TypeError";
-    return network ? { ok: false, reason: "offline", error: ANKI_OFFLINE_TEXT } : { ok: false, reason: "error", error: String((err && err.message) || err) };
+  deckRequest(settings);
+  const state = deckState;
+  if (state.status === "ok") {
+    const since = msg && typeof msg.since === "number" ? msg.since : null;
+    if (since === state.at) return { ok: true, unchanged: true, at: state.at, deck: state.deck };
+    return { ok: true, deck: state.deck, automatic: state.automatic, at: state.at, entries: state.entries };
   }
+  if (!state.status || state.status === "loading") return { ok: false, reason: "pending", error: "Waiting for the server to read the deck" };
+  return { ok: false, reason: state.status === "off" ? "unavailable" : state.status, error: state.error };
 }
 
-// The popup's deck list, with the deck the last mined card went to.
+// The popup's deck list: Anki's deck names and the automatic deck, from the server.
 async function ankiDecks() {
-  const settings = await getSettings();
-  const url = normalizeBase(settings.ankiUrl, DEFAULT_SETTINGS.ankiUrl);
-  const seen = await seenDeck();
-  const seenName = seen ? seen.deck : null;
-  try {
-    if (!(await ankiPermission(url))) return { ok: false, reason: "denied", error: ANKI_DENIED_TEXT, seen: seenName };
-    const names = await anki(url, "deckNames", {}, CARD_STATUS_TIMEOUT_MS);
-    const decks = (Array.isArray(names) ? names : []).map(String).sort((a, b) => a.localeCompare(b));
-    return { ok: true, decks, seen: seenName };
-  } catch (err) {
-    const network = err && err.name === "TypeError";
-    return { ok: false, reason: network ? "offline" : "error", error: network ? ANKI_OFFLINE_TEXT : String((err && err.message) || err), seen: seenName };
-  }
+  const res = await apiRequest("/health?decks=1");
+  const info = res.ok && res.data && typeof res.data.anki_decks === "object" ? res.data.anki_decks : null;
+  if (!res.ok) return { ok: false, reason: "offline", error: "The Shisu-ko server is not running: it reads the decks" };
+  if (!info) return { ok: false, reason: "error", error: SERVER_TOO_OLD_TEXT };
+  const seen = typeof info.seen === "string" ? info.seen : null;
+  if (!info.ok) return { ok: false, reason: info.offline ? "offline" : "error", error: String(info.error || "unknown error"), seen };
+  const decks = (Array.isArray(info.decks) ? info.decks : []).map(String).sort((a, b) => a.localeCompare(b));
+  return { ok: true, decks, seen };
 }
-
-// The entries depend on these three settings: another deck, or another field to read a word or
-// its pitch from, makes the index one about something else.
-const CARD_INDEX_SETTINGS = ["cardStatusDeck", "ankiPitchField", "ankiWordField"];
-
-browser.storage.onChanged.addListener((changes, area) => {
-  if (area !== "local" || !changes || !changes.settings) return;
-  // All three are strings, and one never stored is the default: unset and "" are the same setting.
-  const value = (settings, key) => String((settings && settings[key]) || "").trim();
-  const { oldValue, newValue } = changes.settings;
-  if (CARD_INDEX_SETTINGS.some((key) => value(oldValue, key) !== value(newValue, key))) dropCardIndex();
-});
 
 // ------------------------------------------------------------------ messaging
 
@@ -1315,14 +932,12 @@ browser.runtime.onMessage.addListener((msg, sender) => {
         // again on the next tick, which is what makes taking over immediate.
         if (holder !== tabId) return Promise.resolve({ ok: true, data: { status: "standby" } });
       }
-      return apiRequest(msg.path, msg.body);
+      return msg.path === "/sync" ? syncRequest(msg.body) : apiRequest(msg.path, msg.body);
     }
     case "getSettings":
       return getSettings();
     case "saveSettings":
       return saveSettings(msg.settings);
-    case "minedNote":
-      return minedNote(msg);
     case "startServer":
       return startServer();
     case "startServerStatus":

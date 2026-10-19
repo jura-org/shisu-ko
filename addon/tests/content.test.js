@@ -1182,7 +1182,7 @@ test("pollWordIndex asks only with a colour on, a video, the tab visible and the
   api.state.standby = false;
   await api.pollWordIndex();
   assert.equal(asks.length, 1); // asked a moment ago
-  api.state.wordIndexAskedAt = Date.now() - 30_000;
+  api.state.wordIndexAskedAt = Date.now() - 2_000;
   api.state.wordIndexAt = 1000;
   await api.pollWordIndex();
   assert.equal(asks.length, 2);
@@ -1450,39 +1450,21 @@ test("an answer to an ask from before a deck change is thrown away, and the new 
   assert.equal(asks[1].since, 0);
 });
 
-test("a note the server mined makes the next ask go out soon, not at the interval", async () => {
+test("a note the server mined tells the background nothing: the server reads its deck", async () => {
   const { api, sandbox } = loadContent();
   await settled();
-  watching(api);
   api.state.settings.cardStatus = true;
-  let clock = Date.now();
-  sandbox.Date = { now: () => clock };
-  const asks = [];
-  const told = [];
+  const sent = [];
   sandbox.browser.runtime.sendMessage = async (msg) => {
-    if (msg.type === "minedNote") told.push(msg.noteId);
-    if (msg.type !== "cardStatus") return { ok: true };
-    asks.push(msg);
-    return { ok: true, unchanged: true };
+    sent.push(msg.type);
+    return { ok: true };
   };
-  await api.pollWordIndex();
-  assert.equal(asks.length, 1);
-  clock += 1000;
+  const before = api.state.wordIndexAskedAt;
   api.takeMined({ mined: [{ seq: 0, nonce: null, ok: true, status: "attached", message: "Added Picture to the new Anki card", note: 17 }], mined_next: 1 });
-  assert.deepEqual(told, [17], "the background learns the note, for its deck");
-  await api.pollWordIndex();
-  assert.equal(asks.length, 1); // Anki has yet to tell the background the card's deck
-  clock += 1500;
-  await api.pollWordIndex();
-  assert.equal(asks.length, 2); // asked 2.5 s after the last one, not 30
-
-  // A mine that attached nothing made no card: the interval stands.
-  clock += 1000;
-  api.takeMined({ mined: [{ seq: 1, nonce: null, ok: false, status: "error", message: "no card", note: null }], mined_next: 2 });
-  clock += 5000;
-  await api.pollWordIndex();
-  assert.equal(asks.length, 2);
-  assert.deepEqual(told, [17]);
+  await settled();
+  assert.deepEqual(sent, [], "no minedNote: the background reads no Anki");
+  assert.equal(api.state.wordIndexAskedAt, before, "the next ask keeps its two-second interval");
+  assert.equal(api.state.minedSince, 1);
 });
 
 test("the master switch off: syncTick sends nothing, the deck index included", async () => {

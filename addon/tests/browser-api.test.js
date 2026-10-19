@@ -22,6 +22,7 @@ function loadChrome() {
     storage: { local: {
       get(key, callback) { callback({ [key]: 1 }); },
       set(value, callback) { callback(); },
+      remove(key, callback) { calls.push(["local.remove", key]); callback(); },
     }, session: {
       get(key, callback) { calls.push(["session.get", key]); callback({ [key]: 2 }); },
       set(value, callback) { calls.push(["session.set", value]); callback(); },
@@ -243,4 +244,10 @@ test("a Chrome without action or notifications (a content script) gets neither w
   assert.doesNotThrow(() => new vm.Script(source).runInContext(sandbox));
   assert.equal(sandbox.browser.action, undefined);
   assert.equal(sandbox.browser.notifications, undefined);
+});
+
+test("Chrome storage.local.remove is bridged too", async () => {
+  const { browser, calls } = loadChrome();
+  assert.equal(await browser.storage.local.remove("ankiDeckSeen"), undefined);
+  assert.deepEqual(calls.at(-1), ["local.remove", "ankiDeckSeen"]);
 });

@@ -45,14 +45,11 @@
   // A mine the server has not answered by then is given up: it waits up to a minute for audio
   // still being fetched, and a server older than 0.22.0 never answers one at all.
   const MINE_TIMEOUT_MS = 90000;
-  // The deck index behind the word colours is asked for this often (the background keeps it as
-  // long, so most asks come back "unchanged"); a failing ask is logged this often.
-  const WORD_INDEX_REFRESH_MS = 30000;
+  // The deck index behind the word colours is asked for this often. The background answers from
+  // the rows the server sent with the last /sync, so most asks come back "unchanged" for the price
+  // of a message, and a card just made shows within seconds; a failing ask is logged this often.
+  const WORD_INDEX_REFRESH_MS = 2000;
   const WORD_INDEX_LOG_MS = 60000;
-  // A card just mined must show its colour now, not after the interval. The background expires
-  // its index once Anki has told it the card's deck, two answers after the mine, so the next ask
-  // waits this long for that: an ask in between would be answered with the old index.
-  const WORD_INDEX_MINE_DELAY_MS = 1500;
   // The settings the deck index depends on: a change to any of them starts it over.
   const WORD_SETTINGS = ["cardStatus", "pitchAccent", "cardStatusDeck", "ankiPitchField", "ankiWordField"];
   // A refreshed index that differs from the last in more words than this is walked line by line
@@ -1987,9 +1984,8 @@
   // from every tab, the home page and the player kept off a watch page included): the background
   // answers from its cache, and "unchanged" when it still holds what this tab was last given.
   // A tab standing by for another (state.standby) asks like any other: the index is the deck's,
-  // read from Anki through the background's one cache, and the election is about the server,
-  // which this never reaches; the standby tab keeps its lines on screen, and a card reviewed
-  // must recolour them there too, for the price of one cache lookup every half minute.
+  // which the server sends with the holder tab's /sync and the background keeps for every tab;
+  // the standby tab keeps its lines on screen, and a card reviewed must recolour them there too.
   async function pollWordIndex() {
     if (!wordColoursOn() || !state.video || !state.videoId || state.wordIndexInFlight) return;
     if (document.visibilityState !== "visible") return;
@@ -2412,8 +2408,8 @@
   }
 
   // The server's mining log since the last answer: the outcome of the viewer's own mine, which
-  // ends it, and each note the server attached to by itself. A note that got its media tells the
-  // background its deck, for the word colours, and asks for their index soon.
+  // ends it, and each note the server attached to by itself. The word colours need no word here:
+  // the server reads the new card's deck and sends its row with the next /sync.
   function takeMined(data) {
     if (typeof data.mined_next === "number") state.minedSince = data.mined_next;
     const refused = typeof data.anki_error === "string" ? data.anki_error : null;
@@ -2423,10 +2419,6 @@
       if (!event || typeof event !== "object") continue;
       const own = !!state.mining && event.nonce === state.mining.nonce;
       if (own) state.mining = null;
-      if (event.ok && Number.isSafeInteger(event.note)) {
-        sendMessage({ type: "minedNote", noteId: event.note });
-        state.wordIndexAskedAt = Date.now() - WORD_INDEX_REFRESH_MS + WORD_INDEX_MINE_DELAY_MS;
-      }
       // An automatic attach that went wrong is the server log's business, not a toast's.
       if (own || (event.ok && !event.nonce)) {
         const text = String(event.message || (event.ok ? "Mined" : "unknown error"));
