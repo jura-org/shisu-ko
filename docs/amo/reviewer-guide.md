@@ -106,7 +106,8 @@ The demo recording in the README shows the expected behaviour: https://github.co
 
 9. Optional, the update check: expand "Anki, clips and server" in the popup. The line at its
    bottom reads "Newest release: <release>, the server checked <when>" (or why the server's
-   check failed, offline); the server checks soon after it starts. With a server older than that release the popup shows a banner
+   check failed, offline); a server with no check from the last day checks soon after it starts.
+   With a server older than that release the popup shows a banner
    "Shisu-ko <release> is available — the server runs <server's version>." with "Update" and
    "Not now", and the toolbar icon gets a badge. "Update" sends POST /update to the server;
    the server exits, run.sh runs the project's own update.py (git fast-forward) and starts it
@@ -180,12 +181,12 @@ PERMISSIONS
 - The update check is the server's, not the extension's: server/server.py (UpdateChecker) sends
   GET https://api.github.com/repos/Multysquid/shisu-ko/releases/latest (headers Accept:
   application/vnd.github+json and User-Agent: Shisu-ko/<version>; no cookies, no token, no
-  account) soon after it starts and once a day after that, keeps the answer in
+  account) once a day, a restart within the day included, and keeps the answer in
   ~/.shisu-ko/update-check.json and reports it in /health as "latest" ({version, url, xpi,
   published, checked, error}); --update-check off stops it. The extension reads that field from
   the /health answers it already asks for and keeps the last one in browser.storage.local under
-  "serverLatest", for while the server is offline. Its one fetch() is apiRequest()'s, to the
-  local server. Nothing downloads or installs the .xpi: the popup links to the release page, and
+  "serverLatest", for while the server is offline. Its two fetch() calls, apiRequest()'s and
+  saveMine's /clip, both go to the local server. Nothing downloads or installs the .xpi: the popup links to the release page, and
   the manifest has no update_url, so updates of the extension come from addons.mozilla.org.
 - nativeMessaging (optional_permissions; requested with browser.permissions.request from the
   click on the popup's "Start server" button, which is shown only while the companion server
@@ -204,15 +205,17 @@ CODE THAT MAY NEED A WORD
   the page and nothing is written to it. It is needed because on a live stream the <video>
   element's currentTime restarts at an arbitrary point on every page load, while the cues are
   on the stream's media clock.
-- background.js, apiRequest(): the only requests to the server, POST /sync with
+- background.js, apiRequest(): the requests to the server (saveMine's GET /clip, above, aside), POST /sync with
   {video_id, url, t, paused, since, model, anki, mined_since} and, after the viewer's mine,
   mine: {cue_id, nonce, session} until the server answers it (anki is the popup's field names,
   padding and clip format; the answer's mined lists what the server wrote, which the content
   script toasts; see docs/dev/mining.md), GET /health
-  (the popup's status line, every 2 s while it is open; and once at browser start and at install
-  or update of the extension, from startupCheck(), for the badge, once some server has answered
-  the profile) and POST /update with an empty body
-  (only from the popup's Update button; the server
+  (the popup's status line, every 2 s while it is open; once at browser start and at install
+  or update of the extension, from startupCheck(), for the badge and the start-up notification,
+  once some server has answered the profile; and, after a click on the update notification,
+  every 3 s for up to 120 s from watchUpdate(), with no popup open, to see the new version come
+  up) and POST /update with an empty body
+  (only from the popup's Update button or a click on the update notification; the server
   answers {ok, restarting, version} and exits so that its own launcher runs the project's
   update.py and starts it again, or 409 {ok: false, error} when it cannot). For the word
   colours (only while one of the two options is on; the "word colours" section of
