@@ -618,3 +618,42 @@ def test_with_start_marks_a_resume_in_master_and_media_playlists():
     for t in (None, "", "0", "-5", "abc", "1e9"):
         assert portal.with_start(master, t) == master
     assert portal.with_start(started, 90).count("#EXT-X-START") == 1
+
+
+# ---------------------------------------------------------------- word colours
+
+
+def test_sync_asks_the_server_for_the_card_setups_deck_only_when_the_page_does(tmp_path, monkeypatch):
+    services = make_services(tmp_path, "local")
+    sent = []
+
+    def request(base, method, path, body=None, headers=None, timeout=None):
+        if path == "/health":
+            return 200, b'{"model": "tiny"}'
+        sent.append(json.loads(body))
+        reply = {"ok": True, "cues": []}
+        if "deck" in sent[-1]:
+            reply["deck"] = {"token": "e1.1", "status": "ok", "full": True, "notes": [[1, "猫", "", "new", None]], "removed": []}
+        return 200, json.dumps(reply).encode()
+
+    monkeypatch.setattr(portal, "request", request)
+    plain = services.sync({"video_id": "dQw4w9WgXcQ", "t": 1})
+    assert "deck" not in sent[-1] and "deck" not in plain
+    monkeypatch.setattr(services, "card", lambda: {"deck": "Fixture deck"})
+    answer = services.sync({"video_id": "dQw4w9WgXcQ", "t": 1, "deck": {"since": "e1.0"}})
+    assert sent[-1]["deck"] == {"name": "Fixture deck", "since": "e1.0"}
+    assert answer["deck"]["notes"] == [[1, "猫", "", "new", None]]
+    # The page names a token, never a deck; anything else it sends is dropped.
+    services.sync({"video_id": "dQw4w9WgXcQ", "t": 1, "deck": {"since": "bad token!", "name": "Other"}})
+    assert sent[-1]["deck"] == {"name": "Fixture deck", "since": None}
+    monkeypatch.setattr(services, "card", lambda: None)
+    services.sync({"video_id": "dQw4w9WgXcQ", "t": 1, "deck": {}})
+    assert sent[-1]["deck"] == {"name": "", "since": None}  # no card setup: the server's automatic deck
+
+
+def test_the_page_gets_the_extensions_own_words_js():
+    assert portal.WORDS_JS == PATH.parent.parent / "addon" / "words.js"
+    assert portal.STATIC_NAME_RE.match("words.js")
+    assert not (PATH.parent / "static" / "words.js").exists(), "one words.js, served from addon/"
+    html = (PATH.parent / "static" / "index.html").read_text(encoding="utf-8")
+    assert html.index('src="words.js"') < html.index('src="app.js"')

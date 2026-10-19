@@ -264,6 +264,13 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .word { border-radius: 6px; }
+/* Word colours: the card's state as a soft underline in the system colours, so the sweep keeps
+   the text's own light. */
+.cue .wc { text-decoration: underline 2px; text-underline-offset: 0.22em; text-decoration-skip-ink: none; }
+.cue .wc[data-status="learned"] { text-decoration-color: rgba(48, 209, 88, 0.85); }
+.cue .wc[data-status="learning"] { text-decoration-color: rgba(255, 214, 10, 0.85); }
+.cue .wc[data-status="suspended"] { text-decoration-color: rgba(255, 159, 10, 0.85); }
+.cue .wc[data-status="new"] { text-decoration-color: rgba(255, 69, 58, 0.9); }
 .word:active { background: var(--fill); }
 .tok.picked { background: rgba(255, 255, 255, 0.14); color: var(--label); }
 rt { font-size: 0.45em; color: var(--label-2); font-weight: 400; }

@@ -565,6 +565,68 @@
     return S.ankiSyncWaiting;
   }
 
+  // ------------------------------------------------------------ word colours
+  //
+  // The server reads the Anki deck and sends its rows with /sync (`deck`), [id, word, reading,
+  // status, pitch] each: every row the first time, the changed ones after that. The page keeps
+  // them as the extension's background does and turns them into the entries words.js's
+  // buildIndex() takes; words.js marks the line, as on YouTube.
+
+  // The rows held after the server's `deck` answer: {token, status, rows (Map id -> row)}.
+  function applyDeck(held, answer) {
+    if (!answer || typeof answer !== "object" || typeof answer.token !== "string") return held;
+    const status = typeof answer.status === "string" ? answer.status : "error";
+    const rows = status !== "ok" || answer.full ? new Map() : new Map(held.rows);
+    if (status === "ok") {
+      for (const row of Array.isArray(answer.notes) ? answer.notes : []) {
+        if (Array.isArray(row) && row.length === 5 && Number.isSafeInteger(row[0]) && typeof row[1] === "string" && row[1]) rows.set(row[0], row);
+      }
+      for (const id of Array.isArray(answer.removed) ? answer.removed : []) rows.delete(id);
+    }
+    return { token: answer.token, status, rows };
+  }
+
+  // buildIndex()'s entries, by note id: the word, then the kana reading of a word usually written
+  // in kana (background.js's deckEntries()).
+  function deckEntries(rows) {
+    const entries = [];
+    for (const [, word, reading, status, pitch] of [...rows].sort((a, b) => a[0] - b[0])) {
+      entries.push([word, status, pitch]);
+      if (reading) entries.push([reading, status, pitch]);
+    }
+    return entries;
+  }
+
+  // markWords()' runs as one status per UTF-16 index of the text, null where a run has none.
+  function statusAt(runs) {
+    const out = [];
+    for (const run of runs || []) for (let i = 0; i < run.text.length; i++) out.push(run.status || null);
+    return out;
+  }
+
+  // A unit's [text, reading] pieces cut where the status changes, from offset `start` of the
+  // cue: [{text, reading, status}]. A piece with a reading (ruby) stays whole, in the status of
+  // its first character.
+  function markedSegs(unit, marks) {
+    const out = [];
+    let at = unit.start;
+    for (const [text, reading] of unit.segs) {
+      if (reading) {
+        out.push({ text, reading, status: marks[at] || null });
+      } else {
+        let from = 0;
+        for (let i = 1; i <= text.length; i++) {
+          if (i === text.length || (marks[at + i] || null) !== (marks[at + from] || null)) {
+            out.push({ text: text.slice(from, i), reading: "", status: marks[at + from] || null });
+            from = i;
+          }
+        }
+      }
+      at += text.length;
+    }
+    return out;
+  }
+
   function hasKanji(text) {
     return /[㐀-鿿豈-﫿々]/.test(String(text || ""));
   }
@@ -576,7 +638,7 @@
     SCHEDULES, backoffDelay, isTransient, withRetry, retryLeft,
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
-    ankiSyncText,
+    ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.PortalLib = api;
