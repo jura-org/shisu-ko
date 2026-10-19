@@ -404,6 +404,47 @@ def test_read_card_file(tmp_path):
         portal.read_card_file(tmp_path / "portal.json")
 
 
+def test_a_leftover_auto_sync_is_accepted_warned_about_and_ignored(tmp_path, caplog):
+    # 0.20.0 and 0.21.0 read auto_sync from portal.json; the server syncs Anki now. A file that
+    # still holds it, with any value, must not stop the portal: unknown keys do, this one warns.
+    path = tmp_path / "portal.json"
+    for value in (False, True, "on"):
+        path.write_text(json.dumps({"deck": "Fixture deck", "auto_sync": value}), encoding="utf-8")
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="portal"):
+            assert portal.read_card_file(path) == {"deck": "Fixture deck"}
+        warnings = [r.getMessage() for r in caplog.records]
+        assert len(warnings) == 1 and "auto_sync" in warnings[0] and "ignored" in warnings[0]
+    path.write_text('{"auto_sync": false}', encoding="utf-8")
+    assert portal.read_card_file(path) == {}
+    path.write_text('{"deck": "Fixture deck"}', encoding="utf-8")
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="portal"):
+        portal.read_card_file(path)
+    assert caplog.records == []
+
+
+def test_health_passes_on_the_servers_anki_sync(tmp_path, monkeypatch):
+    services = make_services(tmp_path, "local")
+    sync = {"state": "watching", "last": 1_700_000_000_000, "error": None}
+    monkeypatch.setattr(portal, "request", lambda *a, **kw: (200, json.dumps({"version": "0.21.1", "anki_sync": sync}).encode()))
+    monkeypatch.setattr(portal, "yomitan", lambda *a, **kw: {"version": "1"})
+    monkeypatch.setattr(portal, "anki", lambda *a, **kw: 6)
+    shisuko = services.health()["services"]["shisuko"]
+    assert shisuko == {"ok": True, "version": "0.21.1", "anki_sync": sync}
+    # A server from before the move has no anki_sync: None, and Settings shows no line.
+    monkeypatch.setattr(portal, "request", lambda *a, **kw: (200, b'{"version": "0.21.0"}'))
+    assert services.health()["services"]["shisuko"]["anki_sync"] is None
+
+
+def test_the_portal_never_calls_ankiconnects_sync():
+    source = PATH.read_text(encoding="utf-8")
+    assert '"sync"' not in source.replace('"/sync"', "")
+    assert "/api/anki/sync" not in source
+    for name in ("app.js", "lib.js", "index.html"):
+        assert "/api/anki/sync" not in (PATH.parent / "static" / name).read_text(encoding="utf-8")
+
+
 def test_guess_fields_for_a_rich_note_type():
     names = ["Expression", "Reading", "Furigana", "Meaning", "Definition (JP)", "Sentence", "Sentence Audio",
              "Word Audio", "Image", "Pitch Accent", "Pitch Graph", "Pitch Position", "Selected Definition",
