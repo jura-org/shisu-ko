@@ -43,10 +43,10 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   // instead; a repo id must then be an MLX one (mlx-community/whisper-large-v3-mlx).
   model: "",
   // sentence mining
-  mineTarget: "anki", // "anki" (newest card via AnkiConnect) or "download"
-  // Attach screenshot + audio automatically when a new Anki note appears while a video is open.
+  // The server attaches a line's audio and picture to a new Yomitan note when it matches a line of
+  // the video playing; off, it attaches only what the viewer mines by hand (Alt+Shift+M). The
+  // field names and the clip settings below go to the server inside every /sync.
   autoMine: true,
-  mineFallbackDownload: true,
   ankiUrl: "http://127.0.0.1:8765",
   ankiImageField: "Picture",
   ankiAudioField: "SentenceAudio",

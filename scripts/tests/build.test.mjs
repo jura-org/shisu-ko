@@ -44,7 +44,7 @@ test("build emits Firefox and Chrome packages from the same version", () => {
   const chrome = JSON.parse(readFileSync(join(dist, "chrome/manifest.json")));
   assert.equal(firefox.version, chrome.version);
   assert.ok(firefox.browser_specific_settings.gecko);
-  assert.deepEqual(firefox.background.scripts, ["browser-api.js", "settings.js", "match.js", "words.js", "background.js"]);
+  assert.deepEqual(firefox.background.scripts, ["browser-api.js", "settings.js", "words.js", "background.js"]);
   assert.equal(chrome.background.service_worker, "service-worker.js");
   assert.equal(chrome.minimum_chrome_version, "120");
   assert.equal(chrome.browser_specific_settings, undefined);
@@ -58,10 +58,10 @@ test("build emits Firefox and Chrome packages from the same version", () => {
   const server = readFileSync(join(root, "server/server.py"), "utf8");
   assert.equal(server.match(/^VERSION = "([^"]+)"/m)?.[1], firefox.version);
   assert.equal(chrome.icons["128"], "icons/icon-128.png");
-  for (const path of ["background.js", "browser-api.js", "content.js", "match.js", "words.js", "settings.js", "popup.html", "icons/icon.svg"]) {
+  for (const path of ["background.js", "browser-api.js", "content.js", "words.js", "settings.js", "popup.html", "icons/icon.svg"]) {
     assert.deepEqual(readFileSync(join(dist, "firefox", path)), readFileSync(join(dist, "chrome", path)), path);
   }
-  assert.equal(readFileSync(join(dist, "chrome/service-worker.js"), "utf8"), "importScripts(\"browser-api.js\", \"settings.js\", \"match.js\", \"words.js\", \"background.js\");\n");
+  assert.equal(readFileSync(join(dist, "chrome/service-worker.js"), "utf8"), "importScripts(\"browser-api.js\", \"settings.js\", \"words.js\", \"background.js\");\n");
   });
 });
 
@@ -94,10 +94,11 @@ test("the Chrome package is one the Chrome Web Store takes at upload", async () 
 
 // The permissions are pinned. A new permission or host permission sends a release to the Chrome
 // Web Store's manual review, as "alarms" held 0.21.0 there, so the owner's rule is: never add one,
-// and remove one that falls out of use. These are the 0.19.1 lists. A change to them must be a
+// and remove one that falls out of use. These are the 0.19.1 lists less `downloads`, which went in
+// 0.22.0 with the Downloads fallback when mining moved to the server. A change to them must be a
 // deliberate edit of this allowlist, never a side effect of a feature.
 const ALLOWED_PERMISSIONS = Object.freeze({
-  permissions: ["storage", "downloads", "tabs", "notifications"],
+  permissions: ["storage", "tabs", "notifications"],
   optional_permissions: ["nativeMessaging"],
   host_permissions: ["*://www.youtube.com/*", "*://m.youtube.com/*", "*://youtube.com/*", "http://127.0.0.1/*", "http://localhost/*"],
   optional_host_permissions: undefined,

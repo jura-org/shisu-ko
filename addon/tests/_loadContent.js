@@ -11,18 +11,17 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const SETTINGS_PATH = path.join(__dirname, "..", "settings.js");
-const MATCH_PATH = path.join(__dirname, "..", "match.js");
 const WORDS_PATH = path.join(__dirname, "..", "words.js");
 const SOURCE_PATH = path.join(__dirname, "..", "content.js");
 
 const OPEN = "(() => {";
 const CLOSE = "})();";
 const EXPORTS =
-  "  return { state, shouldSync, coveredRange, coveredEnd, findActiveCue, jumpTarget, sentenceForCue, nextSentence, rankOfCue," +
-  " premineAllowed, premineNow, captureHoverFrame, autoAnkiMining, resetPremine, getVideoIdFromUrl, mergeCues, cueById, ankiPollAllowed," +
+  "  return { state, shouldSync, coveredRange, coveredEnd, findActiveCue, jumpTarget, ankiForSync, takeMined, pendingMine," +
+  " getVideoIdFromUrl, mergeCues, cueById," +
   " currentCueForMining, liveClock, updateLiveClock, playhead, seekPlayhead, onKeyDown, onMineClick, onTranscriptClick, onSubtitleEnter," +
   " onSubtitleLeave, onPlayerMouseMove, onPlayerMouseLeave, modelForSync, fontStack, sync, onVideoChanged, setSubtitle, updateStatus, statusText, isShortsUrl," +
-  " startTimeFromUrl, findPlayer, discover, pollForNewCard, autoMine, onTranscriptLineEnter, onTranscriptLineLeave," +
+  " startTimeFromUrl, findPlayer, discover, mineCurrent," +
   " renderText, refreshWordMarks, pollWordIndex, wordColoursOn, syncTick, transcriptLine, mineCue," +
   " knownList, rebuildWordIndex, segmentAt, entryWordFor, knownTarget, markKnown," +
   " dockLayout, dockTargets, nearestDock, placeSubtitle, isPageElement };\n";
@@ -194,7 +193,6 @@ function loadContent(overrides = {}) {
 
   vm.createContext(sandbox);
   new vm.Script(fs.readFileSync(SETTINGS_PATH, "utf8"), { filename: SETTINGS_PATH }).runInContext(sandbox);
-  new vm.Script(fs.readFileSync(MATCH_PATH, "utf8"), { filename: MATCH_PATH }).runInContext(sandbox);
   new vm.Script(writableWords(fs.readFileSync(WORDS_PATH, "utf8")), { filename: WORDS_PATH }).runInContext(sandbox);
   new vm.Script(instrument(fs.readFileSync(SOURCE_PATH, "utf8")), { filename: SOURCE_PATH }).runInContext(sandbox);
 

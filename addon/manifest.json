@@ -17,7 +17,6 @@
   },
   "permissions": [
     "storage",
-    "downloads",
     "tabs",
     "notifications"
   ],
@@ -35,7 +34,6 @@
     "scripts": [
       "browser-api.js",
       "settings.js",
-      "match.js",
       "words.js",
       "background.js"
     ]
@@ -50,7 +48,6 @@
       "js": [
         "browser-api.js",
         "settings.js",
-        "match.js",
         "words.js",
         "content.js"
       ],
@@ -92,7 +89,7 @@
       "suggested_key": {
         "default": "Alt+Shift+M"
       },
-      "description": "Mine the current subtitle: screenshot and audio clip to Anki or Downloads"
+      "description": "Mine the current subtitle into the newest Anki card (the server adds audio and picture)"
     },
     "mark-known": {
       "suggested_key": {

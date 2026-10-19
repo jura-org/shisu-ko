@@ -28,7 +28,6 @@ function loadChrome() {
     }, onChanged: {} },
     tabs: { query(q, callback) { callback([{ id: 7, q }]); }, reload(id, callback) { callback(); }, sendMessage(id, msg, callback) { callback({ id, msg }); } },
     permissions: { contains(_, callback) { callback(true); }, request(_, callback) { callback(false); } },
-    downloads: { download(_, callback) { callback(12); }, onChanged: {} },
     commands: { onCommand: {} },
   };
   const sandbox = { chrome, console, Promise, globalThis: null };
@@ -51,14 +50,12 @@ test("content-script Chrome namespace does not assume privileged APIs exist", ()
   const { chrome } = loadChrome();
   delete chrome.tabs;
   delete chrome.permissions;
-  delete chrome.downloads;
   delete chrome.commands;
   const sandbox = { chrome, console, Promise, globalThis: null };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   assert.doesNotThrow(() => new vm.Script(source).runInContext(sandbox));
   assert.equal(sandbox.browser.tabs, undefined);
-  assert.equal(sandbox.browser.downloads, undefined);
 });
 
 test("Chrome browser alias is bridged even when it is already present", async () => {
@@ -77,7 +74,8 @@ test("Chrome callback APIs become promises", async () => {
   assert.deepEqual(await browser.runtime.sendMessage({ type: "ping" }), { echoed: { type: "ping" } });
   assert.deepEqual(await browser.tabs.query({ active: true }), [{ id: 7, q: { active: true } }]);
   assert.equal(await browser.permissions.contains({ origins: ["*"] }), true);
-  assert.equal(await browser.downloads.download({ url: "data:x" }), 12);
+  // 0.22.0 dropped `downloads` with the Downloads fallback: nothing bridges it any more.
+  assert.equal(browser.downloads, undefined);
 });
 
 test("Chrome storage.session is bridged like storage.local, and only where it exists", async () => {

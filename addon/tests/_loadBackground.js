@@ -11,7 +11,6 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const SETTINGS_PATH = path.join(__dirname, "..", "settings.js");
-const MATCH_PATH = path.join(__dirname, "..", "match.js");
 const WORDS_PATH = path.join(__dirname, "..", "words.js");
 const SOURCE_PATH = path.join(__dirname, "..", "background.js");
 
@@ -86,14 +85,6 @@ function loadBackground(overrides = {}) {
     setTimeout: overrides.setTimeout || setTimeout,
     clearTimeout,
     AbortController,
-    Uint8Array,
-    btoa,
-    atob: (b64) => Buffer.from(b64, "base64").toString("binary"),
-    Blob,
-    URL: {
-      createObjectURL: overrides.createObjectURL || (() => "blob:moz-extension://test/" + Math.random().toString(16).slice(2)),
-      revokeObjectURL: overrides.revokeObjectURL || (() => {}),
-    },
     fetch: overrides.fetch || (async () => {
       throw new Error("fetch() was not mocked for this test");
     }),
@@ -102,10 +93,6 @@ function loadBackground(overrides = {}) {
         local: notifyingStorage(storage, listeners),
         session,
         onChanged: { addListener: (fn) => listeners.onChanged.push(fn) },
-      },
-      downloads: {
-        download: overrides.download || (async () => 1),
-        onChanged: { addListener: () => {}, removeListener: () => {} },
       },
       runtime: {
         getURL: (path = "") => (overrides.runtimeURL || "moz-extension://test/") + path,
@@ -141,9 +128,7 @@ function loadBackground(overrides = {}) {
   // settings.js defines SHISUKO_DEFAULT_SETTINGS in the shared global lexical scope, exactly as the
   // manifest loads it before background.js in Firefox.
   new vm.Script(fs.readFileSync(SETTINGS_PATH, "utf8"), { filename: SETTINGS_PATH }).runInContext(sandbox);
-  // match.js sits between them in the manifest too: background.js reads SHISUKO_MATCH at load time.
-  new vm.Script(fs.readFileSync(MATCH_PATH, "utf8"), { filename: MATCH_PATH }).runInContext(sandbox);
-  // words.js follows match.js in the manifest: the deck index reads notes through SHISUKO_WORDS.
+  // words.js sits between them in the manifest too: the deck index reads notes through SHISUKO_WORDS.
   new vm.Script(fs.readFileSync(WORDS_PATH, "utf8"), { filename: WORDS_PATH }).runInContext(sandbox);
   new vm.Script(source, { filename: SOURCE_PATH }).runInContext(sandbox);
   // Top-level `const`/`let` (DEFAULT_SETTINGS, REQUEST_TIMEOUT_MS, sleep) live in the global
@@ -156,20 +141,17 @@ function loadBackground(overrides = {}) {
       " globalThis.START_WINDOW_MS = START_WINDOW_MS;" +
       " globalThis.GITHUB_LATEST_URL = GITHUB_LATEST_URL; globalThis.UPDATE_CHECK_MAX_AGE_MS = UPDATE_CHECK_MAX_AGE_MS;" +
       " globalThis.UPDATE_WINDOW_MS = UPDATE_WINDOW_MS; globalThis.UPDATE_POLL_MS = UPDATE_POLL_MS;" +
-      " globalThis.ANKI_PERMISSION_RECHECK_MS = ANKI_PERMISSION_RECHECK_MS; globalThis.ANKI_REPORT_WINDOW_MS = ANKI_REPORT_WINDOW_MS;" +
-      " globalThis.CLIP_TIMEOUT_MS = CLIP_TIMEOUT_MS; globalThis.ANKI_REQUEST_TIMEOUT_MS = ANKI_REQUEST_TIMEOUT_MS;" +
-      " globalThis.ANKI_PERMISSION_TIMEOUT_MS = ANKI_PERMISSION_TIMEOUT_MS; globalThis.ANKI_PERMISSION_RETRY_MS = ANKI_PERMISSION_RETRY_MS;" +
-      " globalThis.ANKI_REPORT_MIN_CHARS = ANKI_REPORT_MIN_CHARS;" +
+      " globalThis.ANKI_PERMISSION_RECHECK_MS = ANKI_PERMISSION_RECHECK_MS;" +
       " globalThis.CARD_STATUS_TTL_MS = CARD_STATUS_TTL_MS; globalThis.DECK_SEEN_KEY = DECK_SEEN_KEY;" +
       " globalThis.DECK_NOTES_KEY = DECK_NOTES_KEY; globalThis.DECK_NOTES_FORMAT = DECK_NOTES_FORMAT;" +
-      " globalThis.ankiWatch = ankiWatch; globalThis.premined = premined;" +
+      " globalThis.ankiWatch = ankiWatch;" +
       " globalThis.HOLD_TIMEOUT_MS = HOLD_TIMEOUT_MS; globalThis.FOCUS_STALE_MS = FOCUS_STALE_MS;" +
       " globalThis.syncers = syncers; globalThis.activeTabs = activeTabs;",
     { filename: SOURCE_PATH }
   ).runInContext(sandbox);
 
   // Firefox hands every listener the sender as the second argument; the tab id in it is what
-  // tells the pre-mine store whose material this is.
+  // the sync election goes by.
   function dispatch(msg, tabId) {
     const sender = tabId === undefined ? {} : { tab: { id: tabId } };
     for (const fn of listeners.onMessage) {

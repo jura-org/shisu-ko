@@ -228,110 +228,6 @@ test("jumpTarget past the covered end still replays the line just heard: the ser
   assert.equal(api.jumpTarget(cues, 1012, -1, [[0, 1000], [1020, 1100]]), 994.85); // a range ahead changes nothing
 });
 
-// ------------------------------------------------------------------ Anki polling
-
-test("ankiPollAllowed polls a playing video and stops on a hidden tab", () => {
-  const { api, sandbox } = loadContent();
-  api.mergeCues([{ id: 0, start: 0, end: 2, text: "いち" }]);
-  api.state.videoId = "abcdef1234";
-  assert.equal(api.ankiPollAllowed(), true);
-  sandbox.document.visibilityState = "hidden";
-  assert.equal(api.ankiPollAllowed(), false);
-});
-
-test("ankiPollAllowed gives up on a video left paused, and resumes for a reader", () => {
-  const { api } = loadContent();
-  api.mergeCues([{ id: 0, start: 0, end: 2, text: "いち" }]);
-  api.state.videoId = "abcdef1234";
-  api.state.pausedSince = Date.now() - 10_000;
-  assert.equal(api.ankiPollAllowed(), true); // ten seconds: the viewer is probably still looking
-  api.state.pausedSince = Date.now() - 180_000;
-  assert.equal(api.ankiPollAllowed(), false);
-  api.state.hoverPaused = true; // the pointer is on the subtitle: a lookup is in progress
-  api.state.hoverSeenAt = Date.now() - 10_000;
-  api.state.lastAnkiPollAt = Date.now() - 300;
-  assert.equal(api.ankiPollAllowed(), true);
-  // The pointer has not been seen for as long: the slow cadence, not the hover rate (the viewer
-  // may still be reading the popup, whose pointer the page never sees).
-  api.state.hoverSeenAt = Date.now() - 180_000;
-  assert.equal(api.ankiPollAllowed(), false);
-  api.state.lastAnkiPollAt = Date.now() - 5000;
-  assert.equal(api.ankiPollAllowed(), true);
-});
-
-test("a hover pause whose pointer left for good drops to the slow cadence after two minutes", () => {
-  const { api } = loadContent();
-  api.mergeCues([{ id: 0, start: 0, end: 2, text: "いち" }]);
-  api.state.videoId = "abcdef1234";
-  api.state.video = { currentTime: 1, paused: false, ended: false, pause() { this.paused = true; }, play: async () => {} };
-  api.onSubtitleEnter({ isTrusted: true }); // pauses the video
-  assert.equal(api.state.hoverPaused, true);
-  api.onSubtitleLeave({ isTrusted: true, relatedTarget: null }); // off to the popup, or the sidebar
-  assert.equal(api.state.awaitingPlayerMove, true);
-  api.state.lastAnkiPollAt = Date.now() - 300;
-  assert.equal(api.ankiPollAllowed(), true); // the hover rate
-  // Three hours later the flags still stand (nothing but the pointer clears them), and the poll
-  // used to be allowed at that rate for all of them: four AnkiConnect requests a second from a tab
-  // nobody reads. One every PAUSE_POLL_SLOW_MS now: the viewer may still be reading the popup.
-  api.state.pausedSince -= 3 * 3600_000;
-  api.state.hoverSeenAt -= 3 * 3600_000;
-  assert.equal(api.state.hoverPaused && api.state.awaitingPlayerMove, true);
-  assert.equal(api.ankiPollAllowed(), false);
-  api.state.lastAnkiPollAt = Date.now() - 5000;
-  assert.equal(api.ankiPollAllowed(), true);
-  // The pointer back over the player is the viewer back, at the hover rate.
-  api.onPlayerMouseMove({ clientX: 1, clientY: 1, target: {} });
-  api.state.lastAnkiPollAt = Date.now() - 300;
-  assert.equal(api.ankiPollAllowed(), true);
-  api.state.hoverSeenAt -= 3 * 3600_000;
-  assert.equal(api.ankiPollAllowed(), false);
-  api.onSubtitleEnter({ isTrusted: true });
-  assert.equal(api.ankiPollAllowed(), true);
-});
-
-test("a reader still in the dictionary popup after two minutes is polled for every few seconds, under the background's ten", async () => {
-  const { api, sent } = loadContent();
-  await settled();
-  api.mergeCues([{ id: 0, start: 0, end: 2, text: "いち" }]);
-  api.state.videoId = "abcdef1234";
-  api.state.video = { currentTime: 1, paused: false, ended: false, pause() { this.paused = true; }, play: async () => {} };
-  api.onSubtitleEnter({ isTrusted: true });
-  api.onSubtitleLeave({ isTrusted: true, relatedTarget: { tagName: "IFRAME" } }); // into Yomitan's popup
-  assert.equal(api.state.awaitingPlayerMove, true);
-  // The popup is an iframe: the page sees no pointer event while the viewer reads a long entry.
-  api.state.hoverSeenAt -= 150_000;
-  api.state.pausedSince -= 150_000;
-  const polls = () => sent.filter((m) => m.type === "ankiPoll").length;
-  await api.pollForNewCard();
-  assert.equal(polls(), 1); // used to be none: the card made now met a baseline the background no longer trusted
-  await api.pollForNewCard();
-  assert.equal(polls(), 1); // not the hover rate
-  api.state.lastAnkiPollAt -= 5000;
-  await api.pollForNewCard();
-  assert.equal(polls(), 2);
-  // The cadence stays under the background's ANKI_BASELINE_MAX_AGE_MS: a longer gap makes the
-  // poll after it move the baseline past the card instead of reporting it.
-  assert.ok(constant("content.js", "PAUSE_POLL_SLOW_MS") < constant("background.js", "ANKI_BASELINE_MAX_AGE_MS"));
-});
-
-test("ankiPollAllowed stays quiet with nothing to attach or the feature off", () => {
-  const { api } = loadContent();
-  api.state.videoId = "abcdef1234";
-  assert.equal(api.ankiPollAllowed(), false); // no cues yet
-  api.mergeCues([{ id: 0, start: 0, end: 2, text: "いち" }]);
-  assert.equal(api.ankiPollAllowed(), true);
-  api.state.settings.autoMine = false;
-  assert.equal(api.ankiPollAllowed(), false);
-  api.state.settings.autoMine = true;
-  api.state.offline = true;
-  assert.equal(api.ankiPollAllowed(), false);
-  api.state.offline = false;
-  api.state.settings.mineTarget = "download"; // nothing is mined by itself there: no message a second
-  assert.equal(api.ankiPollAllowed(), false);
-  api.state.settings.mineTarget = "anki";
-  assert.equal(api.ankiPollAllowed(), true);
-});
-
 // ------------------------------------------------------------------ live streams
 
 // A player element the way Firefox shows it to a content script: the page's API sits behind
@@ -434,88 +330,6 @@ test("Left with no cues, or off a watch page, leaves YouTube's five second seek 
   assert.equal(api.state.video.currentTime, 300);
 });
 
-// ------------------------------------------------------------------ sentences
-
-// Four cues: two of one segment a fifth of a second apart, that segment again after 13 s of
-// music, then another segment. The first two are the shape that used to fuse into one card.
-const SENTENCE_CUES = [
-  { id: 0, seg: 7, start: 0, end: 1, text: "あ" },
-  { id: 1, seg: 7, start: 1.2, end: 2, text: "い" },
-  { id: 2, seg: 7, start: 15, end: 16, text: "う" },
-  { id: 3, seg: 8, start: 16.1, end: 17, text: "え" },
-];
-
-test("sentenceForCue is the line on screen, never the Whisper segment around it", () => {
-  const { api } = loadContent();
-  const sentenceForCue = api.sentenceForCue;
-  // Cues 0 and 1 are one segment 0.2 s apart: a card mined off either used to get both, and a
-  // clip of 0 -> 2. Whisper's segment is not a sentence, so neither reaches past its own line.
-  assert.deepEqual(plain(sentenceForCue(SENTENCE_CUES[0])), { start: 0, end: 1, text: "あ", cueIds: [0] });
-  assert.deepEqual(plain(sentenceForCue(SENTENCE_CUES[1])), { start: 1.2, end: 2, text: "い", cueIds: [1] });
-  assert.deepEqual(plain(sentenceForCue(SENTENCE_CUES[3])), { start: 16.1, end: 17, text: "え", cueIds: [3] });
-  assert.equal(sentenceForCue(null), null);
-});
-
-test("nextSentence steps to the cue after the one it is given", () => {
-  const { api } = loadContent();
-  const first = api.sentenceForCue(SENTENCE_CUES[0]);
-  assert.deepEqual(plain(api.nextSentence(SENTENCE_CUES, first)), { start: 1.2, end: 2, text: "い", cueIds: [1] });
-  const third = api.sentenceForCue(SENTENCE_CUES[2]);
-  assert.deepEqual(plain(api.nextSentence(SENTENCE_CUES, third)), { start: 16.1, end: 17, text: "え", cueIds: [3] });
-  // Nothing after the last one, and nothing to step from without cue ids.
-  const last = api.sentenceForCue(SENTENCE_CUES[3]);
-  assert.equal(api.nextSentence(SENTENCE_CUES, last), null);
-  assert.equal(api.nextSentence(SENTENCE_CUES, null), null);
-  assert.equal(api.nextSentence(SENTENCE_CUES, { start: 0, end: 1, text: "x", cueIds: [99] }), null);
-});
-
-// ------------------------------------------------------------------ pre-mining
-
-test("rankOfCue prefers the sentences the background is already holding, newest first", () => {
-  const { api } = loadContent();
-  const held = [
-    { key: 4, cueIds: [4, 5], image: true, audio: true },
-    { key: 2, cueIds: [2], image: true, audio: false },
-  ];
-  assert.equal(api.rankOfCue(held, { id: 5 }), 0);
-  assert.equal(api.rankOfCue(held, { id: 2 }), 1);
-  assert.equal(api.rankOfCue(held, { id: 9 }), Infinity);
-  assert.equal(api.rankOfCue([], { id: 4 }), Infinity);
-});
-
-test("resetPremine tells the background only when the tab holds something, or has asked for it", async () => {
-  const { api, sent } = loadContent();
-  const before = sent.length;
-  api.resetPremine();
-  await settled();
-  assert.equal(sent.length, before, "nothing held, nothing to drop");
-  api.state.premined = [{ key: 4, cueIds: [4], image: true, audio: true }];
-  api.resetPremine();
-  await settled();
-  assert.equal(sent[sent.length - 1].type, "premineReset");
-  assert.deepEqual(plain(api.state.premined), []);
-  // A premine still out will file its sentence after this: the reset must go out behind it.
-  api.state.premineInFlight = 1;
-  api.resetPremine();
-  await settled();
-  assert.equal(sent.filter((m) => m.type === "premineReset").length, 2);
-});
-
-test("premineAllowed stops on a hidden tab, an offline server and the master switch", () => {
-  const { api, sandbox } = loadContent();
-  api.state.videoId = "abcdef1234";
-  api.state.video = { currentTime: 0, paused: false };
-  assert.equal(api.premineAllowed(), true);
-  sandbox.document.visibilityState = "hidden";
-  assert.equal(api.premineAllowed(), false);
-  sandbox.document.visibilityState = "visible";
-  api.state.offline = true;
-  assert.equal(api.premineAllowed(), false);
-  api.state.offline = false;
-  api.state.settings.enabled = false;
-  assert.equal(api.premineAllowed(), false);
-});
-
 // ------------------------------------------------------------------ model setting
 
 test("modelForSync sends the trimmed model name and nothing for the server default", () => {
@@ -600,7 +414,6 @@ test("sync starts over on a new session token, so the new session's cue ids neve
   assert.equal(bodies[0].since, 0);
   assert.equal(api.cueById(0).text, "旧一");
   api.state.activeCueId = 2;
-  api.state.premined = [{ key: 2, cueIds: [2], image: true }];
 
   await api.sync();
   assert.equal(bodies[1].since, 3);
@@ -611,8 +424,6 @@ test("sync starts over on a new session token, so the new session's cue ids neve
   assert.equal(api.state.since, 0);
   assert.deepEqual(plain(api.state.covered), []);
   assert.equal(api.state.activeCueId, null);
-  assert.deepEqual(plain(api.state.premined), []); // keyed by a cue id of the old session
-  assert.ok(sent.some((m) => m.type === "premineReset"), "the background drops the held sentence too");
   assert.equal(api.state.modelLoading, "large-v3");
   assert.equal(api.state.serverStatus, "pending");
 
@@ -1639,18 +1450,17 @@ test("an answer to an ask from before a deck change is thrown away, and the new 
   assert.equal(asks[1].since, 0);
 });
 
-test("a mined card makes the next ask go out soon, not at the interval", async () => {
+test("a note the server mined makes the next ask go out soon, not at the interval", async () => {
   const { api, sandbox } = loadContent();
   await settled();
   watching(api);
   api.state.settings.cardStatus = true;
-  api.mergeCues([{ id: 0, start: 0, end: 2, text: LINE }]);
   let clock = Date.now();
   sandbox.Date = { now: () => clock };
   const asks = [];
-  let mined = { ok: true, target: "anki", noteId: 1, message: "Added Picture to the newest Anki card" };
+  const told = [];
   sandbox.browser.runtime.sendMessage = async (msg) => {
-    if (msg.type === "mine") return mined;
+    if (msg.type === "minedNote") told.push(msg.noteId);
     if (msg.type !== "cardStatus") return { ok: true };
     asks.push(msg);
     return { ok: true, unchanged: true };
@@ -1658,20 +1468,21 @@ test("a mined card makes the next ask go out soon, not at the interval", async (
   await api.pollWordIndex();
   assert.equal(asks.length, 1);
   clock += 1000;
-  await api.mineCue(api.cueById(0), { auto: true, noteId: 1 });
+  api.takeMined({ mined: [{ seq: 0, nonce: null, ok: true, status: "attached", message: "Added Picture to the new Anki card", note: 17 }], mined_next: 1 });
+  assert.deepEqual(told, [17], "the background learns the note, for its deck");
   await api.pollWordIndex();
   assert.equal(asks.length, 1); // Anki has yet to tell the background the card's deck
   clock += 1500;
   await api.pollWordIndex();
   assert.equal(asks.length, 2); // asked 2.5 s after the last one, not 30
 
-  // A mine that failed made no card: the interval stands.
-  mined = { ok: false, error: "no card" };
+  // A mine that attached nothing made no card: the interval stands.
   clock += 1000;
-  await api.mineCue(api.cueById(0), { auto: true, noteId: 1 });
+  api.takeMined({ mined: [{ seq: 1, nonce: null, ok: false, status: "error", message: "no card", note: null }], mined_next: 2 });
   clock += 5000;
   await api.pollWordIndex();
   assert.equal(asks.length, 2);
+  assert.deepEqual(told, [17]);
 });
 
 test("the master switch off: syncTick sends nothing, the deck index included", async () => {
@@ -2640,8 +2451,6 @@ test("a standby answer teaches the tab nothing about the server", async () => {
 
   await api.sync();
   assert.equal(api.state.standby, false);
-  assert.equal(api.premineAllowed(), true);
-  assert.equal(api.ankiPollAllowed(), true);
   const before = {
     cues: plain(api.state.cues),
     since: api.state.since,
@@ -2663,8 +2472,6 @@ test("a standby answer teaches the tab nothing about the server", async () => {
   assert.equal(api.state.offline, false, "nothing was learned about the server either way");
   assert.equal(api.state.serverError, null);
   // A tab that may not sync must not fetch clips or poll Anki against a server it never reached.
-  assert.equal(api.premineAllowed(), false);
-  assert.equal(api.ankiPollAllowed(), false);
   // Paused, it falls back to the idle heartbeat instead of asking every tick; playing, it keeps
   // asking, which is what makes taking the right back immediate.
   const st = { paused: true, t: 10, status: api.state.serverStatus, covered: api.state.covered, duration: 1200, lastSyncAt: NOW, standby: true };
@@ -2677,8 +2484,6 @@ test("a standby answer teaches the tab nothing about the server", async () => {
   assert.equal(api.state.standby, false);
   assert.equal(api.cueById(2).text, "三");
   assert.equal(api.state.since, 3);
-  assert.equal(api.premineAllowed(), true);
-  assert.equal(api.ankiPollAllowed(), true);
 });
 
 test("a request refused after standby clears the flag: the tab holds the right again, and the error shows", async () => {
@@ -2714,8 +2519,6 @@ test("a request refused after standby clears the flag: the tab holds the right a
     assert.equal(api.state.offline, false, `round ${round}`);
     assert.equal(el.textContent, "Shisu-ko: cache is broken", `round ${round}`);
     assert.ok(el.classes.has("shisuko-status-error"), `round ${round}`);
-    assert.equal(api.premineAllowed(), true, `round ${round}`);
-    assert.equal(api.ankiPollAllowed(), true, `round ${round}`);
     const st = { paused: true, t: 10, status: api.state.serverStatus, covered: api.state.covered, duration: 1200, lastSyncAt: NOW, standby: api.state.standby };
     assert.equal(api.shouldSync(st, NOW + 1000), true, "an error is watched every tick, paused or not");
   }
@@ -2808,12 +2611,12 @@ test("the master switch stops the mine, transcript and known-word commands, and 
   api.mergeCues([{ id: 0, start: 4, end: 7, text: "これはテスト字幕です" }]);
   api.state.videoId = "abcdef1234";
   api.state.video = { currentTime: 5, paused: false };
-  const mines = () => sent.filter((m) => m.type === "mine");
+  const mines = () => sent.filter((m) => m.type === "api" && m.body && m.body.mine);
   const saves = () => sent.filter((m) => m.type === "saveSettings").map((m) => plain(m.settings));
 
   api.state.settings.enabled = false; // the cues outlive the switch, as they do in the page
   onCommand({ type: "command", name: "mine-current" });
-  assert.equal(mines().length, 0); // used to capture a frame and write the newest card
+  assert.equal(mines().length, 0); // used to ask the server to write the newest card
   onCommand({ type: "command", name: "toggle-transcript" });
   assert.deepEqual(saves(), []);
   sandbox.document.getSelection = () => ({ isCollapsed: false, rangeCount: 1, getRangeAt: () => ({ commonAncestorContainer: api.state.subBox }), toString: () => "字幕" });
@@ -2825,8 +2628,7 @@ test("the master switch stops the mine, transcript and known-word commands, and 
   api.state.settings.enabled = true;
   onCommand({ type: "command", name: "mine-current" });
   assert.equal(mines().length, 1);
-  assert.equal(mines()[0].cue.text, "これはテスト字幕です");
-  assert.equal(mines()[0].auto, false);
+  assert.equal(mines()[0].body.mine.cue_id, 0);
   onCommand({ type: "command", name: "toggle-transcript" });
   assert.deepEqual(saves()[1], { showTranscript: true });
   onCommand({ type: "command", name: "mark-known" });
@@ -2912,8 +2714,6 @@ test("an error answered by a running server is not 'offline', and keeps the serv
     assert.equal(api.state.serverError, error);
     assert.equal(el.textContent, `Shisu-ko: ${error}`); // used to say the server was offline
     assert.ok(el.classes.has("shisuko-status-error"));
-    assert.equal(api.premineAllowed(), true, error); // mining goes on: /clip is another handler
-    assert.equal(api.ankiPollAllowed(), true, error);
   }
   // Unreachable is still offline, with the fixed hint.
   const { api, sandbox } = loadContent();
@@ -2927,7 +2727,6 @@ test("an error answered by a running server is not 'offline', and keeps the serv
   assert.equal(api.state.offline, true);
   assert.equal(api.state.serverStatus, "offline");
   assert.equal(el.textContent, "Shisu-ko server offline. Start it with server/run.cmd or docker/up.cmd");
-  assert.equal(api.premineAllowed(), false);
 });
 
 test("the background gone, or something not ours on the port, is 'offline', not a refusal by the server", async () => {
@@ -2950,8 +2749,6 @@ test("the background gone, or something not ours on the port, is 'offline', not 
     assert.equal(api.state.offline, true, name); // used to show the exception's text as the server's verdict
     assert.equal(api.state.serverStatus, "offline", name);
     assert.equal(el.textContent, "Shisu-ko server offline. Start it with server/run.cmd or docker/up.cmd", name);
-    assert.equal(api.premineAllowed(), false, name); // every other message would fail the same way
-    assert.equal(api.ankiPollAllowed(), false, name);
   }
   // An HTTP error with an empty body (a bare 502 from a proxy) is still an answer from the port:
   // `data` null, not missing.
@@ -3092,80 +2889,35 @@ test("out-of-order cues that arrived while the panel was hidden are inserted onc
   assert.deepEqual(ids(), [0, 3, 1, 2, 4]);
 });
 
-// ------------------------------------------------------------------ pre-mining frames
-
-// A tab with a line on screen, ready to be prepared; the frame read is counted through the canvas.
-async function premining(settings) {
-  const loaded = loadContent();
-  await settled();
-  const { api, sandbox, sent } = loaded;
-  const timers = [];
-  sandbox.setTimeout = (fn) => timers.push(fn);
-  let canvases = 0;
-  const create = sandbox.document.createElement;
-  sandbox.document.createElement = (tag) => {
-    if (tag === "canvas") canvases++;
-    return create(tag);
-  };
-  Object.assign(api.state.settings, settings);
-  api.state.videoId = "abcdef1234";
-  api.state.video = { currentTime: 0.5, paused: false, videoWidth: 1920, videoHeight: 1080 };
-  api.mergeCues([at(0, 0), at(1, 3)]);
-  api.state.activeCueId = 0;
-  const premines = () => sent.filter((m) => m.type === "premine");
-  return { api, timers, premines, canvases: () => canvases };
-}
-
-test("pre-mining reads no frame back unless automatic Anki mining can use it; the clip is still prepared", async () => {
-  for (const settings of [{ autoMine: false }, { mineTarget: "download" }, { autoMine: false, mineTarget: "download" }]) {
-    const { api, timers, premines, canvases } = await premining(settings);
-    assert.equal(api.autoAnkiMining(), false);
-    assert.equal(api.premineAllowed(), true);
-    await api.premineNow(0);
-    assert.equal(canvases(), 0, JSON.stringify(settings)); // used to read the GPU back and ship 200 KB per line
-    assert.equal(premines().length, 2);
-    assert.ok(!("imageDataUrl" in premines()[0]), JSON.stringify(settings));
-    assert.equal(premines()[0].key, 0); // this sentence's clip
-    assert.equal(premines()[1].key, 1); // and the next one's
-    assert.equal(premines()[1].ahead, true);
-    api.captureHoverFrame();
-    assert.equal(timers.length, 0); // a hover reads nothing back either
-  }
-  const { api, timers, premines, canvases } = await premining({});
-  assert.equal(api.autoAnkiMining(), true);
-  await api.premineNow(0);
-  assert.equal(canvases(), 1);
-  assert.ok("imageDataUrl" in premines()[0]);
-  api.captureHoverFrame();
-  assert.equal(timers.length, 1);
-});
-
 // ------------------------------------------------------------------ synthetic events
 
 test("a click or hover the viewer did not make (isTrusted false) mines, seeks and pauses nothing", () => {
   const { api, sent } = loadContent();
   api.mergeCues([{ id: 0, start: 4, end: 7, text: "これはテスト字幕です" }]);
   api.state.videoId = "abcdef1234";
-  api.state.activeCueId = 0; // the line on screen: mined without a seek, so the message goes out at once
+  api.state.activeCueId = 0;
   let paused = 0;
   api.state.video = { currentTime: 5, paused: false, ended: false, pause: () => { paused++; }, play: async () => {} };
-  const mines = () => sent.filter((m) => m.type === "mine");
+  // A mine is a request the next /sync carries: state.mining holds it until the server answers.
+  const mines = () => sent.filter((m) => m.type === "api" && m.body && m.body.mine);
   const click = (isTrusted, target) => ({ isTrusted, target, preventDefault: () => {}, stopPropagation: () => {} });
 
   api.onMineClick(click(false)); // document.querySelector(".shisuko-mine").click() from a page script
+  assert.equal(api.state.mining, null);
   assert.equal(mines().length, 0);
   api.onMineClick(click(true));
+  assert.equal(api.state.mining.cue_id, 0);
   assert.equal(mines().length, 1);
 
   const line = { dataset: { id: "0", start: "4" } };
   const mineButton = { closest: (sel) => (sel === ".shisuko-line" ? line : null) };
   const target = { closest: (sel) => (sel === ".shisuko-line-mine" ? mineButton : sel === ".shisuko-time" ? { closest: () => line } : null) };
-  api.state.mining = false;
+  api.state.mining = null;
   api.onTranscriptClick(click(false, target));
-  assert.equal(mines().length, 1);
+  assert.equal(api.state.mining, null);
   assert.equal(api.state.video.currentTime, 5);
   api.onTranscriptClick(click(true, target));
-  assert.equal(mines().length, 2);
+  assert.equal(api.state.mining.cue_id, 0);
 
   api.onSubtitleEnter({ isTrusted: false });
   assert.equal(paused, 0);
@@ -3457,356 +3209,6 @@ test("updateStatus shows a session error only as text, capped like the model err
   assert.equal(five.state.statusEl.textContent, "Shisu-ko: error");
 });
 
-// ------------------------------------------------------------------ a video change mid-flight
-
-test("a video change while a frame is read back files nothing under the new video", async () => {
-  const { api, sandbox, sent } = loadContent();
-  await settled();
-  const create = sandbox.document.createElement;
-  sandbox.document.createElement = (tag) => {
-    const el = create(tag);
-    // The viewer clicks the next video while the frame is being encoded.
-    if (tag === "canvas") el.toBlob = (cb) => { api.onVideoChanged("bbbbbbbbbbb"); cb(null); };
-    return el;
-  };
-  api.state.videoId = "aaaaaaaaaaa";
-  api.state.video = { currentTime: 0.5, paused: false, videoWidth: 1920, videoHeight: 1080 };
-  api.mergeCues([at(0, 0), at(1, 3)]);
-  api.state.activeCueId = 0;
-  await api.premineNow(0);
-  await settled();
-  assert.equal(api.state.videoId, "bbbbbbbbbbb");
-  // Used to send { videoId: "bbbbbbbbbbb", key: 0, sentence: c0 at 0-1 s }: the old line under the
-  // new video, keyed like its first line, and its frame on the new video's first card.
-  assert.deepEqual(sent.filter((m) => m.type === "premine"), []);
-});
-
-test("a mine whose seek was overtaken by a change of video sends nothing under the new one", async () => {
-  const { api, sandbox, sent } = loadContent();
-  await settled();
-  const timers = [];
-  sandbox.setTimeout = (fn) => timers.push(fn);
-  const listeners = {};
-  const video = {
-    currentTime: 30, paused: true, videoWidth: 1920, videoHeight: 1080,
-    pause() { this.paused = true; },
-    play: async () => {},
-    addEventListener: (type, fn) => { listeners[type] = fn; },
-    removeEventListener: () => {},
-  };
-  api.state.videoId = "aaaaaaaaaaa";
-  api.state.video = video;
-  api.mergeCues([at(0, 4), at(1, 28)]);
-  api.state.activeCueId = 1; // line 0 is not on screen: mining it seeks back for its frame
-  const line = { dataset: { id: "0", start: "4" } };
-  const mineButton = { closest: (sel) => (sel === ".shisuko-line" ? line : null) };
-  const target = { closest: (sel) => (sel === ".shisuko-line-mine" ? mineButton : null) };
-  api.onTranscriptClick({ isTrusted: true, target, preventDefault: () => {} });
-  assert.equal(video.currentTime, 4.4); // the seek is out
-  assert.equal(api.state.mining, true);
-  api.onVideoChanged("bbbbbbbbbbb"); // the viewer clicked the next video meanwhile; the element stays
-  // The seek lands, then the paint wait; a second round for the restoring seek there used to be.
-  for (let round = 0; round < 2; round++) {
-    listeners.seeked();
-    while (timers.length) timers.shift()();
-    await settled();
-  }
-  assert.equal(api.state.mining, false);
-  // Used to be { videoId: "bbbbbbbbbbb", cue: c0 at 4-5 s }: a clip cut from the new video at the
-  // old line's times. And the old video's position is not restored onto the new one.
-  assert.deepEqual(sent.filter((m) => m.type === "mine"), []);
-  assert.equal(video.currentTime, 4.4);
-});
-
-test("a premine answered after the video changed fills nothing, and the old sentence is dropped behind it", async () => {
-  const { api, sandbox, sent } = loadContent();
-  await settled();
-  let release;
-  const gate = new Promise((resolve) => { release = resolve; });
-  sandbox.browser.runtime.sendMessage = async (msg) => {
-    sent.push(msg);
-    if (msg.type !== "premine") return { ok: true };
-    if (msg.videoId === "A") {
-      await gate; // the background is slow to answer: its settings read went to storage
-      return { ok: true, held: [{ key: 0, cueIds: [0], image: false, audio: true }, { key: 2, cueIds: [2], image: false, audio: true }] };
-    }
-    return { ok: true, held: [{ key: msg.key, cueIds: msg.cueIds, image: false, audio: false }] };
-  };
-  api.state.settings.autoMine = false; // the clip alone: no frame to read back
-  api.state.videoId = "A";
-  api.state.video = { currentTime: 0.5, paused: false };
-  api.mergeCues([at(0, 0), at(1, 3), at(2, 6)]);
-  api.state.activeCueId = 0;
-  const premines = () => sent.filter((m) => m.type === "premine").map((m) => `${m.videoId}:${m.key}`);
-  const first = api.premineNow(0);
-  await settled();
-  assert.deepEqual(premines(), ["A:0"]);
-  api.onVideoChanged("B"); // with A:0 still out
-  assert.deepEqual(plain(api.state.premined), []);
-  release();
-  await first;
-  await settled();
-  // Used to take A's inventory as the tab's: keys 0 and 2, which are B's first lines.
-  assert.deepEqual(plain(api.state.premined), []);
-  // The background files A:0 once its settings read returns, after a reset fired at the change
-  // would have passed: the reset goes out behind the answer instead (and used to not go at all).
-  const reset = sent.findIndex((m) => m.type === "premineReset");
-  assert.ok(reset > sent.findIndex((m) => m.type === "premine"));
-  assert.equal(sent.filter((m) => m.type === "premineReset").length, 1);
-  // B's first line, id 0 again, is prepared like any other instead of counting as A's.
-  api.mergeCues([at(0, 0), at(1, 3)]);
-  api.state.activeCueId = 0;
-  await api.premineNow(0);
-  assert.deepEqual(premines(), ["A:0", "B:0", "B:1"]);
-  assert.deepEqual(plain(api.state.premined.map((e) => e.key)), [1]);
-});
-
-// ------------------------------------------------------------------ the hover frame
-
-test("re-entering the subtitle over the same paused frame reads nothing back and ships nothing again", async () => {
-  const { api, sandbox, sent } = loadContent();
-  await settled();
-  const timers = [];
-  sandbox.setTimeout = (fn) => timers.push(fn);
-  let reads = 0;
-  let canvases = 0;
-  const create = sandbox.document.createElement;
-  sandbox.document.createElement = (tag) => {
-    const el = create(tag);
-    if (tag === "canvas") {
-      canvases++;
-      el.getContext = () => ({ drawImage: () => { reads++; } });
-      el.toBlob = (cb) => cb("ZnJhbWU=");
-    }
-    return el;
-  };
-  sandbox.browser.runtime.sendMessage = async (msg) => {
-    sent.push(msg);
-    if (msg.type !== "premine") return { ok: true };
-    return { ok: true, held: [{ key: msg.key, cueIds: msg.cueIds, image: !!msg.imageDataUrl, audio: false }] };
-  };
-  api.state.videoId = "abcdef1234";
-  const video = { currentTime: 0.5, paused: false, ended: false, videoWidth: 1920, videoHeight: 1080, pause() { this.paused = true; }, play: async () => {} };
-  api.state.video = video;
-  api.mergeCues([at(0, 0), at(1, 3)]);
-  api.state.activeCueId = 0;
-  const hovers = () => sent.filter((m) => m.type === "premine" && m.hover);
-  const flush = async () => {
-    while (timers.length) timers.shift()();
-    await settled();
-    await settled();
-  };
-  api.onSubtitleEnter({ isTrusted: true });
-  assert.equal(video.paused, true);
-  await flush();
-  assert.equal(reads, 1);
-  assert.equal(hovers().length, 1);
-  assert.ok(hovers()[0].imageDataUrl.startsWith("data:image/jpeg;base64,"));
-  // Out to the dictionary popup and back, once per word looked up: the video is paused on the
-  // same frame, and the background holds it already.
-  for (let i = 0; i < 3; i++) {
-    api.onSubtitleLeave({ isTrusted: true, relatedTarget: null });
-    api.onSubtitleEnter({ isTrusted: true });
-    await flush();
-  }
-  assert.equal(reads, 1, "used to read the same frame back on every crossing");
-  assert.equal(hovers().length, 1, "and ship it again");
-  // Another position is another frame, and one canvas serves every read.
-  video.currentTime = 1.2;
-  api.onSubtitleLeave({ isTrusted: true, relatedTarget: null });
-  api.onSubtitleEnter({ isTrusted: true });
-  await flush();
-  assert.equal(reads, 2);
-  assert.equal(hovers().length, 2);
-  assert.equal(canvases, 1);
-});
-
-// ------------------------------------------------------------------ cards from the ledger
-
-// A tab polling for cards: a line on screen, the background's ankiPoll answer scripted, and the
-// toast within reach.
-async function polling(answer) {
-  const loaded = loadContent();
-  await settled(); // discover() has run: it finds no player and would reset what is set up here
-  const { api, sandbox, sent, stubElement } = loaded;
-  sandbox.browser.runtime.sendMessage = async (msg) => {
-    sent.push(msg);
-    return msg.type === "ankiPoll" ? answer() : { ok: true };
-  };
-  api.mergeCues([
-    { id: 0, start: 4, end: 7, text: "これはテスト字幕です" },
-    { id: 1, start: 8, end: 10, text: "別の行が続きます" },
-  ]);
-  api.state.videoId = "abcdef1234";
-  api.state.activeCueId = 0;
-  api.state.video = { currentTime: 5, paused: false, ended: false, pause() {}, play: async () => {} };
-  const toast = stubElement("div");
-  api.state.toastEl = toast;
-  assert.equal(api.ankiPollAllowed(), true);
-  return { api, toast, mines: () => sent.filter((m) => m.type === "mine") };
-}
-
-const NOBODYS = { sentence: "全然違う文章を読んでいます", word: "文章" };
-
-test("a card from the ledger (replayed) is attached to the line it matches, like the tab's own find", async () => {
-  const note = { sentence: "これはテスト字幕です", word: "テスト" };
-  const { api, toast, mines } = await polling(() => ({ ok: true, newNoteId: 41, note, replayed: true }));
-  await api.pollForNewCard();
-  await settled();
-  assert.equal(mines().length, 1);
-  assert.equal(mines()[0].noteId, 41);
-  assert.equal(mines()[0].auto, true);
-  assert.equal(mines()[0].cue.text, "これはテスト字幕です");
-  assert.equal(toast.textContent, "Mined");
-});
-
-test("a replayed card matching no line here is another tab's: no toast, no fallback to the playhead, nothing mined", async () => {
-  const { api, toast, mines } = await polling(() => ({ ok: true, newNoteId: 42, note: NOBODYS, replayed: true }));
-  await api.pollForNewCard();
-  await settled();
-  assert.equal(mines().length, 0);
-  assert.equal(toast.textContent, "");
-  assert.equal(api.state.mining, false);
-  // A replayed card with nothing to match on (the ledger never carries one) is not attached at
-  // the playhead either, as the tab's own would be.
-  api.autoMine(43, { sentence: "", word: "" }, true);
-  await settled();
-  assert.equal(mines().length, 0);
-  assert.equal(toast.textContent, "");
-});
-
-test("the tab's own find (no replayed flag) keeps saying when the card matches no subtitle", async () => {
-  const { api, toast, mines } = await polling(() => ({ ok: true, newNoteId: 44, note: NOBODYS }));
-  await api.pollForNewCard();
-  await settled();
-  assert.equal(mines().length, 0);
-  assert.equal(toast.textContent, "New card's sentence matches no subtitle; nothing attached");
-  assert.ok(toast.className.includes("shisuko-toast-warn"));
-  // And its card with neither sentence nor word still goes to the line at the playhead.
-  api.autoMine(45, { sentence: "", word: "" });
-  await settled();
-  assert.equal(mines().length, 1);
-  assert.equal(mines()[0].noteId, 45);
-  assert.equal(mines()[0].cue.text, "これはテスト字幕です");
-});
-
-// ------------------------------------------------------------------ transcript hover
-
-// A tab with the transcript panel up, every line's listeners within reach, and the timers by
-// hand; the background answers a premine with the hovered sentence in front, as heldFor does.
-async function transcriptHover() {
-  const loaded = loadContent();
-  await settled();
-  const { api, sandbox, sent } = loaded;
-  const create = sandbox.document.createElement;
-  sandbox.document.createElement = (tag) => {
-    const el = create(tag);
-    el.listeners = {};
-    el.addEventListener = (name, fn) => {
-      el.listeners[name] = fn;
-    };
-    return el;
-  };
-  const timers = new Map();
-  let nextTimer = 1;
-  sandbox.setTimeout = (fn) => {
-    timers.set(nextTimer, fn);
-    return nextTimer++;
-  };
-  sandbox.clearTimeout = (id) => {
-    timers.delete(id);
-  };
-  sandbox.browser.runtime.sendMessage = async (msg) => {
-    sent.push(msg);
-    if (msg.type !== "premine") return { ok: true };
-    return { ok: true, held: [{ key: msg.key, cueIds: msg.cueIds, image: false, audio: false }] };
-  };
-  const { list } = panel(loaded);
-  api.state.videoId = "abcdef1234";
-  api.state.video = { currentTime: 0.5, paused: false, videoWidth: 1920, videoHeight: 1080 };
-  api.mergeCues([at(0, 0), { id: 1, start: 3, end: 4, text: "c1", seg: 1 }, { id: 2, start: 4.2, end: 5, text: "c2", seg: 1 }]);
-  api.state.activeCueId = 0;
-  const fire = () => {
-    for (const [id, fn] of [...timers]) {
-      timers.delete(id);
-      fn();
-    }
-  };
-  const enter = (line, isTrusted = true) => line.listeners.mouseenter({ isTrusted, currentTarget: line });
-  const leave = (line, isTrusted = true) => line.listeners.mouseleave({ isTrusted, currentTarget: line });
-  return { api, sent, list, timers, fire, enter, leave, premines: () => sent.filter((m) => m.type === "premine") };
-}
-
-test("a trusted hover on a transcript line ranks its sentence first: a premine with hover set and no frame", async () => {
-  const { api, list, timers, fire, enter, premines } = await transcriptHover();
-  const line = list.children[1]; // cue 1, the first of two cues Whisper put in one segment
-  enter(line);
-  assert.equal(premines().length, 0); // only once the pointer has rested on the line
-  assert.equal(timers.size, 1);
-  fire();
-  await settled();
-  assert.equal(premines().length, 1);
-  const msg = premines()[0];
-  assert.equal(msg.hover, true);
-  assert.ok(!("imageDataUrl" in msg), "the panel is not the video: no frame is read");
-  assert.ok(!msg.ahead);
-  assert.equal(msg.videoId, "abcdef1234");
-  assert.equal(msg.key, 1);
-  // Cue 2 shares cue 1's segment 0.2 s later; the hovered line is still the whole card.
-  assert.deepEqual(plain(msg.cueIds), [1]);
-  assert.deepEqual(plain(msg.sentence), { start: 3, end: 4, text: "c1" });
-  // What the background answered is the order a card is matched by: this line before the playing one.
-  assert.equal(api.rankOfCue(api.state.premined, api.cueById(1)), 0);
-  assert.equal(api.rankOfCue(api.state.premined, api.cueById(2)), Infinity);
-  assert.equal(api.rankOfCue(api.state.premined, api.cueById(0)), Infinity);
-});
-
-test("leaving a transcript line, or a hover the viewer did not make, sends nothing; nor does a switched-off add-on", async () => {
-  const { api, sent, list, timers, fire, enter, leave, premines } = await transcriptHover();
-  const first = list.children[0];
-  const second = list.children[1];
-  // The pointer only crossed the line.
-  enter(first);
-  assert.equal(timers.size, 1);
-  leave(first);
-  assert.equal(timers.size, 0);
-  fire();
-  await settled();
-  assert.equal(premines().length, 0);
-  // On to another line before the wait is out: only the line the pointer rests on is sent.
-  enter(first);
-  enter(second);
-  assert.equal(timers.size, 1);
-  fire();
-  await settled();
-  assert.equal(premines().length, 1);
-  assert.equal(premines()[0].key, 1);
-  // A mouseenter a page script dispatched.
-  enter(second, false);
-  assert.equal(timers.size, 0);
-  // Another video before the wait is out: the line is the old video's.
-  enter(second);
-  api.onVideoChanged("zzzzzz1234");
-  assert.equal(timers.size, 0);
-  await settled(); // the video change drops what the background held for the old one
-  assert.equal(sent[sent.length - 1].type, "premineReset");
-  // The master switch: off at the hover, and off between the hover and its wait.
-  api.mergeCues([at(0, 0), at(1, 3)]);
-  const sentSoFar = sent.length;
-  api.state.settings.enabled = false;
-  assert.equal(api.premineAllowed(), false);
-  enter(list.children[0]);
-  assert.equal(timers.size, 0);
-  api.state.settings.enabled = true;
-  enter(list.children[0]);
-  assert.equal(timers.size, 1);
-  api.state.settings.enabled = false;
-  fire();
-  await settled();
-  assert.equal(sent.length, sentSoFar);
-  assert.equal(premines().length, 1);
-});
-
 // ------------------------------------------------------------------ the subtitle's dock
 
 const PLAYER = { left: 200, top: 60, width: 960, height: 540 };
@@ -4002,4 +3404,126 @@ test("leaving a box outside the player for the page resumes; for a dictionary po
   timers.at(-1)();
   assert.equal(api.state.hoverPaused, false);
   assert.equal(plays, 1);
+});
+
+// ------------------------------------------------------------------ mining through the server
+
+// The server mines (Miner in server.py). The tab sends the popup's Anki settings with every /sync,
+// the viewer's own mine with the next ones until the answer's `mined` log reports it, and toasts
+// what the log says.
+
+test("ankiForSync sends the popup's field names and clip settings, trimmed and clamped", () => {
+  const { api } = loadContent();
+  assert.deepEqual(plain(api.ankiForSync(api.state.settings)), {
+    auto: true, picture: "Picture", audio: "SentenceAudio", sentence: "", word: "", pad_ms: 200, format: "mp3",
+  });
+  const custom = { autoMine: false, ankiImageField: " picture ", ankiAudioField: "sentenceAudio", ankiSentenceField: "Sentence",
+    ankiWordField: "Expression", clipPaddingMs: 99999, clipFormat: "wav" };
+  assert.deepEqual(plain(api.ankiForSync(custom)), {
+    auto: false, picture: "picture", audio: "sentenceAudio", sentence: "Sentence", word: "Expression", pad_ms: 2000, format: "wav",
+  });
+  assert.equal(api.ankiForSync({ clipPaddingMs: "junk", clipFormat: "ogg" }).pad_ms, 0);
+  assert.equal(api.ankiForSync({ clipFormat: "ogg" }).format, "mp3");
+});
+
+test("a mine rides /sync until the log answers it, and the answer is toasted", async () => {
+  const { api, sandbox } = loadContent();
+  await settled();
+  api.state.toastEl = sandbox.document.createElement("div");
+  const bodies = serverAnswering(sandbox, [
+    { status: "ready", session: "s1", cues: [cue(0, "これはテスト字幕です")], next: 1, covered: [[0, 30]], mined: [], mined_next: 4 },
+    { status: "ready", session: "s1", cues: [], next: 1, covered: [[0, 30]], mined: [], mined_next: 4 },
+    { status: "ready", session: "s1", cues: [], next: 1, covered: [[0, 30]], mined: [], mined_next: 4 },
+  ]);
+  api.state.videoId = "abcdef1234";
+  api.state.video = { currentTime: 0.5, paused: true };
+  await api.sync();
+  assert.equal(bodies[0].mined_since, null, "a fresh page asks where the log stands");
+  assert.deepEqual(plain(bodies[0].anki), plain(api.ankiForSync(api.state.settings)));
+  assert.equal("mine" in bodies[0], false);
+  assert.equal(api.state.minedSince, 4);
+
+  api.state.activeCueId = 0;
+  api.mineCurrent(); // Alt+Shift+M: the next /sync goes out at once
+  await settled();
+  const nonce = api.state.mining.nonce;
+  assert.deepEqual(plain(bodies[1].mine), { cue_id: 0, nonce, session: "s1" });
+  assert.equal(bodies[1].mined_since, 4);
+  assert.equal(api.shouldSync(idle(), NOW), false);
+  assert.equal(api.shouldSync(idle({ mining: true, standby: true }), NOW), true, "a pending mine asks every tick");
+  await api.sync(); // no answer for it yet: sent again, under the same nonce
+  assert.equal(bodies[2].mine.nonce, nonce);
+
+  api.takeMined({ mined: [{ seq: 4, nonce, ok: true, status: "attached", message: "Added Picture + SentenceAudio to the newest Anki card", note: 9 }], mined_next: 5 });
+  assert.equal(api.state.mining, null);
+  assert.equal(api.state.minedSince, 5);
+  assert.equal(api.state.toastEl.textContent, "Added Picture + SentenceAudio to the newest Anki card");
+  assert.equal(api.state.toastEl.className, "shisuko-toast shisuko-toast-ok");
+
+  // The viewer's mine that attached nothing says why; another mine's answer is not ours.
+  api.mineCurrent();
+  const second = api.state.mining.nonce;
+  api.takeMined({ mined: [{ seq: 5, nonce: "someone-else", ok: false, status: "no_note", message: "elsewhere", note: null }], mined_next: 6 });
+  assert.equal(api.state.mining.nonce, second);
+  api.takeMined({ mined: [{ seq: 6, nonce: second, ok: false, status: "no_note", message: "No card was added today.", note: null }], mined_next: 7 });
+  assert.equal(api.state.mining, null);
+  assert.equal(api.state.toastEl.textContent, "No card was added today.");
+});
+
+test("a mine is given up when the cues change, the server is gone or it never answers", async () => {
+  const { api, sandbox } = loadContent();
+  await settled();
+  api.state.toastEl = sandbox.document.createElement("div");
+  let clock = Date.now();
+  sandbox.Date = { now: () => clock };
+  api.mergeCues([{ id: 0, start: 4, end: 7, text: "これはテスト字幕です" }]);
+  api.state.videoId = "abcdef1234";
+  api.state.video = { currentTime: 5, paused: true };
+  api.state.activeCueId = 0;
+  api.state.syncInFlight = true; // keep the mine pending: nothing goes out in this test
+  api.mineCurrent();
+  api.state.cueGeneration++;
+  assert.equal(api.pendingMine(), null);
+  assert.equal(api.state.toastEl.textContent, "Nothing mined: the subtitles changed");
+
+  api.mineCurrent();
+  clock += 91000;
+  assert.equal(api.pendingMine(), null);
+  assert.match(api.state.toastEl.textContent, /no answer from the server/);
+
+  api.mineCurrent();
+  api.state.syncInFlight = false;
+  serverAnswering(sandbox, [{ ok: false, offline: true, error: "Server unreachable" }]);
+  await api.sync();
+  assert.equal(api.state.mining, null);
+  assert.equal(api.state.toastEl.textContent, "Mining failed: Server unreachable");
+});
+
+test("a mine with the master switch off, or nothing on screen, asks nothing", () => {
+  const { api } = loadContent();
+  api.mergeCues([{ id: 0, start: 4, end: 7, text: "これはテスト字幕です" }]);
+  api.state.videoId = "abcdef1234";
+  api.state.video = { currentTime: 100, paused: true };
+  api.mineCurrent(); // no line near the playhead
+  assert.equal(api.state.mining, null);
+  api.state.activeCueId = 0;
+  api.state.settings.enabled = false;
+  api.mineCurrent();
+  assert.equal(api.state.mining, null);
+});
+
+test("the server's automatic attaches are toasted when they worked, its refusal of the settings once", () => {
+  const { api, sandbox } = loadContent();
+  api.state.toastEl = sandbox.document.createElement("div");
+  api.takeMined({ mined: [{ seq: 0, nonce: null, ok: false, status: "error", message: "quiet", note: 3 }], mined_next: 1 });
+  assert.equal(api.state.toastEl.textContent, "", "a failed automatic attach is the server log's business");
+  api.takeMined({ mined: [{ seq: 1, nonce: null, ok: true, status: "attached", message: "Added SentenceAudio to the new Anki card", note: 3 }], mined_next: 2 });
+  assert.equal(api.state.toastEl.textContent, "Added SentenceAudio to the new Anki card");
+  api.takeMined({ mined: [], mined_next: 2, anki_error: "anki.picture is not a field name" });
+  assert.equal(api.state.toastEl.textContent, "The server refused the Anki settings: anki.picture is not a field name");
+  api.state.toastEl.textContent = "";
+  api.takeMined({ mined: [], mined_next: 2, anki_error: "anki.picture is not a field name" });
+  assert.equal(api.state.toastEl.textContent, "", "the same refusal is not toasted every second");
+  api.takeMined({ cues: [] }); // an older server: no log at all
+  assert.equal(api.state.minedSince, 2);
 });

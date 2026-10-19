@@ -7,8 +7,6 @@
  */
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import { chromium } from "playwright";
@@ -30,7 +28,6 @@ async function listen(handler) {
   return { server, port: server.address().port };
 }
 
-const clipBytes = Buffer.from("RIFFSMOKE-WAVE-DATA", "ascii");
 const mediaBytes = (() => {
   const sampleRate = 8000;
   const data = Buffer.alloc(44 + sampleRate * 20 * 2);
@@ -44,9 +41,13 @@ const mediaBytes = (() => {
   return data;
 })();
 const mediaDataUrl = `data:audio/wav;base64,${mediaBytes.toString("base64")}`;
-const tinyJpeg = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/AYf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/AYf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Aqf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z";
-const anki = { notes: new Map(), media: [], updates: [], actions: [] };
-const clipRequests = [];
+// The fixture AnkiConnect: the extension may read it (the word colours, the deck a mined note went
+// to) and never write to it. Mining is the server's (Miner in server.py), tested in
+// server/tests/test_mining.py; here the fixture server stands in for it.
+const anki = { actions: [] };
+const ANKI_WRITES = ["updateNoteFields", "storeMediaFile", "addNote", "updateNote", "sync"];
+// The fixture server's mining log, as server.py's /sync answers it: one entry per mine asked for.
+const mining = { bodies: [], log: [] };
 async function requestBody(req) {
   let body = "";
   for await (const chunk of req) body += chunk;
@@ -77,7 +78,15 @@ const api = await listen(async (req, res) => {
     const body = await requestBody(req);
     const id = typeof body.video_id === "string" ? body.video_id : "";
     syncSeen.set(id, (syncSeen.get(id) || 0) + 1);
-    const head = { session: "smoke-session", status: "ready", duration: 3600, covered: [[0, 3600]], next: 1 };
+    mining.bodies.push({ id, anki: body.anki, mine: body.mine, mined_since: body.mined_since });
+    // A mine is answered once per nonce, the way the server dedupes the resends.
+    if (body.mine && !mining.log.some((entry) => entry.nonce === body.mine.nonce)) {
+      mining.log.push({ seq: mining.log.length, nonce: body.mine.nonce, ok: true, status: "attached", note: 404,
+        message: "Added Picture + SentenceAudio to the newest Anki card" });
+    }
+    const since = typeof body.mined_since === "number" ? body.mined_since : null;
+    const minedLog = { mined: since === null ? [] : mining.log.filter((entry) => entry.seq >= since), mined_next: mining.log.length };
+    const head = { session: "smoke-session", status: "ready", duration: 3600, covered: [[0, 3600]], next: 1, ...minedLog };
     if (languagePaused) return json(res, { ...head, cues: [], language_paused: true, heard: "en" });
     // Cues come with the first request only, the way the real server answers a `since` cursor. A
     // tab returning from standby with a reset cursor would therefore go blank instead of keeping
@@ -91,25 +100,15 @@ const api = await listen(async (req, res) => {
     const cues = body.since ? [] : id === regressionVideoId ? regressionCues : [{ id: 1, start: 0, end: 3600, text: "これはテスト字幕です", seg: 1 }];
     return json(res, { ...head, cues });
   }
-  if (url.pathname === "/clip") {
-    clipRequests.push({ video_id: url.searchParams.get("video_id"), start: Number(url.searchParams.get("start")), end: Number(url.searchParams.get("end")) });
-    res.writeHead(200, { "content-type": "audio/wav", "content-length": clipBytes.length });
-    return res.end(clipBytes);
-  }
   if (url.pathname === "/anki" && req.method === "POST") {
     const request = await requestBody(req);
     anki.actions.push(request.action);
     let result = null;
     if (request.action === "requestPermission") result = { permission: "granted" };
-    else if (request.action === "findNotes") result = [...anki.notes.keys()];
-    else if (request.action === "notesInfo") result = (request.params.notes || []).map((id) => ({ id, fields: anki.notes.get(Number(id)) || {} }));
-    else if (request.action === "storeMediaFile") {
-      anki.media.push(request.params);
-      result = request.params.filename;
-    } else if (request.action === "updateNoteFields") {
-      anki.updates.push(request.params.note);
-      result = null;
-    } else return json(res, { result: null, error: `unknown action ${request.action}` }, 400);
+    // A mined note's deck, for the word colours (rememberDeck in background.js).
+    else if (request.action === "findCards") result = [9001];
+    else if (request.action === "getDecks") result = { "Smoke::Mining": [9001] };
+    else return json(res, { result: null, error: `unknown action ${request.action}` }, 400);
     return json(res, { result, error: null });
   }
   return json(res, { error: "not found" }, 404);
@@ -123,23 +122,15 @@ html,body { margin: 0; background: #111; color: white; } #movie_player { positio
 video { width: 900px; height: 520px; background: #222; }
 </style></head><body><div id="movie_player" class="html5-video-player"><video class="html5-main-video"></video></div></body></html>`;
 let context;
-let downloadsDir;
 try {
-  downloadsDir = await mkdtemp(join(tmpdir(), "shisuko-browser-"));
   const launchOptions = {
     headless: true,
-    args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`, `--download-default-directory=${downloadsDir}`, "--no-sandbox"],
-    acceptDownloads: true,
-    downloadsPath: downloadsDir,
+    args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`, "--no-sandbox"],
   };
   if (process.env.CHROMIUM_PATH) launchOptions.executablePath = process.env.CHROMIUM_PATH;
   else launchOptions.channel = "chromium";
   context = await chromium.launchPersistentContext("", launchOptions);
   const worker = context.serviceWorkers()[0] || await context.waitForEvent("serviceworker");
-  const downloadControlPage = await context.newPage();
-  const workerCdp = await context.newCDPSession(downloadControlPage);
-  await workerCdp.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: downloadsDir });
-  await downloadControlPage.close();
   const extensionId = new URL(worker.url()).host;
   const commands = await worker.evaluate(() => new Promise((resolve) => chrome.commands.getAll(resolve)));
   for (const [name, shortcut] of [["toggle-subtitles", "Alt+Shift+S"], ["toggle-transcript", "Alt+Shift+L"], ["mine-current", "Alt+Shift+M"]]) {
@@ -154,7 +145,7 @@ try {
   // stored one that is under a day old (background.js, startupCheck).
   const updateCheck = { checkedAt: Date.now(), latest: null, error: null };
   // ankiAutoSync is what 0.20.0 and 0.21.0 stored for their Anki sync: left in a viewer's storage,
-  // it must change nothing (no AnkiConnect `sync`, asserted after the mine below).
+  // it must change nothing (no AnkiConnect `sync`, asserted at the end of the run).
   await worker.evaluate((stored) => new Promise((resolve) => chrome.storage.local.set(stored, resolve)),
     { settings: { serverUrl: closedHealthUrl, ankiAutoSync: true }, updateCheck });
   const popup = await context.newPage();
@@ -166,7 +157,7 @@ try {
   await poll(() => popup.locator("#update-result").textContent(), (value) => value === "No release found, checked just now");
   assert.equal(await popup.locator("#update-banner").isHidden(), true, "no banner without a release");
   await popup.locator("#serverUrl").fill(`http://127.0.0.1:${api.port}`);
-  await popup.locator("#mineTarget").selectOption("download");
+  await popup.locator("#ankiUrl").fill(`http://127.0.0.1:${api.port}/anki`);
   await popup.locator("#pauseOnHover").check();
   await popup.locator("#showTranscript").check();
   await popup.waitForTimeout(600);
@@ -259,60 +250,40 @@ try {
   await page.mouse.move(box.x + 10, box.y + 10);
   await poll(() => video.evaluate((el) => !el.paused), (value) => value, 3000);
 
+  // The viewer's mine: a line's button puts a request on the next /sync, with the popup's Anki
+  // settings, and the server's answer comes back in the log and as the toast.
   await page.locator(".shisuko-line-mine").first().click({ force: true });
-  const records = await poll(() => worker.evaluate(() => new Promise((resolve) => chrome.downloads.search({ orderBy: ["-startTime"] }, resolve))), (items) => items.length >= 2 && items.filter((item) => item.state === "complete" && item.filename).length >= 2, 10000);
-  const files = await Promise.all(records.map((item) => readFile(item.filename).catch(() => null)));
-  assert.ok(files.some((bytes) => bytes?.equals(clipBytes)), `downloaded audio must contain fixture bytes (${records.map((item, i) => `${item.filename}:${files[i]?.length || 0}`).join(", ")})`);
-  assert.ok(files.some((bytes) => bytes?.subarray(0, 2).equals(Buffer.from([0xff, 0xd8]))), "downloaded image must be JPEG");
+  const asked = await poll(() => mining.bodies.find((entry) => entry.id === videoId && entry.mine), Boolean, 10000);
+  assert.equal(asked.mine.cue_id, 1);
+  assert.equal(asked.mine.session, "smoke-session");
+  assert.deepEqual(asked.anki, { auto: true, picture: "Picture", audio: "SentenceAudio", sentence: "", word: "", pad_ms: 200, format: "mp3" });
+  assert.equal(typeof asked.mined_since, "number", "the cursor from the first answer");
+  await poll(() => page.locator(".shisuko-toast").textContent(), (value) => value === "Added Picture + SentenceAudio to the newest Anki card", 10000);
+  const nonce = asked.mine.nonce;
+  await poll(() => mining.bodies.filter((entry) => entry.mine && entry.mine.nonce === nonce).length, (n) => n >= 1, 3000);
+  const resent = mining.bodies.filter((entry) => entry.mine && entry.mine.nonce === nonce).length;
+  await page.waitForTimeout(2500);
+  assert.equal(mining.bodies.filter((entry) => entry.mine && entry.mine.nonce === nonce).length, resent, "an answered mine is not sent again");
+  // The note the server attached to tells the background its deck, for the word colours.
+  await poll(() => anki.actions.includes("getDecks"), Boolean, 5000);
 
-  // Exercise the real popup -> service worker -> local AnkiConnect path.
+  // The popup's Anki settings reach the server inside /sync; the extension itself writes nothing.
   const cdp = await context.newCDPSession(page);
-  await page.goto("about:blank");
   const ankiPopup = await context.newPage();
   await ankiPopup.goto(`chrome-extension://${extensionId}/popup.html`);
-  const send = (msg) => ankiPopup.evaluate((value) => browser.runtime.sendMessage(value), msg);
   await ankiPopup.locator("details").last().locator("summary").click();
-  await ankiPopup.locator("#ankiUrl").fill(`http://127.0.0.1:${api.port}/anki`);
-  await ankiPopup.locator("#mineTarget").selectOption("anki");
-  await ankiPopup.locator("#autoMine").check();
-  await ankiPopup.locator("#ankiImageField").fill("Picture");
-  await ankiPopup.locator("#ankiAudioField").fill("SentenceAudio");
-  await ankiPopup.locator("#ankiSentenceField").fill("");
-  await ankiPopup.locator("#serverUrl").fill(`http://127.0.0.1:${api.port}`);
+  await ankiPopup.locator("#autoMine").uncheck();
+  await ankiPopup.locator("#ankiImageField").fill("picture");
+  await ankiPopup.locator("#ankiAudioField").fill("sentenceAudio");
+  await ankiPopup.locator("#ankiSentenceField").fill("Sentence");
+  await ankiPopup.locator("#ankiSentenceField").press("Tab"); // a text field saves on its change event
+  await ankiPopup.locator("#clipFormat").selectOption("wav");
   await ankiPopup.locator("#enabled").check();
   await ankiPopup.waitForTimeout(400);
-  anki.notes.clear();
-  assert.equal((await send({ type: "ankiPoll" })).newNoteId, null, "first Anki poll establishes baseline");
-
-  anki.notes.set(101, {
-    Picture: { value: "" }, SentenceAudio: { value: "" }, Sentence: { value: "これはテスト字幕です" },
-  });
-  const found = await poll(() => send({ type: "ankiPoll" }), (value) => value?.newNoteId === 101, 3000);
-  assert.equal(found.newNoteId, 101);
-  const mediaBefore = anki.media.length;
-  const updatesBefore = anki.updates.length;
-  const mined = await send({ type: "mine", auto: true, videoId, noteId: 101, cue: { start: 0, end: 1, text: "これはテスト字幕です" }, imageDataUrl: tinyJpeg });
-  assert.equal(mined.ok, true, JSON.stringify(mined));
-  assert.equal(anki.media.length, mediaBefore + 2);
-  assert.ok(anki.media.some((item) => Buffer.from(item.data, "base64").subarray(0, 2).equals(Buffer.from([0xff, 0xd8]))));
-  assert.ok(anki.media.some((item) => Buffer.from(item.data, "base64").equals(clipBytes)), "uploaded audio must contain fixture bytes");
-  assert.equal(anki.updates.length, updatesBefore + 1);
-  assert.equal(anki.updates.at(-1).id, 101);
-  assert.match(anki.updates.at(-1).fields.Picture, /<img src=/);
-  assert.match(anki.updates.at(-1).fields.SentenceAudio, /\[sound:/);
-  // The Anki sync after mining is the server's (server.py's AnkiWatcher): the extension never
-  // asks AnkiConnect for `sync`, after a mine or ever (checked again at the end of the run).
-  await ankiPopup.waitForTimeout(2000);
-  assert.ok(!anki.actions.includes("sync"), `the extension asked Anki to sync: ${anki.actions.join(", ")}`);
-  anki.notes.set(202, { Sentence: { value: "別の字幕です" } });
-  const mismatchMedia = anki.media.length;
-  const mismatchUpdates = anki.updates.length;
-  const mismatch = await send({ type: "mine", auto: true, videoId, noteId: 202, cue: { start: 0, end: 1, text: "これはテスト字幕です" }, imageDataUrl: tinyJpeg });
-  assert.equal(mismatch.mismatch, true);
-  assert.equal(anki.media.length, mismatchMedia);
-  assert.equal(anki.updates.length, mismatchUpdates);
-  await poll(() => send({ type: "ankiPoll" }), (value) => value?.newNoteId === 202, 3000);
   await ankiPopup.close();
+  const changed = await poll(() => mining.bodies.filter((entry) => entry.id === videoId).at(-1), (entry) => entry?.anki?.picture === "picture" && entry.anki.format === "wav" && entry.anki.sentence === "Sentence", 10000);
+  assert.deepEqual(changed.anki, { auto: false, picture: "picture", audio: "sentenceAudio", sentence: "Sentence", word: "", pad_ms: 200, format: "wav" });
+  await page.goto("about:blank");
 
   // Force the MV3 worker down, then reopen the popup. This catches code that only
   // appears to persist settings while the original worker remains in memory.
@@ -327,7 +298,6 @@ try {
     const state = await cdp.send("Target.getTargets");
     return state.targetInfos.some((target) => target.targetId === oldTargetId);
   }, (present) => !present, 5000);
-  anki.notes.set(303, { Sentence: { value: "restart note" } });
 
   const popupAfterRestart = await context.newPage();
   await popupAfterRestart.goto(`chrome-extension://${extensionId}/popup.html`);
@@ -339,7 +309,7 @@ try {
   const restartedWorker = context.serviceWorkers().find((candidate) => candidate.url().startsWith(`chrome-extension://${extensionId}/`));
   assert.ok(restartedWorker, `restarted worker target missing: ${JSON.stringify(restartedTarget)}`);
   assert.equal(await restartedWorker.evaluate(() => globalThis.__shisukoSmokeGeneration), undefined, "worker must have a fresh global after suspension");
-  assert.equal((await popupAfterRestart.evaluate(() => browser.runtime.sendMessage({ type: "ankiPoll" }))).newNoteId, null, "restart poll establishes a fresh baseline");
+  assert.equal(await popupAfterRestart.locator("#ankiImageField").inputValue(), "picture", "the Anki settings outlive the worker");
   await popupAfterRestart.close();
 
   // Two YouTube tabs at once: only the one the viewer is looking at may drive the server.
@@ -399,24 +369,15 @@ try {
   await poll(() => visible(firstStatus), (shown) => !shown, 8000);
 
   // Four displayed cues share one Whisper segment. A finite local WAV makes trusted keyboard
-  // events seek the packaged media element, and the second transcript row drives the full UI mine.
+  // events seek the packaged media element, and the second transcript row drives the full UI mine:
+  // the request names that row's cue alone, never the segment around it.
   const regressionPopup = await context.newPage();
   await regressionPopup.goto(`chrome-extension://${extensionId}/popup.html`);
   await regressionPopup.locator("details").last().locator("summary").click();
-  await regressionPopup.locator("#ankiUrl").fill(`http://127.0.0.1:${api.port}/anki`);
-  await regressionPopup.locator("#mineTarget").selectOption("anki");
-  await regressionPopup.locator("#autoMine").uncheck();
   await regressionPopup.locator("#clipPaddingMs").focus();
   await regressionPopup.keyboard.press("Home");
-  await regressionPopup.locator("#ankiImageField").fill("Picture");
-  await regressionPopup.locator("#ankiAudioField").fill("SentenceAudio");
-  await regressionPopup.locator("#ankiSentenceField").fill("");
-  await regressionPopup.locator("#serverUrl").fill(`http://127.0.0.1:${api.port}`);
   await regressionPopup.locator("#enabled").check();
   await regressionPopup.waitForTimeout(700);
-  const regressionSend = (msg) => regressionPopup.evaluate((value) => browser.runtime.sendMessage(value), msg);
-  anki.notes.clear();
-  assert.equal((await regressionSend({ type: "ankiPoll" })).newNoteId, null, "regression Anki poll establishes baseline");
   const regression = await openWatch(regressionVideoId, { media: true });
   await regression.evaluate(() => { const video = document.querySelector("video"); video.pause(); video.currentTime = 5; });
   await poll(() => regression.locator(".shisuko-subtext").textContent(), (value) => value.includes("狙った字幕"), 10000);
@@ -429,24 +390,20 @@ try {
   await seek(5.5, "ArrowRight", 6.1);
   await seek(7.5, "ArrowLeft", 6.1);
   await seek(6.5, "ArrowRight", 7.85);
-  anki.notes.set(404, { Sentence: { value: "<b>狙った</b>" }, Picture: { value: "" }, SentenceAudio: { value: "" } });
   await regression.locator(".shisuko-line").nth(1).hover();
   await regression.locator(".shisuko-line-mine").nth(1).click();
-  const selectedClip = await poll(() => clipRequests.find((request) => request.video_id === regressionVideoId && request.start === 4.5 && request.end === 6), Boolean, 10000);
-  await poll(() => anki.updates.at(-1), (update) => update?.id === 404, 10000);
-  assert.equal(anki.updates.at(-1).fields.Sentence, "<b>狙った</b>字幕");
-  assert.match(anki.updates.at(-1).fields.SentenceAudio, /\[sound:shisuko_smoke789_4500\.wav\]/);
-  assert.doesNotMatch(anki.updates.at(-1).fields.Sentence, /前の字幕|つなぎの字幕|次の字幕/);
-  assert.deepEqual(selectedClip, { video_id: regressionVideoId, start: 4.5, end: 6 });
-  assert.ok(anki.media.some((item) => item.filename === "shisuko_smoke789_4500.wav" && Buffer.from(item.data, "base64").equals(clipBytes)));
+  const selected = await poll(() => mining.bodies.find((entry) => entry.id === regressionVideoId && entry.mine), Boolean, 10000);
+  assert.equal(selected.mine.cue_id, 11, "the row's own cue (狙った字幕), not its segment's first");
+  assert.equal(selected.anki.pad_ms, 0);
+  await poll(() => regression.locator(".shisuko-toast").textContent(), (value) => value.includes("Added Picture + SentenceAudio"), 10000);
   await regression.close();
   await regressionPopup.close();
 
-  assert.ok(anki.actions.length > 0 && !anki.actions.includes("sync"), "no AnkiConnect sync from the extension");
-  console.log(`browser smoke passed (syncs=${syncCount}, anki actions=${anki.actions.length}, downloads=${records.length}, ` +
+  const writes = anki.actions.filter((action) => ANKI_WRITES.includes(action));
+  assert.deepEqual(writes, [], `the extension wrote to Anki: ${anki.actions.join(", ")}`);
+  console.log(`browser smoke passed (syncs=${syncCount}, anki reads=${anki.actions.length}, mines=${mining.log.length}, ` +
     `${[...syncSeen].map(([id, count]) => `${id}=${count}`).join(" ")})`);
 } finally {
   await context?.close();
   await new Promise((resolveClose) => api.server.close(resolveClose));
-  if (downloadsDir) await rm(downloadsDir, { recursive: true, force: true });
 }

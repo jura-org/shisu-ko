@@ -92,11 +92,6 @@
     browser.permissions = Object.create(chromeApi.permissions);
     for (const name of ["contains", "request"]) browser.permissions[name] = promiseMethod(chromeApi.permissions, name);
   }
-  if (chromeApi.downloads) {
-    browser.downloads = Object.create(chromeApi.downloads);
-    browser.downloads.download = promiseMethod(chromeApi.downloads, "download");
-    browser.downloads.onChanged = chromeApi.downloads.onChanged;
-  }
   if (chromeApi.commands) {
     browser.commands = Object.create(chromeApi.commands);
     browser.commands.onCommand = chromeApi.commands.onCommand;
