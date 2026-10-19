@@ -17,8 +17,7 @@
   },
   "permissions": [
     "storage",
-    "tabs",
-    "notifications"
+    "tabs"
   ],
   "optional_permissions": [
     "nativeMessaging"

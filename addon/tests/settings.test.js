@@ -106,23 +106,54 @@ test("nativeMessaging is an optional permission, never a required one", () => {
   assert.match(html, /<button id="start-server" type="button" class="linkbtn hidden">Start server<\/button>/);
 });
 
-// The update check tells the viewer about a release with a system notification, which needs the
-// permission at install: the popup cannot ask for it at browser start, when the check runs. The
-// extension never installs itself, so the manifest names no update_url, neither Firefox's nor
-// Chrome's: its updates come from addons.mozilla.org and, for a Chrome Web Store install, from the
-// store. It carries no key either: the store keeps the item's own and needs none, and it refuses
-// any key on a new item and one that is not the item's own on an update.
-test("notifications is a required permission, and the manifest names no update_url", () => {
+// A newer release is told by the toolbar badge and the popup's banner, which need no permission;
+// the extension asks for no notifications and uses none. It never installs itself either, so the
+// manifest names no update_url, neither Firefox's nor Chrome's: its updates come from
+// addons.mozilla.org and, for a Chrome Web Store install, from the store. It carries no key: the
+// store keeps the item's own and needs none, and it refuses any key on a new item and one that is
+// not the item's own on an update.
+test("no notifications, and the manifest names no update_url", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ADDON, "manifest.json"), "utf8"));
-  assert.ok(manifest.permissions.includes("notifications"));
+  assert.ok(!manifest.permissions.includes("notifications"));
+  assert.ok(!(manifest.optional_permissions || []).includes("notifications"));
+  for (const name of fs.readdirSync(ADDON).filter((file) => file.endsWith(".js"))) {
+    assert.ok(!/\bnotifications\b/.test(fs.readFileSync(path.join(ADDON, name), "utf8")), `${name} names notifications`);
+  }
   assert.equal(manifest.browser_specific_settings.gecko.update_url, undefined);
   assert.equal(manifest.update_url, undefined);
   assert.equal(manifest.key, undefined);
   const html = fs.readFileSync(path.join(ADDON, "popup.html"), "utf8");
   assert.match(html, /<div id="update-banner" class="banner notice hidden">/);
-  for (const id of ["update-text", "update-now", "update-later", "update-release", "check-updates", "update-result"]) {
+  for (const id of ["update-text", "update-now", "update-later", "update-release", "update-result"]) {
     assert.ok(html.includes(`id="${id}"`), `popup.html has no element with id="${id}"`);
   }
+  // The server checks for releases; the popup has no button that would make the extension check.
+  assert.ok(!html.includes('id="check-updates"'));
+});
+
+// The extension makes no request beyond the viewer's machine: the server asks GitHub for the
+// newest release (UpdateChecker in server.py) and the extension reads it from /health. The one
+// fetch() is apiRequest()'s, to the server's address (127.0.0.1 by default), and the one https
+// address in the code is the release page the popup opens in a tab when the viewer clicks.
+test("no request leaves the machine: one fetch, to the server, and no remote address but a link", () => {
+  const files = fs.readdirSync(ADDON).filter((name) => /\.(js|html)$/.test(name));
+  const fetches = [];
+  const remote = [];
+  for (const name of files) {
+    const text = fs.readFileSync(path.join(ADDON, name), "utf8");
+    for (const match of text.matchAll(/\bfetch\s*\(([^)]*)\)/g)) fetches.push(`${name}: ${match[1]}`);
+    for (const word of ["XMLHttpRequest", "sendBeacon", "WebSocket", "EventSource"]) {
+      assert.ok(!text.includes(word), `${name} uses ${word}`);
+    }
+    for (const match of text.matchAll(/https?:\/\/[^\s"'`)]+/g)) {
+      if (!/^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(match[0])) remote.push(`${name}: ${match[0]}`);
+    }
+  }
+  assert.deepEqual(fetches, ["background.js: base + path, init"]);
+  assert.deepEqual(remote, ["popup.js: https://github.com/Multysquid/shisu-ko/releases/latest"]);
+  const popup = fs.readFileSync(path.join(ADDON, "popup.js"), "utf8");
+  assert.match(popup, /browser\.tabs\.create\(\{ url \}\)/, "the release page is opened in a tab, never fetched");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(ADDON, "settings.js"), "utf8").match(/serverUrl: ("[^"]+")/)[1]), "http://127.0.0.1:8790");
 });
 
 // The Anki sync after mining is the server's job (AnkiWatcher in server/server.py): the extension

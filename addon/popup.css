@@ -661,7 +661,7 @@ section .drawer {
   padding: 4px 0 0;
 }
 
-/* The check button and its result line belong together, closer than the drawer's rows. */
+/* The update check's result line sits closer than the drawer's rows. */
 .drawer .updates {
   display: flex;
   flex-direction: column;

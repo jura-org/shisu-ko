@@ -63,26 +63,15 @@ function loadBackground(overrides = {}) {
   // storage.session outlives an event page but not the browser; a test hands the same store to a
   // second loadBackground to play a restarted page, or null for a browser without the area.
   const session = overrides.session === null ? undefined : overrides.session || makeMemoryStorage();
-  const listeners = { onMessage: [], onCommand: [], onChanged: [], onTabRemoved: [], onStartup: [], onInstalled: [], onNotificationClicked: [],
+  const listeners = { onMessage: [], onCommand: [], onChanged: [], onTabRemoved: [], onStartup: [], onInstalled: [],
     onTabActivated: [], onWindowFocusChanged: [] };
-  // What the update nudges did: the badge calls and the notifications, in order. A test passes
-  // null for `action` or `notifications` to play a browser (or a service worker) without the API.
+  // What the update nudge did: the badge calls, in order. A test passes null for `action` to play
+  // a browser (or a service worker) without the API. There is no notifications API: the manifest
+  // asks for none, and a call to one would throw here.
   const badge = [];
-  const notifications = [];
   const action = overrides.action === null ? undefined : {
     setBadgeText: async (details) => badge.push(["text", details.text]),
     setBadgeBackgroundColor: async (details) => badge.push(["color", details.color]),
-  };
-  const notificationsApi = overrides.notifications === null ? undefined : {
-    create: async (id, options) => {
-      notifications.push({ id, ...options });
-      return id;
-    },
-    clear: async (id) => {
-      notifications.push({ id, cleared: true });
-      return true;
-    },
-    onClicked: { addListener: (fn) => listeners.onNotificationClicked.push(fn) },
   };
 
   const sandbox = {
@@ -124,7 +113,6 @@ function loadBackground(overrides = {}) {
         onFocusChanged: { addListener: (fn) => listeners.onWindowFocusChanged.push(fn) },
       },
       action,
-      notifications: notificationsApi,
     },
   };
   sandbox.globalThis = sandbox;
@@ -134,7 +122,7 @@ function loadBackground(overrides = {}) {
   // manifest loads it before background.js in Firefox.
   new vm.Script(fs.readFileSync(SETTINGS_PATH, "utf8"), { filename: SETTINGS_PATH }).runInContext(sandbox);
   new vm.Script(source, { filename: SOURCE_PATH }).runInContext(sandbox);
-  // Top-level `const`/`let` (DEFAULT_SETTINGS, REQUEST_TIMEOUT_MS, sleep) live in the global
+  // Top-level `const`/`let` (DEFAULT_SETTINGS, REQUEST_TIMEOUT_MS, START_WINDOW_MS) live in the global
   // *lexical* environment, not as globalThis properties, but that environment is shared across
   // scripts run against the same context — so a second script can still see them by name and
   // copy them onto globalThis for the test harness to read.
@@ -142,8 +130,7 @@ function loadBackground(overrides = {}) {
     "globalThis.DEFAULT_SETTINGS = DEFAULT_SETTINGS; globalThis.REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_MS;" +
       " globalThis.NATIVE_TIMEOUT_MS = NATIVE_TIMEOUT_MS; globalThis.LAUNCHER_HINT = LAUNCHER_HINT;" +
       " globalThis.START_WINDOW_MS = START_WINDOW_MS;" +
-      " globalThis.GITHUB_LATEST_URL = GITHUB_LATEST_URL; globalThis.UPDATE_CHECK_MAX_AGE_MS = UPDATE_CHECK_MAX_AGE_MS;" +
-      " globalThis.UPDATE_WINDOW_MS = UPDATE_WINDOW_MS; globalThis.UPDATE_POLL_MS = UPDATE_POLL_MS;" +
+      " globalThis.UPDATE_WINDOW_MS = UPDATE_WINDOW_MS;" +
       " globalThis.SERVER_TOO_OLD_TEXT = SERVER_TOO_OLD_TEXT; globalThis.deckState = () => deckState;" +
       " globalThis.HOLD_TIMEOUT_MS = HOLD_TIMEOUT_MS; globalThis.FOCUS_STALE_MS = FOCUS_STALE_MS;" +
       " globalThis.syncers = syncers; globalThis.activeTabs = activeTabs;",
@@ -172,10 +159,6 @@ function loadBackground(overrides = {}) {
     return Promise.all(fns.slice().map((fn) => fn(installed ? { reason: "update" } : undefined)));
   }
 
-  function clickNotification(id) {
-    return Promise.all(listeners.onNotificationClicked.slice().map((fn) => fn(id)));
-  }
-
   // The clock as background.js reads it (Date.now in the context, which is the sandbox's own
   // realm): a test moves it to play a restart that took longer than a poll interval.
   const setNow = new vm.Script("(at) => { Date.now = () => at; }", { filename: SOURCE_PATH }).runInContext(sandbox);
@@ -190,7 +173,7 @@ function loadBackground(overrides = {}) {
     return Promise.all(listeners.onWindowFocusChanged.slice().map((fn) => fn(windowId)));
   }
 
-  return { sandbox, storage, session, listeners, dispatch, closeTab, badge, notifications, startup, clickNotification, setNow,
+  return { sandbox, storage, session, listeners, dispatch, closeTab, badge, startup, setNow,
     activateTab, focusWindow };
 }
 
