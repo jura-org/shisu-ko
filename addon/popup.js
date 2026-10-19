@@ -776,8 +776,8 @@ function latestVersion() {
 // Ask the background what the newest release means for the server this popup sees. The /health
 // answer travels with the question, so the server is not asked twice, and carries the server's
 // update check (`latest`); the question is only asked when that answer changed (version, launcher
-// flag, the check, online or not), since the verdict changes with nothing else. The background's record of an update under way is picked up here: a
-// reopened popup resumes it. Answers can cross, so only the latest question's answer counts, and
+// flag, the check, online or not), since the verdict changes with nothing else. The background's
+// record of an update under way is picked up here: a reopened popup resumes it. Answers can cross, so only the latest question's answer counts, and
 // the questions are numbered for that. Resolves to whether a new answer was taken, which is when
 // the banner needs painting again.
 async function refreshUpdate() {

@@ -43,6 +43,7 @@ const START_KEY = "startServer";
 const LAUNCHER_HINT = "Run server\\setup.cmd (Windows) or bash server/setup.sh once, or start the server by hand once: run.cmd / run.sh register the launcher";
 const NATIVE_PERMISSION_HINT = "Allow Shisu-ko to talk to its launcher when the browser asks";
 const UPDATE_RUNNING_HINT = "The launcher restarts the server itself once update.py is done";
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Every message from a content script used to re-read storage; at one sync tick and one Anki poll
@@ -356,7 +357,7 @@ async function startStatus() {
 // The newest release is the server's to find: it asks GitHub once a day and reports the answer
 // in /health (`latest`, UpdateChecker in server.py). The extension makes no request beyond the
 // viewer's machine, so it holds no host permission for GitHub and no token to leak.
-//
+
 // How long an update may take before the popup stops watching for the new server: the old one
 // exits, the launcher runs update.py (a git fetch, or a release download and unpack) and the new
 // one loads its model again, 10-40 s on a GPU and longer on a CPU. The popup owns the wait; the
