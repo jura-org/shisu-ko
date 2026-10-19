@@ -25,7 +25,7 @@ until a deck answer builds the index, a failed ask (no card mined and no deck ch
 or refusing) builds one of the known list alone, and the names, known words, particles and
 katakana words are drawn from that (`lookOf()` draws plain text only before the first answer, see
 "The content side"). `addon/words.js`
-(`SHISUKO_WORDS`, a plain frozen object like `SHISUKO_MATCH`, loaded between `match.js` and the
+(`SHISUKO_WORDS`, a plain frozen object, loaded after `settings.js` and before the
 two scripts in both `background.scripts` and `content_scripts[0].js`, and by `service-worker.js`)
 is shared: the background turns one deck's notes into `[word, status, pitch]` entries (a word
 usually written in kana twice, under its reading as well), the content script builds an index
@@ -36,7 +36,7 @@ from them and marks the words of every line. Everything in words.js is pure, wit
 - Fields. `plainText(html)` strips `<rt>`/`<rp>` with their content, turns `<br>` and the end of
   `p`/`div`/`li`/`tr` into line breaks, strips every other tag (`TAGS` = `/<[^<>]*>/`: a tag never
   runs across a `<`, so an unclosed `<` costs its length, not its square), decodes the six
-  entities of `match.js` and collapses whitespace. `plainWord(html)` takes the first non-empty
+  entities the mining matcher decodes (`match_normalize()` in `server.py`) and collapses whitespace. `plainWord(html)` takes the first non-empty
   line, without bracket furigana (` 食[た]べる` -> `食べる`). `readingOf(html)` is the `<rt>` texts
   of a ruby, the brackets of the furigana or the field itself, and `""` unless what is left is
   kana (ー and ・ allowed). Bounds, since a field is third-party content: `stripMarkup()` and
@@ -421,8 +421,8 @@ from them and marks the words of every line. Everything in words.js is pure, wit
   deck or other fields, and hands back `at` and `entries` only with a
   positive `at` (0 is what a tab holding nothing sends), so the stamp survives a restart when the
   entries came out the same; the page that restored it writes it once more.
-- The deck: `rememberDeck(url, noteId)`, from `addToAnki()` after every card it filled, not
-  awaited: `findCards {query: "nid:<id>"}` -> `getDecks {cards}` -> the deck with most of them ->
+- The deck: `rememberDeck(url, noteId)`, from `minedNote` (a tab heard in `/sync`'s `mined` log
+  that the server filled a note; see `mining.md`), not awaited by the tab: `findCards {query: "nid:<id>"}` -> `getDecks {cards}` -> the deck with most of them ->
   `storage.local` `DECK_SEEN_KEY` (`ankiDeckSeen` = `{deck, at, noteId}`) and `expireCardIndex()`,
   so the new card shows red at the next ask rather than after the TTL; errors are `console.debug`.
   `seenDeck()` reads the record; `resolveDeck(settings)` -> `{deck, automatic}`: the trimmed
@@ -443,7 +443,7 @@ from them and marks the words of every line. Everything in words.js is pure, wit
   `deckNames`, sorted), seen: string | null}` or `{ok: false, reason: "offline" | "denied" |
   "error", error, seen}`, through `ankiPermission()` as well. The message switch routes both.
 - Tests: `addon/tests/background.test.js` (a fake AnkiConnect answering by `query`).
-  `_loadBackground.js` loads `words.js` between `match.js` and `background.js` and exposes
+  `_loadBackground.js` loads `words.js` between `settings.js` and `background.js` and exposes
   `CARD_STATUS_TTL_MS`, `DECK_SEEN_KEY`, `DECK_NOTES_KEY` and `DECK_NOTES_FORMAT`.
 
 ### The content side (`addon/content.js`, "word colours" section)

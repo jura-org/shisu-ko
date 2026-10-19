@@ -652,6 +652,23 @@ switch has no say: it governs what the extension does on YouTube pages, and the 
 nothing from it. Tests: `server/tests/test_anki_sync.py`, on a fake clock and a fake AnkiConnect,
 and the request's headers against a local fake server; they never reach a real Anki.
 
+Three hooks serve the miner (below): `sync` (False when `--anki-sync off` leaves the watcher
+running for the miner alone; `status()` then answers `off`, and no new note schedules a sync),
+`on_new(ids)` (every id a look finds that is not in `seen`, the baseline never), and `fast()`
+(a client is mining: the next look comes after `ANKI_POLL_MINING`, 3 s, instead of `ANKI_POLL`).
+
+## How mining works on the server
+
+The server, not the extension, gives a note Yomitan made its line's audio and picture.
+`start_anki_watcher(args, app)` builds a `Miner` when `resolve_mining()` says so (`--mine
+auto|off`, off in the container unless `--anki-url` is given) and runs it on its own daemon
+thread (`anki-mine`), fed by the watcher's `on_new` and by `/sync`'s `mine`. The miner cuts the
+clip through `App.clip()`, in-process, and takes the picture through `FrameGrabber` (yt-dlp
+resolves a 720p H.264 stream once per video, PyAV decodes a frame; `--mine-picture off` builds
+none). It talks to AnkiConnect through the same `anki_connect()`. The rules, the `/sync` fields
+and the matcher are in `mining.md`; tests are `server/tests/test_mining.py` and
+`test_mining_sync.py`.
+
 ## How the AMD engine works (experimental)
 
 Experimental, and not yet tested on AMD hardware by the maintainer, whose PC has an NVIDIA GPU;

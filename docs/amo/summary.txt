@@ -1,1 +1,1 @@
-Live Japanese subtitles for YouTube, transcribed on your own computer by Whisper. The lines are real text that Yomitan can scan; hovering pauses the video, and a screenshot plus the sentence audio go into the Anki card you just made.
+Live Japanese subtitles for YouTube, transcribed on your own computer by Whisper. The lines are real text that Yomitan can scan; hovering pauses the video, and a picture plus the sentence audio go into the Anki card you just made.
