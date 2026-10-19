@@ -135,7 +135,9 @@ synchronously inside the tap, for iOS's rule that sound may only start inside a 
 The page heartbeats the server's `/sync` (every second while playing, every 5 s paused), always
 naming the model the server already holds, so it never asks for a model switch. The proxy sends
 `"words": true`, the server's opt-in for Whisper's word timings per cue (`words: [{start, end,
-text}]`); a server without it sends none.
+text}]`, and `src`, which the page ignores); a server without it sends none. A line from the
+creator's subtitles carries the line's own tokens there, timed from Whisper, or no words at all when
+it kept the track's times.
 
 The subtitle list highlights each word as it is spoken (`lib.js`): with `words`, a token takes the
 time of the word holding its first character, interpolated inside a word that a token starts in the

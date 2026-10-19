@@ -1,8 +1,8 @@
 0.7.0 was the last version on this listing; 0.8.0 to 0.14.0 came out on GitHub only (https://github.com/Multysquid/shisu-ko/releases has every release's full notes). What changed since 0.7.0:
 
+- 0.21.0: a Japanese video with subtitles its creator uploaded shows their text, timed by Whisper.
 - 0.20.0: Anki syncs with AnkiWeb a minute after you mine a card (a switch turns it off).
-- 0.19.2: no more boxes with a hex code in a subtitle, in cached ones too.
-- 0.19.1: subtitles for speech the voice detector misses (shouting, a quietly mixed video) and songs running past a window; a sentence's first words stay with it; videos watched before are checked again while the server is idle.
+- 0.19.1, 0.19.2: subtitles for speech the voice detector misses (shouting, a quiet mix) and songs running past a window; a sentence's first words stay with it; no boxes with a hex code.
 - 0.19.0: a phone portal (server/portal.cmd, .sh): subtitles, lookups, mining on a phone.
 - 0.18.0: drag the subtitle by its grip to the top of the video, the window's bottom, or beside the video in vertical text.
 - 0.17.3: a video YouTube refuses for a moment (HTTP 403) is fetched again within seconds; the server can send word timings to a client that asks.

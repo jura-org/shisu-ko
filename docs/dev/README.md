@@ -2,7 +2,7 @@
 
 The detail behind `AGENTS.md`. Read the file for a subsystem before changing it.
 
-- `cue-building.md`: window planning, the initial prompt and its skip retry, lead-word repair, sentence marks, the gates, `build_cues()`, the merges and seams, sung lyrics, the language watch, the preview decode, the runtime data and the cue cache.
+- `cue-building.md`: window planning, the initial prompt and its skip retry, lead-word repair, sentence marks, the gates, `build_cues()`, the merges and seams, sung lyrics, the language watch, the preview decode, the creator's own subtitles (fetch, cleaning, alignment), the runtime data and the cue cache.
 - `server-runtime.md`: live streams, model switching and the setup download, the Kitsune-Transcribe models (their engine on PyTorch, names, quantised weights, word timings, installer), the Start server button and its native host, the server update step (`update.py`, `POST /update`, exit code 4, the launchers), the experimental AMD engine (its side folder, the crash guard, the exits on Windows, `--probe-gpu`, `server/amd_setup.py`).
 - `mining.md`: the one-tab election, automatic mining through AnkiConnect, what a mined card gets, matching a card to its subtitle, pre-mined sentences, the Anki sync after mining.
 - `word-colours.md`: `addon/words.js`, the deck index in the background, the drawing in the content script, the popup controls.

@@ -83,7 +83,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.20.0"
+VERSION = "0.21.0"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -6578,6 +6578,11 @@ def parse_args(argv=None):
                         "but the audio is not silent, sung lyrics or speech over music, is transcribed without the "
                         "detector when Whisper hears the target language in it, under stricter gates; off: such "
                         "windows go through the detector as before, blank when it heard nothing")
+    p.add_argument("--human-subtitles", default="auto", choices=["auto", "off"],
+                   help="auto: when a Japanese video carries subtitles its creator uploaded (never YouTube's "
+                        "automatic captions), cues take their text and line breaks from that track and their "
+                        "timing from what Whisper heard; a line Whisper disagrees with keeps Whisper's text. "
+                        "off: Whisper alone, and no subtitle request")
     p.add_argument("--sentence-ends", default="auto", choices=["auto", "off"],
                    help="auto: write a sentence mark where Whisper left one out, when a word ending in a "
                         "sentence-final expression (よね, です, か, a plain form) is followed by a pause; "

@@ -481,3 +481,63 @@ Each cost a whole cue or a whole line, silently, and each has a regression test.
   `breaks_word()` is the narrow predicate, and it alone may overrule `max_chars`.
 - The offline replay showed none of the last two. Both appeared only when the real pipeline took a
   different beam. Replay is for comparing builders; it is not a substitute for running the server.
+
+## (f) The creator's own subtitles
+
+When a video carries a Japanese track its creator uploaded, the cues take their text and lines from
+it and their times from Whisper (`docs/dev/cue-building.md`, "Human subtitles", has the rules). The
+yardstick here is the track itself, so "CER" is disagreement with the track, not error: one of the
+tracks below has typos of its own and leaves fillers out, and Whisper is right in some of those.
+
+Three videos with a `ja` track in `subtitles`: video A, a beginner lesson conversation (32 min);
+video B, a two-person learner podcast (14 min, its last two minutes an English ad read); video C, an
+outdoor lesson vlog (7.5 min) whose speaker says most sentences twice and whose track writes them
+once. Video A's track is the recogniser's text uploaded as the creator's: no mark or space in any
+row, two rows of 8 seconds cut mid-word. `unmarked_track()` refuses it, so A stays Whisper's.
+
+The live path: `retranscribe.py`, which drives `process()` window by window, the window cuts
+included, with and without `--human TRACK`; B scored over its Japanese twelve minutes (all of it in
+brackets). One decode each, large-v3, the RTX 3090 shared with a running server.
+
+| | B: Whisper | B: with the track | C: Whisper | C: with the track |
+|---|---|---|---|---|
+| CER against the track | 14.0% (25.3%) | **4.2%** (8.2%) | 30.0% | **4.4%** |
+| track sentence ends carrying a mark | 67.3% | **96.0%** | 88.5% | **100%** |
+| ... ending a cue or a row | 68.5% | 60.4% | 92.3% | 94.2% |
+| cues | 227 | 176 | 68 | 58 |
+| from an aligned line / the line's own times / Whisper | | 89.2% / 6.2% / 4.5% | | 91.4% / 5.2% / 3.4% |
+| cues whose words do not spell the text or run backwards | 0 | 0 | 0 | 0 |
+| aligned start against the track's, p50 / p90 | | 0.36 / 0.84 s | | 0.17 / 1.47 s |
+| duration p50 / over 6 s | 2.90 s / 4.0% | 3.70 s / 11.4% | 2.82 s / 5.9% | 3.53 s / 19.0% |
+| windows decoded | 32 | 36 | 17 | 19 |
+
+Read it this way. The text is the person's wherever Whisper heard the same thing, and the marks
+with it. Fewer sentence ends fall on a cue or row boundary on B, because that track puts several
+short sentences on one row (はい。そうです。 and the like), and a cue is the track's line; a
+mined card then gets the line, which is what the creator showed. Cues are longer: a line covers
+what its maker covered, on C both sayings of a sentence, so 19% of C's cues pass 6 s. The starts
+moved by a third of a second at the median, which is the person's looseness that Whisper's word
+times take out. The window cuts cost 12% more decodes. B's cues left to Whisper are mostly the English
+ad (Whisper under `--language ja` writes a translation or katakana), and its lines on their own
+times are mostly the ad's English, which Whisper wrote nothing for. Its closing stretch, twenty
+seconds of speech the track writes into one three-second line, comes out as the track's text in
+two cues (`split_long_line()`). C's are three lines over a stretch the
+prompted decode skipped and the retry could not fill.
+
+The same comparison on identical Whisper output (`dump_words.py` once, `replay_cues.py --human`
+after; fixed 30 s windows, which cannot move their ends off a line, then `--human-scope whole`):
+
+| | B (12 min) | C | A, its refused track forced in (`--human-raw`, 10 min) |
+|---|---|---|---|
+| CER, Whisper | 18.1% | 36.3% | 20.4% |
+| CER, window by window / whole | 6.5% / 4.0% | 7.6% / 3.1% | 17.5% / 1.8% |
+| sentence ends marked, Whisper → whole | 66.5% → 97.1% | 96.2% → 100% | (no marks) |
+| cues from aligned lines, whole | 91.8% | 98.3% | 95.7% |
+
+The threshold. Over the lines Whisper heard (about 180 on B, 58 on C), the similarity is 0.94 and
+1.00 at the median and 0.75 and 0.73 at the tenth percentile. Of B's nine lines under 0.5, five are
+English read under `--language ja`; the rest are a back-channel the decode left out, or a line half
+missing on one side. Between 0.5 and 0.6 are two: one more English line and one where the person's
+text was right. Half credit for a kanji spelt in kana moved two lines over the bar: one of C's,
+right, and one of B's, where the person wrote the wrong kanji for a homophone. So 0.6 keeps
+Whisper's text where the two disagree, at the cost of one right line in some 240.

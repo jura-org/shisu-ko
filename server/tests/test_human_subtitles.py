@@ -716,3 +716,7 @@ def test_human_subtitles_off_downloads_as_before(monkeypatch, tmp_path):
     time.sleep(0.05)
     assert calls == ["extract_info", "process_ie_result"] and got == []
 
+
+def test_parse_args_takes_the_switch():
+    assert server.parse_args([]).human_subtitles == "auto"
+    assert server.parse_args(["--human-subtitles", "off"]).human_subtitles == "off"
