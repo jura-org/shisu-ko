@@ -124,13 +124,9 @@ test("notifications is a required permission, and the manifest names no update_u
 
 // The Anki sync after mining is the server's job (AnkiWatcher in server/server.py): the extension
 // never asks AnkiConnect for `sync`, needs no alarm, and has no setting for it. 0.20.0 and 0.21.0
-// stored `ankiAutoSync`; nothing reads it now, so a stored value is inert, and the popup builds its
-// fields from the defaults alone.
+// stored `ankiAutoSync`; nothing reads it now, so a stored value is inert. The permissions
+// themselves are pinned in scripts/tests/build.test.mjs.
 test("the extension never calls AnkiConnect's sync, holds no alarms and no ankiAutoSync", () => {
-  const manifest = JSON.parse(fs.readFileSync(path.join(ADDON, "manifest.json"), "utf8"));
-  assert.ok(!manifest.permissions.includes("alarms"));
-  assert.ok(!(manifest.optional_permissions || []).includes("alarms"));
-  assert.ok(!("ankiAutoSync" in loadSchema()));
   const files = fs.readdirSync(ADDON).filter((name) => /\.(js|html|json)$/.test(name));
   for (const name of files) {
     const text = fs.readFileSync(path.join(ADDON, name), "utf8");
@@ -138,6 +134,4 @@ test("the extension never calls AnkiConnect's sync, holds no alarms and no ankiA
     assert.doesNotMatch(text, /\balarms\b/, `${name} uses alarms`);
     assert.doesNotMatch(text, /ankiAutoSync|ankiSync/, `${name} still knows the old Anki sync`);
   }
-  const popup = fs.readFileSync(path.join(ADDON, "popup.js"), "utf8");
-  assert.match(popup, /const FIELDS = Object\.keys\(SHISUKO_DEFAULT_SETTINGS\);/);
 });

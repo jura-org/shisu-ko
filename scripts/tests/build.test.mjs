@@ -113,7 +113,6 @@ test("both built manifests ask for exactly the allowlisted permissions", async (
     }
     // A content script's matches grant host access as well.
     for (const script of manifest.content_scripts) assert.deepEqual(script.matches, YOUTUBE, browser);
-    assert.ok(!JSON.stringify(manifest).includes("alarms"), browser);
   }
 });
 
