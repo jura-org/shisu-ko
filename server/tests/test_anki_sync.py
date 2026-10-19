@@ -226,6 +226,47 @@ def test_anki_closed_after_the_baseline_keeps_what_it_saw():
     assert len(anki.syncs) == 1
 
 
+def test_a_sync_owed_while_anki_is_closed_waits_for_it_quietly(caplog):
+    clock, anki, watcher = make()
+    run_until(clock, watcher, 30, [(10, lambda: anki.notes.add(10))])
+    anki.down = True  # closed before the sync came due
+    with caplog.at_level("INFO", logger="shisu-ko"):
+        run_until(clock, watcher, 3600)
+    assert anki.syncs == []  # no sync is tried against an Anki that does not answer the looks
+    lines = [r.getMessage() for r in caplog.records if "anki sync" in r.getMessage()]
+    assert len(lines) == 1 and "not answering" in lines[0], lines
+    assert watcher.status()["state"] == "unreachable"
+    anki.down = False
+    run_until(clock, watcher, 3600 + server.ANKI_POLL_MAX + 1)
+    assert len(anki.syncs) == 1 and watcher.status()["state"] == "watching"
+
+
+def test_anki_closed_mid_sync_is_left_to_the_looks():
+    clock, anki, watcher = make()
+    anki.fail = server.AnkiUnreachable("[Errno 104] Connection reset by peer")
+    run_until(clock, watcher, 100, [(10, lambda: anki.notes.add(10))])
+    anki.fail, anki.down = None, True
+    run_until(clock, watcher, 3600)
+    assert len(anki.syncs) == 1
+    anki.down = False
+    run_until(clock, watcher, 3600 + server.ANKI_POLL_MAX + 1)
+    assert len(anki.syncs) == 2 and watcher.status() == {"state": "watching", "last": 1_700_000_000_000, "error": None}
+
+
+def test_a_failure_that_repeats_is_logged_once(caplog):
+    clock, anki, watcher = make()
+    anki.fail = RuntimeError("network error: connection reset")
+    with caplog.at_level("INFO", logger="shisu-ko"):
+        run_until(clock, watcher, 3600, [(10, lambda: anki.notes.add(10))])
+        anki.fail = None
+        run_until(clock, watcher, 4000)
+    assert len(anki.syncs) > 10
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("anki sync")]
+    assert lines[1:] == ["anki sync: 1 new note(s), syncing",
+                         "anki sync failed: network error: connection reset; trying again in 60 s",
+                         "anki sync: done in 0.0 s"], lines
+
+
 def test_the_log_says_what_happened(caplog):
     clock, anki, watcher = make()
     with caplog.at_level("INFO", logger="shisu-ko"):

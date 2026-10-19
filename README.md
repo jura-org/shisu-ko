@@ -360,10 +360,10 @@ started never count. Cards made in that minute go with the sync; while you keep 
 sync follows 30 s after the one before began, and once 30 s pass without a new card it stops. Anki
 must be signed in to AnkiWeb. A failed sync is tried again after 1, 2 and then every 5 minutes
 while cards are waiting; "not signed in" and a full sync Anki wants you to confirm wait for your
-next card instead. With Anki closed the server looks once a minute and logs one line. Nothing ever
-interrupts you; the server log says what happened, and the portal's Settings > Anki shows the last
-sync. `--anki-sync off` turns it off (see [Server options](#server-options)). The extension itself
-never syncs and has no switch for it.
+next card instead. With Anki closed the server looks once a minute, logs one line, and syncs
+when Anki is back. Nothing ever interrupts you; the server log says what happened, and the
+portal's Settings > Anki shows the last sync. `--anki-sync off` turns it off (see
+[Server options](#server-options)). The extension itself never syncs and has no switch for it.
 
 DRM-protected videos block screenshots; the audio clip still works. The Shisu-ko server uses
 port 8790 precisely so that AnkiConnect can keep its default 8765.

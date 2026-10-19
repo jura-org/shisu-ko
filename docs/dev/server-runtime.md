@@ -625,9 +625,11 @@ the sync is due, then sleeps until the next of the two:
   `ANKI_SYNC_BACKOFF` (1, 2, then 5 minutes, the last step repeating). AnkiConnect's "sync: auth
   not configured" (Anki not signed in to AnkiWeb) and "Sync status ... not one of" (Anki wants a
   one-way full sync confirmed) only the user can mend: the watcher halts until the next new note.
+  A failure logs one line; the same failure again logs nothing, and neither does its retry.
 - Anki closed: a look that gets no answer doubles the wait between looks up to `ANKI_POLL_MAX`
-  (60 s) and logs one line when the state changes, never one per look. A sync due then fails as
-  "Anki is not running" and backs off like any other failure.
+  (60 s) and logs one line when the state changes, never one per look. A sync due then is not
+  tried: it waits for the look that finds Anki back and runs at once. A sync that loses Anki
+  midway is left to the looks the same way.
 
 The log says what happened: "anki sync: watching http://127.0.0.1:8765 (12 note(s) from today and
 yesterday taken as synced)", "anki sync: 2 new note(s), syncing", "anki sync: done in 0.4 s",

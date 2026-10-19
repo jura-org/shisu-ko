@@ -4245,13 +4245,16 @@ class AnkiWatcher:
     # ---- syncing
 
     def sync(self) -> bool:
-        """Run the sync if one is due; True when it ran."""
+        """Run the sync if one is due; True when it ran. While Anki does not answer the looks, a due
+        sync waits for the look that finds it back, instead of failing every backoff step."""
         with self.lock:
-            if self.running or self.due is None or self.clock() < self.due:
+            if self.running or self.due is None or self.clock() < self.due or self.reachable is False:
                 return False
             self.running, self.started = True, self.clock()
             carried, self.cards, self.due = self.cards, 0, None
-        log.info("anki sync: %d new note(s), syncing", carried)
+            retry = self.error is not None
+        if not retry:  # a retry says nothing until it goes through or fails another way
+            log.info("anki sync: %d new note(s), syncing", carried)
         error = None
         try:
             self.call("sync", {}, ANKI_SYNC_TIMEOUT)
@@ -4266,15 +4269,20 @@ class AnkiWatcher:
                 log.info("anki sync: done in %.1f s", now - self.started)
             else:
                 text, halt = anki_sync_failure(error)
+                repeated = text == self.error
                 self.cards += carried
                 self.failures += 1
                 self.halted, self.error = halt, text
+                if isinstance(error, AnkiUnreachable):
+                    self.reachable = False  # Anki closed mid-sync: the looks find it back
                 if halt:
-                    log.info("anki sync failed: %s; not retried until the next new note", text)
+                    if not repeated:
+                        log.info("anki sync failed: %s; not retried until the next new note", text)
                 else:
                     wait = ANKI_SYNC_BACKOFF[min(self.failures, len(ANKI_SYNC_BACKOFF)) - 1]
                     self.due = now + wait
-                    log.info("anki sync failed: %s; trying again in %d s", text, wait)
+                    if not repeated:
+                        log.info("anki sync failed: %s; trying again in %d s", text, wait)
         # Notes made while it ran are found by a look right after it.
         self.after_sync, self.next_poll = True, self.clock()
         return True
@@ -4289,7 +4297,7 @@ class AnkiWatcher:
             self.poll()  # before a sync too: its log line counts the notes made since the last look
         self.sync()
         now = self.clock()
-        wake = self.next_poll if self.due is None else min(self.next_poll, self.due)
+        wake = self.next_poll if self.due is None or self.reachable is False else min(self.next_poll, self.due)
         return max(0.0, wake - now)
 
     def run_forever(self) -> None:
