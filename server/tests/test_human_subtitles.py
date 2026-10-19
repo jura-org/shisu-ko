@@ -1,4 +1,4 @@
-"""The creator's own subtitles: fetched beside the audio, cleaned, kept with the session.
+"""The creator's own subtitles: fetched beside the audio, cleaned, aligned with what Whisper heard.
 
 Every track here is invented. Nothing loads a model or touches the network: yt_dlp is a fake in
 sys.modules, the model is scripted and detect_speech is what the test says Silero heard, as in
@@ -20,6 +20,7 @@ from _serverlib import load_server
 server = load_server()
 VIDEO = "abcdefabcdef"
 RATE = server.SAMPLE_RATE
+LIMITS = server.CueLimits()
 
 # One invented track, in the three formats YouTube serves it in.
 JSON3 = json.dumps({"events": [
@@ -173,6 +174,318 @@ def test_recognition_tracks_are_never_picked():
     assert server.pick_human_track({"live_chat": [fmt("json3")], "jav": [fmt("json3")]}, "ja") is None
 
 
+# --------------------------------------------------------------------------- the aligner
+
+def test_fold_chars_folds_width_case_and_script_and_drops_marks():
+    chars, src = server.fold_chars("ＡＢ、カメラー。です")
+    assert "".join(chars) == "abかめらです"
+    assert src == [0, 1, 3, 4, 5, 8, 9]
+
+
+def test_align_line_finds_the_line_inside_a_longer_stretch():
+    line = list("いいてんき")
+    region = list("えーとてもいいてんきだね")
+    pairs, matches, first, last = server.align_line(line, region)
+    assert matches == 5 and (first, last) == (5, 10)
+    assert pairs == [5, 6, 7, 8, 9]
+
+
+def test_align_line_counts_a_different_spelling_as_substitutions():
+    pairs, matches, first, last = server.align_line(list("きょうはさむい"), list("今日はさむい"))
+    assert matches == 4 and pairs[-4:] == [2, 3, 4, 5]
+
+
+def wcue(text, start, end, seg=0):
+    """A Whisper cue whose characters share [start, end) evenly, one word each."""
+    step = (end - start) / len(text)
+    return {"start": start, "end": end, "text": text, "seg": seg,
+            "words": [{"start": round(start + i * step, 3), "end": round(start + (i + 1) * step, 3), "text": ch}
+                      for i, ch in enumerate(text)]}
+
+
+def counts(stats):
+    return {k: v for k, v in stats.items() if not k.startswith("_")}
+
+
+def assert_words_spell(cue):
+    ws = cue.get("words")
+    if ws is None:
+        return
+    assert "".join(w["text"] for w in ws) == cue["text"]
+    assert all(w["start"] <= w["end"] for w in ws)
+    assert all(a["end"] <= b["start"] for a, b in zip(ws, ws[1:]))
+    assert all(cue["start"] <= w["start"] and w["end"] <= cue["end"] for w in ws)
+
+
+def test_an_agreeing_line_takes_its_text_from_the_track_and_its_time_from_whisper():
+    cues = [wcue("明日は雨が降りそうですね", 1.4, 3.2)]
+    speech = [[1.3, 3.3]]
+    stats: dict = {}
+    out, seg_id = server.assist_cues(cues, [[1.0, 3.5, "明日は雨が降りそうですね。"]], speech, LIMITS, 7, None, stats)
+    assert counts(stats) == {"aligned": 1}
+    (cue,) = out
+    assert cue["text"] == "明日は雨が降りそうですね。" and cue["src"] == "human" and cue["seg"] == 7 and seg_id == 8
+    # Snapped to the onset as a Whisper cue is, not the track's 1.0; out a beat after the audio.
+    assert cue["start"] == pytest.approx(1.4, abs=0.01)
+    assert 3.2 < cue["end"] <= 3.2 + LIMITS.lead_out + 0.01
+    assert_words_spell(cue)
+    assert [w["text"] for w in cue["words"]] == ["明日", "は", "雨", "が", "降", "りそうですね。"]
+
+
+def test_a_line_whisper_heard_differently_keeps_whisper():
+    cues = [wcue("全然違う話をしている", 1.4, 3.2)]
+    stats: dict = {}
+    out, _ = server.assist_cues([dict(c) for c in cues], [[1.0, 3.5, "明日は雨が降りそうですね。"]], [[1.3, 3.3]],
+                                LIMITS, 0, None, stats)
+    assert counts(stats) == {"kept_whisper": 1}
+    assert [c["text"] for c in out] == ["全然違う話をしている"] and "src" not in out[0]
+
+
+def test_a_line_over_audio_whisper_wrote_nothing_for_keeps_its_own_times():
+    """Music, or a stretch the detector missed: the person heard it, Whisper did not."""
+    cues = [wcue("明日は雨が降りそうですね", 1.4, 3.2)]
+    lines = [[1.0, 3.5, "明日は雨が降りそうですね。"], [10.0, 14.0, "♪春の風が吹く"]]
+    stats: dict = {}
+    out, _ = server.assist_cues(cues, [[a, b, server.clean_subtitle_text(t)] for a, b, t in lines],
+                                [[1.3, 3.3]], LIMITS, 0, None, stats)
+    assert counts(stats) == {"aligned": 1, "track": 1}
+    assert out[1] == {"start": 10.0, "end": 14.0, "text": "春の風が吹く", "src": "human", "seg": 1}
+
+
+def test_a_line_timed_away_from_its_speech_leaves_it_to_whisper():
+    """The person's line sits ten seconds before the speech: Whisper heard that speech, so the
+    line is not over music, and showing it on its own times would show the text twice."""
+    cues = [wcue("みんなで泳ぎましたね", 43.5, 44.5, seg=0)]
+    stats: dict = {}
+    out, _ = server.assist_cues(cues, [[33.7, 34.3, "みんなで泳ぎましたね。"]], [[43.4, 44.6]], LIMITS, 1, None, stats)
+    assert [(c["text"], c.get("src")) for c in out] == [("みんなで泳ぎましたね", None)]
+    assert counts(stats) == {"kept_whisper": 1}
+
+
+def test_lines_after_one_that_claimed_their_speech_leave_it_to_whisper():
+    """An earlier line that reached over the next lines' speech leaves them nothing to align:
+    they are not lines over music, and must not push Whisper's cues aside."""
+    cues = [wcue("おつかれさまでしたまたあした", 1.0, 6.0, seg=0)]
+    lines = [[1.0, 2.0, "おつかれさまでした。またあした。"], [3.0, 5.0, "またあした。"]]
+    stats: dict = {}
+    out, _ = server.assist_cues(cues, lines, [[0.9, 6.1]], LIMITS, 1, None, stats)
+    assert counts(stats) == {"aligned": 1, "kept_whisper": 1}
+    assert [c["text"] for c in out] == ["おつかれさまでした。またあした。"]
+
+
+def test_speech_the_track_has_no_line_for_keeps_whisper():
+    cues = [wcue("明日は雨が降りそうですね", 1.4, 3.2, seg=0), wcue("ちょっと待ってください", 20.0, 22.0, seg=1)]
+    out, _ = server.assist_cues(cues, [[1.0, 3.5, "明日は雨が降りそうですね。"]], [[1.3, 3.3], [19.9, 22.1]],
+                                LIMITS, 2)
+    assert [(c["text"], c.get("src")) for c in out] == [("明日は雨が降りそうですね。", "human"),
+                                                       ("ちょっと待ってください", None)]
+
+
+def test_whisper_words_beside_an_aligned_line_stay_as_a_cue_and_a_fringe_goes():
+    cues = [wcue("明日は雨が降りそうですねところで明日の予定は", 1.0, 5.0)]
+    lines = [[0.8, 3.0, "明日は雨が降りそうですね。"]]
+    out, _ = server.assist_cues(cues, lines, [[0.9, 5.1]], LIMITS, 1)
+    assert [c["text"] for c in out] == ["明日は雨が降りそうですね。", "ところで明日の予定は"]
+    assert "src" not in out[1] and out[1]["seg"] == 0 and out[0]["end"] < out[1]["start"]
+    for c in out:
+        assert_words_spell(c)
+    # Two characters left over are the line's fringe, not a line of their own.
+    cues = [wcue("明日は雨が降りそうですねえと", 1.0, 3.5)]
+    out, _ = server.assist_cues(cues, lines, [[0.9, 3.6]], LIMITS, 1)
+    assert [c["text"] for c in out] == ["明日は雨が降りそうですね。"]
+
+
+def test_two_lines_inside_one_whisper_cue_each_take_their_own_words():
+    cues = [wcue("そうですね散歩に行こうか", 4.1, 6.0)]
+    out, _ = server.assist_cues(cues, [[4.0, 5.0, "そうですね。"], [5.0, 6.2, "散歩に行こうか。"]], [[4.0, 6.1]],
+                                LIMITS, 0)
+    assert [c["text"] for c in out] == ["そうですね。", "散歩に行こうか。"]
+    assert out[0]["end"] <= out[1]["start"]
+    for c in out:
+        assert_words_spell(c)
+
+
+def test_a_sentence_said_twice_and_written_once_is_one_cue_over_both():
+    """The person covered the repeat with their line; Whisper's second spelling does not stand beside it."""
+    cues = [wcue("あれは烏龍茶です", 1.0, 2.5, seg=0), wcue("あれは烏龍茶です", 3.5, 5.0, seg=1)]
+    out, _ = server.assist_cues(cues, [[0.8, 5.5, "あれはウーロン茶です。"]], [[0.9, 2.6], [3.4, 5.1]], LIMITS, 2)
+    assert [c["text"] for c in out] == ["あれはウーロン茶です。"]
+    assert out[0]["start"] == pytest.approx(0.9, abs=0.1) and out[0]["end"] >= 5.0
+    assert_words_spell(out[0])
+
+
+def test_a_line_whose_times_are_too_short_for_its_text_still_finds_it():
+    """Three questions written over three seconds: the search reaches as far as the text could take."""
+    text = "何を食べますか誰と来ますか何時に帰りますか"
+    cues = [wcue(text, 10.0, 16.0)]
+    out, _ = server.assist_cues(cues, [[10.0, 13.0, "何を食べますか？誰と来ますか？何時に帰りますか？"]],
+                                [[9.9, 16.1]], LIMITS, 1)
+    assert [c.get("src") for c in out] == ["human"] and out[0]["end"] >= 16.0
+
+
+def test_a_word_spelt_in_kana_on_one_side_gets_half_credit():
+    line, region = list("やさしいひとだね"), list("優しい人だね")
+    pairs, matches, first, last = server.align_line(line, region)
+    assert 2 * matches / (len(line) + last - first) < server.HUMAN_MIN_SIMILARITY
+    assert server.line_similarity(line, region, pairs, matches, last - first) >= server.HUMAN_MIN_SIMILARITY
+    # Different script on every character and nothing shared stays under the bar.
+    line, region = list("あいうえ"), list("漢字熟語")
+    pairs, matches, first, last = server.align_line(line, region)
+    assert server.line_similarity(line, region, pairs, matches, last - first) <= 0.5
+
+
+def test_a_window_end_cuts_what_the_window_does_not_own():
+    cues = [wcue("明日は雨が降りそうですね", 1.4, 3.2)]
+    out, _ = server.assist_cues(cues, [[1.0, 3.5, "明日は雨が降りそうですね。"]], [[1.3, 3.3]], LIMITS, 0,
+                                window_end=3.4)
+    assert out[0]["end"] <= 3.4
+
+
+def test_a_whisper_cue_echoing_the_next_windows_line_goes():
+    """The head of a line whose speech starts before the window's end: the next window shows it."""
+    cues = [wcue("明日は雨が降りそうですね", 1.4, 3.2, seg=0), wcue("ちょっと待っ", 28.6, 29.9, seg=1)]
+    nxt = [30.2, 33.0, "ちょっと待ってください。"]
+    stats: dict = {}
+    out, _ = server.assist_cues(cues, [[1.0, 3.5, "明日は雨が降りそうですね。"]], [[1.3, 3.3], [28.5, 33.0]],
+                                LIMITS, 2, 30.0, stats, [nxt])
+    assert [c["text"] for c in out] == ["明日は雨が降りそうですね。"] and stats["echoes"] == 1
+    # Not a cue saying something else, nor one far from the line.
+    other = [wcue("全然違う話", 28.6, 29.9, seg=1)]
+    assert len(server.assist_cues(other, [], [[28.5, 33.0]], LIMITS, 2, 30.0, None, [nxt])[0]) == 1
+    far = [wcue("ちょっと待っ", 20.0, 21.0, seg=1)]
+    assert len(server.assist_cues(far, [], [[19.0, 33.0]], LIMITS, 2, 30.0, None, [nxt])[0]) == 1
+    assert server.neighbour_lines([[1.0, 3.0, "あ"], [10.0, 12.0, "い"], [31.0, 33.0, "う"], [40.0, 41.0, "え"]],
+                                  5.0, 30.0) == [[1.0, 3.0, "あ"], [31.0, 33.0, "う"]]
+
+
+def test_a_line_too_long_for_the_screen_is_cut_at_its_own_sentence_marks():
+    text = "今週は川の話をしました。橋を渡って向こう岸まで歩いてみましたがどうでしたか？" \
+           "足は疲れませんでしたか？来週は山の話をしますから地図を用意してまた見に来てください。"
+    pieces = server.split_long_line([10.0, 30.0, text], LIMITS)
+    assert "".join(p[2] for p in pieces) == text and len(pieces) == 2
+    assert all(len(p[2]) <= LIMITS.max_chars * LIMITS.max_lines for p in pieces)
+    # Shared over the line's reach: a line this long had times too short for it.
+    assert pieces[0][0] == 10.0 and pieces[-1][1] == pytest.approx(server.line_reach([10.0, 30.0, text]), abs=0.01)
+    assert pieces[0][2].endswith("？")
+    short = [1.0, 2.0, "はい。そうです。"]
+    assert server.split_long_line(short, LIMITS) == [short]
+
+
+def test_a_cue_without_words_counts_as_one_word():
+    cues = [{"start": 1.4, "end": 3.2, "text": "明日は雨が降りそうですね", "seg": 0}]
+    out, _ = server.assist_cues(cues, [[1.0, 3.5, "明日は雨が降りそうですね。"]], [[1.3, 3.3]], LIMITS, 1)
+    assert out[0]["text"] == "明日は雨が降りそうですね。" and out[0]["src"] == "human"
+    assert_words_spell(out[0])
+
+
+def test_a_window_ends_at_the_speech_before_a_line_that_straddles_it():
+    lines = [[1.0, 3.0, "あ"], [28.0, 33.0, "い"]]
+    speech = [[0.9, 3.1], [27.6, 33.2]]
+    # The onset of the line's speech, not the line's own start: the person's times run late.
+    assert server.human_window_end(lines, speech, 0.0, 30.0, 30.0) == pytest.approx(27.3)  # in the silence before it
+    assert server.human_window_end(lines[:1], speech, 0.0, 30.0, 30.0) == 30.0  # nothing straddles
+    assert server.human_window_end(lines, [[0.9, 3.1], [5.0, 33.2]], 0.0, 30.0, 30.0) == 30.0  # no onset late enough
+    # An onset inside another line is no place to cut, unless within the slack of that line's edges.
+    flush = [[14.0, 24.0, "う"], [24.0, 33.0, "え"]]
+    assert server.human_window_end(flush, [[13.8, 23.0], [23.4, 33.0]], 0.0, 30.0, 30.0) == pytest.approx(23.2)
+    assert server.human_window_end(flush, [[2.0, 3.0], [13.8, 18.0], [18.5, 33.0]], 0.0, 30.0, 30.0) == \
+        pytest.approx(13.5)
+    assert server.human_window_end(flush, [[5.0, 18.0], [18.5, 33.0]], 0.0, 30.0, 30.0) == 30.0  # too early
+    # A line whose times are too short for its text reaches past them.
+    long = [[26.0, 27.0, "あいうえおかきくけこさしすせそたちつてとなにぬねの"]]
+    assert server.human_window_end(long, [[20.0, 25.0], [25.8, 33.0]], 0.0, 30.0, 30.0) == pytest.approx(25.5)
+
+
+def test_a_line_belongs_to_the_window_holding_most_of_it():
+    lines = [[1.0, 3.0, "あ"], [27.0, 33.0, "い"], [29.5, 30.5, "う"]]
+    assert server.lines_in_window(lines, 0.0, 30.0) == [lines[0]]
+    assert server.lines_in_window(lines, 30.0, 60.0) == lines[1:]
+
+
+# --------------------------------------------------------------------------- one window, end to end
+
+class FakeModel:
+    def __init__(self, segs):
+        self.segs = segs
+
+    def detect_language(self, audio=None, **kwargs):
+        return "ja", 0.99, []
+
+    def transcribe(self, audio, **kwargs):
+        return iter(list(self.segs)), None
+
+
+def seg(text, start, end):
+    step = (end - start) / len(text)
+    ws = [server.Word(ch, start + i * step, start + (i + 1) * step, 0.9) for i, ch in enumerate(text)]
+    return SimpleNamespace(text=text, start=start, end=end, words=ws, no_speech_prob=0.05, avg_logprob=-0.2,
+                           compression_ratio=1.2)
+
+
+def make_worker(monkeypatch, tmp_path, segs, speech, **overrides):
+    monkeypatch.setattr(server, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(server, "detect_speech", lambda audio, offset=0.0: [[offset + a, offset + b] for a, b in speech])
+    base = dict(first_window=20.0, window=30.0, lookahead=900.0, model="large-v3", language="ja",
+                language_patience=0.0, beam_size=1, initial_prompt="", idle_minutes=30, client_timeout=30.0,
+                lyrics="off", human_subtitles="auto")
+    base.update(overrides)
+    app = server.App(SimpleNamespace(**base), model=FakeModel(segs), device="cpu", compute_type="int8")
+    app.fetcher = SimpleNamespace(fetch=lambda s: None, start_human_check=lambda s, info=None: None)
+    return server.Transcriber(app), app
+
+
+def spoken_session(seconds=60.0):
+    audio = np.full(int(seconds * RATE), 0.05, dtype=np.float32)
+    return server.Session(video_id=VIDEO, url="u", status="ready", audio=audio, duration=seconds)
+
+
+SEGS = [seg("明日は雨が降りそうですね", 1.4, 3.2), seg("ちょっと待ってください", 10.0, 12.0)]
+SPEECH = [[1.3, 3.3], [9.9, 12.1]]
+TRACK = [[1.0, 3.5, "明日は雨が降りそうですね。"], [15.0, 17.0, "春の風が吹く"]]
+
+
+def test_a_window_puts_the_track_in(monkeypatch, tmp_path, caplog):
+    worker, app = make_worker(monkeypatch, tmp_path, SEGS, SPEECH)
+    s = spoken_session()
+    s.human_track, s.human_lines = "ja.json3:abc", [list(line) for line in TRACK]
+    with caplog.at_level("INFO", logger=server.log.name):
+        worker.process(s, 0.0, 30.0)
+    assert [(c["text"], c.get("src")) for c in s.cues] == [("明日は雨が降りそうですね。", "human"),
+                                                          ("ちょっと待ってください", None),
+                                                          ("春の風が吹く", "human")]
+    assert s.covered == [[0.0, 30.0]]  # covered is still what Whisper has seen
+    assert "creator's subtitles: 1 lines aligned, 1 on their own times, 0 left to Whisper" in caplog.text
+
+
+def test_human_subtitles_off_builds_whisper_alone(monkeypatch, tmp_path):
+    worker, app = make_worker(monkeypatch, tmp_path, SEGS, SPEECH, human_subtitles="off")
+    s = spoken_session()
+    s.human_track, s.human_lines = "ja.json3:abc", [list(line) for line in TRACK]
+    worker.process(s, 0.0, 30.0)
+    assert [c["text"].rstrip("。") for c in s.cues] == ["明日は雨が降りそうですね", "ちょっと待ってください"]
+    assert all("src" not in c for c in s.cues)  # and no line on its own times
+    assert not server.human_subtitles_on(app.args)
+    assert app.human_lines(s) == []
+
+
+def test_a_line_straddling_the_window_end_is_left_to_the_next_window(monkeypatch, tmp_path):
+    worker, app = make_worker(monkeypatch, tmp_path, SEGS, SPEECH)
+    s = spoken_session()
+    s.human_track, s.human_lines = "ja.json3:abc", [[1.0, 3.5, "明日は雨が降りそうですね。"], [27.0, 33.0, "それでは"]]
+    worker, app = make_worker(monkeypatch, tmp_path, SEGS, SPEECH + [[26.8, 33.0]])
+    worker.process(s, 0.0, 30.0)
+    assert s.covered == [[0.0, 26.5]]
+    assert all(c["start"] < 26.5 for c in s.cues)
+
+
+def test_a_live_session_never_uses_a_track(monkeypatch, tmp_path):
+    worker, app = make_worker(monkeypatch, tmp_path, SEGS, SPEECH)
+    s = spoken_session()
+    s.live = True
+    s.human_lines = [list(line) for line in TRACK]
+    assert app.human_lines(s) == []
+
+
 # --------------------------------------------------------------------------- cache and /sync
 
 def make_app(monkeypatch, tmp_path, **overrides):
@@ -230,6 +543,47 @@ def test_a_record_never_asked_has_no_key_and_loads_as_never_asked(monkeypatch, t
     app.load_cache(again)
     assert again.human_track is None
     assert server.human_lines_from_record({"track": "t", "lines": [[2.0, 1.0, "x"], "bad", [1, 2, ""]]}) == ("t", [])
+
+
+def test_sync_sends_no_source_unless_the_words_are_asked_for(monkeypatch, tmp_path):
+    app = make_app(monkeypatch, tmp_path)
+    s = server.Session(video_id=VIDEO, url="u", duration=10.0, status="ready")
+    s.cues = [dict(HUMAN_CUE, id=0), dict(WHISPER_CUE, id=1)]
+    s.human_track = "ja.json3:abc"
+    app.sessions[VIDEO] = s
+    plain = app.sync(VIDEO, "u", 0.0, 0)["cues"]
+    assert json.dumps(plain, ensure_ascii=False) == (
+        '[{"start": 1.0, "end": 2.0, "text": "はい。", "seg": 0, "id": 0}, '
+        '{"start": 3.0, "end": 4.0, "text": "そう", "seg": 1, "id": 1}]')
+    worded = app.sync(VIDEO, "u", 0.0, 0, words=True)["cues"]
+    assert worded[0]["src"] == "human" and "src" not in worded[1] and worded[0]["words"] == HUMAN_CUE["words"]
+
+
+def test_a_whisper_only_answer_is_byte_for_byte_what_it_was():
+    cue = {"start": 3.0, "end": 4.0, "text": "そう", "seg": 1, "id": 1}
+    assert server.without_words(cue) is cue
+    assert server.without_words(dict(cue, words=[])) == cue
+
+
+def test_a_track_that_arrives_late_rebuilds_the_cues_under_a_new_token(monkeypatch, tmp_path):
+    app = make_app(monkeypatch, tmp_path)
+    s = server.Session(video_id=VIDEO, url="u", duration=30.0, status="ready")
+    s.cues = [dict(wcue("明日は雨が降りそうですね", 1.4, 3.2, seg=0), id=0),
+              dict(wcue("ちょっと待ってください", 10.0, 12.0, seg=1), id=1)]
+    s.covered, s.speech, s.seg_next = [[0.0, 20.0]], [[1.3, 3.3], [9.9, 12.1]], 2
+    token = s.token
+    app.sessions[VIDEO] = s
+    app.apply_human_track(s, "ja.json3:abc", [[1.0, 3.5, "明日は雨が降りそうですね。"], [19.0, 23.0, "先の行"]])
+    assert s.token != token
+    assert [(c["id"], c["text"], c.get("src")) for c in s.cues] == [(0, "明日は雨が降りそうですね。", "human"),
+                                                                   (1, "ちょっと待ってください", None)]
+    assert s.seg_next == 3
+    data = json.loads((tmp_path / f"{VIDEO}.cues.json").read_text(encoding="utf-8"))
+    assert data["human_subs"]["track"] == "ja.json3:abc" and data["cues"][0]["src"] == "human"
+    # A second arrival (a restart, a stale thread) rebuilds nothing already built with a track.
+    token = s.token
+    app.apply_human_track(s, "ja.json3:abc", [[1.0, 3.5, "明日は雨が降りそうですね。"]])
+    assert s.token == token
 
 
 # --------------------------------------------------------------------------- the request
