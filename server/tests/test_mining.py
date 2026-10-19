@@ -720,9 +720,29 @@ def test_the_stream_is_resolved_once_per_video_and_a_failure_is_kept(rig):
         with pytest.raises(server.FrameUnavailable, match="did not resolve"):
             frames.grab(OTHER, 1.0)
     assert resolves == [VIDEO, OTHER]
-    clock.t += server.FRAME_STREAM_TTL + 1
+    clock.t += server.FRAME_RETRY + 1  # a failure that was no verdict is tried again
+    with pytest.raises(server.FrameUnavailable):
+        frames.grab(OTHER, 1.0)
+    assert resolves == [VIDEO, OTHER, OTHER]
+    clock.t += server.FRAME_STREAM_TTL
     frames.grab(VIDEO, 1.0)
-    assert resolves == [VIDEO, OTHER, VIDEO]
+    assert resolves == [VIDEO, OTHER, OTHER, VIDEO]
+
+
+def test_a_drm_verdict_stands_as_long_as_a_stream_would():
+    clock = SimpleNamespace(t=NOW)
+    resolves = []
+
+    def resolve(vid):
+        resolves.append(vid)
+        raise server.FrameUnavailable("the video is DRM-protected")
+
+    frames = server.FrameGrabber(resolve=resolve, decode=lambda url, t: b"", clock=lambda: clock.t)
+    for step in (0, server.FRAME_RETRY + 1):
+        clock.t += step
+        with pytest.raises(server.FrameUnavailable, match="DRM"):
+            frames.grab(VIDEO, 1.0)
+    assert resolves == [VIDEO]
 
 
 def test_an_expired_stream_url_is_resolved_again_once(rig):

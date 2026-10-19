@@ -4689,12 +4689,16 @@ def mine_request(value) -> dict:
 # The card's picture is a frame of the video at the cue, decoded from YouTube's own stream, never
 # from the browser: an H.264 stream of 720p at most, resolved once per video through yt-dlp (with
 # the audio fetch's cookies) and kept for FRAME_STREAM_TTL, seeked and decoded by PyAV. A video
-# whose stream is DRM-protected or does not resolve gets the audio alone; that failure is kept as
-# long as a stream would be, so a card mined every minute does not ask YouTube every minute.
+# whose stream is DRM-protected or does not resolve gets the audio alone; that failure is kept
+# (FRAME_RETRY, or FRAME_STREAM_TTL for DRM), so a card mined every minute does not ask YouTube
+# every minute.
 
 FRAME_FORMAT = "bestvideo[height<=720][vcodec^=avc1]/bestvideo[height<=720]/best[height<=720]"
 FRAME_STREAM_TTL = 4 * 3600.0  # googlevideo URLs live about 6 h
 FRAME_FRESH = 120.0  # a stream URL this young is not re-resolved when it fails to open
+# A resolve that raised (YouTube's bot check, the network) is tried again after this; a verdict
+# (DRM, live, no stream up to 720p) stands as long as a URL would.
+FRAME_RETRY = 600.0
 
 
 class FrameUnavailable(Exception):
@@ -4751,8 +4755,8 @@ def frame_jpeg(source: str, t: float) -> bytes:
 
 class FrameGrabber:
     """Pictures for mined cards. `resolve(video_id)` is the stream URL (yt-dlp), `decode(url, t)` the
-    JPEG (frame_jpeg); both are replaceable for tests. One resolve per video per FRAME_STREAM_TTL,
-    a failed one included."""
+    JPEG (frame_jpeg); both are replaceable for tests. One resolve per video per FRAME_STREAM_TTL;
+    a failed one is tried again after FRAME_RETRY."""
 
     def __init__(self, fetcher=None, resolve=None, decode=None, clock=time.time):
         self.fetcher = fetcher
@@ -4760,7 +4764,7 @@ class FrameGrabber:
         self.decode = decode or frame_jpeg
         self.clock = clock
         self.lock = threading.Lock()
-        self.streams: dict = {}  # video_id -> (url or None, resolved at, why it failed)
+        self.streams: dict = {}  # video_id -> (url or None, resolved at, why it failed, kept for)
 
     def resolve_stream(self, video_id: str) -> str:
         import yt_dlp
@@ -4782,20 +4786,23 @@ class FrameGrabber:
         with self.lock:
             now = self.clock()
             cached = self.streams.get(video_id)
-            if cached and not fresh and now - cached[1] < FRAME_STREAM_TTL:
+            if cached and not fresh and now - cached[1] < cached[3]:
                 if cached[0] is None:
                     raise FrameUnavailable(cached[2])
                 return cached[0]
             # Out of date entries go, so the dict holds the videos of the last hours alone.
-            for vid in [v for v, (_, at, _) in self.streams.items() if now - at >= FRAME_STREAM_TTL]:
+            for vid in [v for v, entry in self.streams.items() if now - entry[1] >= entry[3]]:
                 del self.streams[vid]
             try:
                 url = self.resolve(video_id)
+            except FrameUnavailable as exc:
+                self.streams[video_id] = (None, now, str(exc), FRAME_STREAM_TTL)
+                raise
             except Exception as exc:  # noqa: BLE001 - yt-dlp raises its own types; all mean no picture
-                reason = str(exc) if isinstance(exc, FrameUnavailable) else f"the stream did not resolve ({str(exc)[:160]})"
-                self.streams[video_id] = (None, now, reason)
+                reason = f"the stream did not resolve ({str(exc)[:160]})"
+                self.streams[video_id] = (None, now, reason, FRAME_RETRY)
                 raise FrameUnavailable(reason) from None
-            self.streams[video_id] = (url, now, None)
+            self.streams[video_id] = (url, now, None, FRAME_STREAM_TTL)
             return url
 
     def grab(self, video_id: str, t: float) -> bytes:
@@ -4804,7 +4811,7 @@ class FrameGrabber:
             return self.decode(url, t)
         except FrameUnavailable:
             with self.lock:
-                age = self.clock() - self.streams.get(video_id, (None, 0.0, None))[1]
+                age = self.clock() - self.streams.get(video_id, (None, 0.0))[1]
             if age < FRAME_FRESH:
                 raise
         # An old URL that no longer opens has expired: one fresh resolve, then that answer stands.
