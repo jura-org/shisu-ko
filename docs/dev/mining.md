@@ -247,7 +247,9 @@ is not a forward span, asks the server's `/clip` for the cue plus `clipPaddingMs
 `clipFormat` (`fetchClip()`, 20 s), and saves `shisuko_<video>_<start ms>.jpg` and `.mp3` /
 `.wav` through `downloadBytes()`: a Blob and an object URL in Firefox (which refuses `data:` URLs
 there), revoked after two minutes, a `data:` URL in Chrome's service worker, which has no
-`URL.createObjectURL`. What it saves it saves; what is missing it names. This is the only use of
+`URL.createObjectURL` (Chromium saved a 20 MB one whole; the longest clip, 60 s of WAV, is
+7.7 MB as base64). Each file is saved on its own; what it saves it saves, and what is missing it names, with the reason.
+An answer that lands after `enabled` went off ends the mine and saves nothing. This is the only use of
 `downloads`, which stays a permission because the published set holds it.
 
 ### Switches

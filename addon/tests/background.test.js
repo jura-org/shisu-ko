@@ -959,9 +959,13 @@ test("saveMine saves what it has, says what is missing, and refuses what it cann
   assert.equal((await bg.dispatch({ type: "saveMine", videoId: "abcdef1234", cue: { start: 5, end: 2 }, frame: FRAME })).ok, false);
   assert.deepEqual(strict.calls, []);
   assert.equal(bg.downloads.length, 0);
-  // A browser that refuses the download says so.
+  // A browser that refuses the download says so, file by file.
   const refused = loadBackground({ fetch: clipFetch({ mime: "audio/mpeg", body: "x" }).fetch, download: async () => { throw new Error("Download canceled"); } });
-  assert.deepEqual(plain(await refused.dispatch({ type: "saveMine", videoId: "abcdef1234", cue: CUE, frame: FRAME })), { ok: false, error: "Saving failed: Download canceled" });
+  assert.deepEqual(plain(await refused.dispatch({ type: "saveMine", videoId: "abcdef1234", cue: CUE, frame: FRAME })),
+    { ok: false, error: "Nothing saved: no picture (Download canceled); no audio (Download canceled)" });
+  // A frame that is no base64 is no picture, never a rejection.
+  const garbled = await loadBackground({ fetch: clipFetch({ mime: "audio/mpeg", body: "x" }).fetch }).dispatch({ type: "saveMine", videoId: "abcdef1234", cue: CUE, frame: "data:image/jpeg;base64,%%%" });
+  assert.match(garbled.message, /saved the audio .*\(no picture/);
 });
 
 // ------------------------------------------------------------------ word colours

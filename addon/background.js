@@ -787,7 +787,8 @@ function bytesToBase64(bytes) {
 
 // Firefox refuses data: URLs in downloads.download (bug 1622986) and takes an object URL made
 // here, in the background page that owns it. Chrome's service worker has no
-// URL.createObjectURL, and takes the data: URL.
+// URL.createObjectURL, and takes the data: URL. Chromium saved a 20 MB data: URL whole, more
+// than the server's longest clip (MAX_CLIP_SECONDS, 60 s of WAV: 7.7 MB as base64).
 async function downloadBytes(bytes, mime, filename) {
   const options = { filename, conflictAction: "uniquify", saveAs: false };
   if (typeof URL === "undefined" || typeof URL.createObjectURL !== "function") {
@@ -817,6 +818,16 @@ async function fetchClip(settings, videoId, start, end) {
   }
 }
 
+// The JPEG bytes of the tab's frame, or null for none (or one that is not a JPEG data: URL).
+function frameBytes(frame) {
+  if (typeof frame !== "string" || !frame.startsWith(FRAME_PREFIX)) return null;
+  try {
+    return Uint8Array.from(atob(frame.slice(FRAME_PREFIX.length)), (c) => c.charCodeAt(0));
+  } catch (err) {
+    return null;
+  }
+}
+
 // {ok, message} or {ok: false, error}; never rejects. `frame` is the tab's JPEG data: URL, or
 // null where the video would not be drawn (DRM taints the canvas).
 async function saveMine(msg) {
@@ -828,25 +839,21 @@ async function saveMine(msg) {
   const name = `${SAVE_FOLDER}/shisuko_${msg.videoId}_${Math.round(cue.start * 1000)}`;
   const saved = [];
   const missing = [];
-  try {
-    if (typeof msg.frame === "string" && msg.frame.startsWith(FRAME_PREFIX)) {
-      const binary = atob(msg.frame.slice(FRAME_PREFIX.length));
-      const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
-      await downloadBytes(bytes, "image/jpeg", `${name}.jpg`);
-      saved.push("the picture");
-    } else {
-      missing.push("no picture (the video cannot be drawn)");
+  // Each file on its own: a refused clip leaves the picture saved, and the toast says both.
+  async function save(what, bytes, mime, filename) {
+    try {
+      await downloadBytes(bytes, mime, filename);
+      saved.push(`the ${what}`);
+    } catch (err) {
+      missing.push(`no ${what} (${String((err && err.message) || err)})`);
     }
-    const clip = await fetchClip(settings, msg.videoId, Math.max(0, cue.start - pad), cue.end + pad);
-    if (clip.bytes) {
-      await downloadBytes(clip.bytes, clip.mime, `${name}.${clip.ext}`);
-      saved.push("the audio");
-    } else {
-      missing.push(`no audio (${clip.error})`);
-    }
-  } catch (err) {
-    return { ok: false, error: "Saving failed: " + String((err && err.message) || err) };
   }
+  const picture = frameBytes(msg.frame);
+  if (picture) await save("picture", picture, "image/jpeg", `${name}.jpg`);
+  else missing.push("no picture (the video cannot be drawn)");
+  const clip = await fetchClip(settings, msg.videoId, Math.max(0, cue.start - pad), cue.end + pad);
+  if (clip.bytes) await save("audio", clip.bytes, clip.mime, `${name}.${clip.ext}`);
+  else missing.push(`no audio (${clip.error})`);
   if (!saved.length) return { ok: false, error: "Nothing saved: " + missing.join("; ") };
   const note = missing.length ? ` (${missing.join("; ")})` : "";
   return { ok: true, message: `No Anki to mine into: saved ${saved.join(" and ")} to Downloads/${SAVE_FOLDER}${note}` };
