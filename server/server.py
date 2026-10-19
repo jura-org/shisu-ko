@@ -19,7 +19,9 @@ Endpoints
   GET  /health   -> {ok, version, model, default_model, model_loading, model_error, models, device, compute_type,
                      engine, language, launcher, anki_sync: {state, last, error}}
   POST /sync     -> {ok, session, status, error, duration, title, live, covered, speech, cues, next, busy,
-                     model, model_loading, model_error, heard, language_paused}
+                     model, model_loading, model_error, heard, language_paused}; a body carrying the
+                     extension's `anki` settings (or `mined_since`) also gets {mined, mined_next, anki_error}
+                     and may carry `mine`: {cue_id, nonce, session}, the viewer's own mine (Miner)
   GET  /clip?video_id=..&start=..&end=..&format=mp3|wav -> audio clip of a sentence (the portal's mining)
   GET  /sessions -> the videos the server holds, for diagnostics
   POST /update   -> {ok, restarting, version}: the server exits with EXIT_UPDATE so that run.cmd / run.sh
@@ -2531,10 +2533,12 @@ class Session:
     human_lines: list = field(default_factory=list)
     human_asked: bool = False
     # Mining (Miner): the Anki settings the client sent last (anki_settings()), None until one did;
-    # and the log of what was attached (seq counts every entry ever made).
+    # the log of what was attached, which /sync answers as `mined` (seq counts every entry ever
+    # made); and the nonces of the mines asked for, with when, so a resent one runs once.
     anki: Optional[dict] = None
     mined: list = field(default_factory=list)
     mine_seq: int = 0
+    mine_nonces: dict = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock)
 
     def cache_path(self) -> Path:
@@ -4610,6 +4614,7 @@ ANKI_FIELD_NAME_RE = re.compile(r'[^\x00-\x1f\x7f"{}:<>]{0,64}')
 ANKI_SETTINGS_DEFAULT = {"auto": True, "picture": "Picture", "audio": "SentenceAudio", "sentence": "",
                          "word": "", "pad_ms": 200, "format": "mp3"}
 ANKI_PAD_MAX_MS = 2000
+MINE_NONCE_RE = re.compile(r"[A-Za-z0-9_-]{1,40}")
 
 
 def anki_settings(value) -> dict:
@@ -4638,6 +4643,20 @@ def anki_settings(value) -> dict:
             raise ValueError("anki.format must be mp3 or wav")
         out["format"] = value["format"]
     return out
+
+
+def mine_request(value) -> dict:
+    """The validated `mine` of a /sync body: {cue_id, nonce, session}; ValueError when malformed."""
+    if not isinstance(value, dict):
+        raise ValueError("mine must be an object")
+    cue_id, nonce, session = value.get("cue_id"), value.get("nonce"), value.get("session")
+    if isinstance(cue_id, bool) or not isinstance(cue_id, int) or cue_id < 0:
+        raise ValueError("mine.cue_id must be a cue id")
+    if not isinstance(nonce, str) or not MINE_NONCE_RE.fullmatch(nonce):
+        raise ValueError("mine.nonce is malformed")
+    if session is not None and (not isinstance(session, str) or len(session) > 40):
+        raise ValueError("mine.session is malformed")
+    return {"cue_id": cue_id, "nonce": nonce, "session": session}
 
 
 # --------------------------------------------------------------------------- mining: the picture
@@ -5430,14 +5449,29 @@ class App:
         due = s.retry_at or (s.error_at + self.args.retry_after)
         return {"retrying": True, "retry_in": round(max(0.0, due - now), 1)}
 
-    def sync(self, video_id: str, url: str, t: float, since: int, model=None, words: bool = False) -> dict:
+    def sync(self, video_id: str, url: str, t: float, since: int, model=None, words: bool = False,
+             anki=None, mine: Optional[dict] = None, mined_since: Optional[int] = None) -> dict:
         """The /sync answer. `words` asks for each cue's word timings; without it no cue carries
-        any, so a client that never asks sees exactly what it saw before the field existed."""
+        any, so a client that never asks sees exactly what it saw before the field existed.
+
+        `anki` is the client's mining settings (anki_settings()), `mine` a mine it asks for
+        (mine_request()), `mined_since` its cursor into the session's mining log. A body with
+        `anki` or `mined_since` is answered `mined` (the log's entries from the cursor on; none for
+        a cursor of None, which asks only where the log stands), `mined_next` and, for settings
+        that did not validate, `anki_error`; every other answer is what it was before."""
         self.request_model(model)
+        settings, anki_error = None, None
+        if anki is not None:
+            try:
+                settings = anki_settings(anki)
+            except ValueError as exc:
+                anki_error = str(exc)
         s = self.get_session(video_id, url)
         with s.lock:
             s.want_t = max(0.0, float(t))
             s.last_sync = time.time()
+            if settings is not None:
+                s.anki = settings
             since = max(0, min(int(since), len(s.cues)))
             resp = {
                 "ok": True,
@@ -5461,9 +5495,45 @@ class App:
             if s.status == "error":
                 # Added only to an error, so every other answer is what it always was.
                 resp.update(self.retry_state(s, time.time()))
+        if anki is not None or mined_since is not None:
+            resp.update(self.mined_since(s, mined_since))
+            if anki_error:
+                resp["anki_error"] = anki_error
+        # After the log is read: an outcome recorded at once (mining off) lands at or past
+        # `mined_next`, so the next answer carries it, whatever cursor this request had.
+        if mine is not None:
+            self.queue_mine(s, mine)
         resp.update(self.model_state(model))
         self.maybe_evict()
         return resp
+
+    def queue_mine(self, s: Session, mine: dict) -> None:
+        """Hand a mine to the miner, once per nonce: the client sends it again with every /sync
+        until the log answers it, so a lost answer never mines twice."""
+        now = time.time()
+        with s.lock:
+            s.mine_nonces = {n: at for n, at in s.mine_nonces.items() if now - at <= MINE_LOG_SECONDS}
+            if mine["nonce"] in s.mine_nonces:
+                return
+            s.mine_nonces[mine["nonce"]] = now
+            settings = s.anki
+        if self.miner is None:
+            Miner.record(s, {"nonce": mine["nonce"], "ok": False, "status": "off", "note": None,
+                             "message": "Mining is off on the server (--mine off, or the Docker image without --anki-url)"}, now)
+        elif settings is None:
+            Miner.record(s, {"nonce": mine["nonce"], "ok": False, "status": "error", "note": None,
+                             "message": "The mine came without the Anki settings; nothing attached"}, now)
+        else:
+            self.miner.request(s, settings, mine)
+
+    @staticmethod
+    def mined_since(s: Session, since: Optional[int]) -> dict:
+        with s.lock:
+            if since is not None and since > s.mine_seq:
+                since = 0  # a cursor from before a server restart: this log is all new to the client
+            events = [] if since is None else [
+                {k: e[k] for k in ("seq", "nonce", "ok", "status", "message", "note")} for e in s.mined if e["seq"] >= since]
+            return {"mined": events, "mined_next": s.mine_seq}
 
     def clip(self, video_id: str, start: float, end: float, fmt: str):
         """Audio clip for sentence mining. Raises ClipNotReady while the audio is still being fetched."""
@@ -5888,8 +5958,20 @@ class Handler(BaseHTTPRequestHandler):
             return
         # Opt-in: only a literal true adds the word timings, so every other body answers as before.
         words = body.get("words") is True
+        mined_since = body.get("mined_since")
+        if mined_since is not None and (isinstance(mined_since, bool) or not isinstance(mined_since, int) or mined_since < 0):
+            self._json(400, {"ok": False, "error": "invalid mined_since"})
+            return
         try:
-            self._json(200, self.app.sync(video_id, str(body.get("url") or ""), t, since, model, words))
+            mine = mine_request(body["mine"]) if body.get("mine") is not None else None
+        except ValueError as exc:
+            self._json(400, {"ok": False, "error": f"invalid mine: {exc}"})
+            return
+        # Only what the body carries: every other body reaches App.sync() exactly as before.
+        extra = {key: value for key, value in (("anki", body.get("anki")), ("mine", mine), ("mined_since", mined_since))
+                 if value is not None}
+        try:
+            self._json(200, self.app.sync(video_id, str(body.get("url") or ""), t, since, model, words, **extra))
         except Exception as exc:  # noqa: BLE001
             log.exception("sync failed")
             self._json(500, {"ok": False, "error": str(exc)})
