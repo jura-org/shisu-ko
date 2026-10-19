@@ -555,10 +555,9 @@ function applyBadge(decision) {
 }
 
 async function notify(id, title, message) {
-  const api = browser.notifications;
-  if (!api || typeof api.create !== "function") return false;
+  if (!browser.notifications || typeof browser.notifications.create !== "function") return false;
   try {
-    await api.create(id, { type: "basic", iconUrl: browser.runtime.getURL("icons/icon-128.png"), title, message });
+    await browser.notifications.create(id, { type: "basic", iconUrl: browser.runtime.getURL("icons/icon-128.png"), title, message });
     return true;
   } catch (err) {
     console.debug("Shisu-ko: notification failed:", err);
@@ -567,10 +566,9 @@ async function notify(id, title, message) {
 }
 
 async function clearNotification(id) {
-  const api = browser.notifications;
-  if (!api || typeof api.clear !== "function") return;
+  if (!browser.notifications || typeof browser.notifications.clear !== "function") return;
   try {
-    await api.clear(id);
+    await browser.notifications.clear(id);
   } catch (err) {
     /* already gone */
   }

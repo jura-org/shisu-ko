@@ -115,7 +115,8 @@ test("nativeMessaging is an optional permission, never a required one", () => {
 test("notifications is a required permission, and the manifest names no update_url", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ADDON, "manifest.json"), "utf8"));
   assert.ok(manifest.permissions.includes("notifications"));
-  assert.match(fs.readFileSync(path.join(ADDON, "background.js"), "utf8"), /browser\.notifications/, "the permission has its use");
+  // By its full name, so a reviewer who searches the package for the API finds the call.
+  assert.match(fs.readFileSync(path.join(ADDON, "background.js"), "utf8"), /browser\.notifications\.create\(/, "the permission has its use");
   assert.equal(manifest.browser_specific_settings.gecko.update_url, undefined);
   assert.equal(manifest.update_url, undefined);
   assert.equal(manifest.key, undefined);
