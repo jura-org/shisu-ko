@@ -167,6 +167,12 @@ SHISUKO_URL = ("127.0.0.1", 8790)
 YOMITAN_URL = ("127.0.0.1", 19633)
 ANKI_URL = ("127.0.0.1", 8765)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+# The word colours mark a line with the extension's own matcher, served from the checkout as it is:
+# one words.js for both, never a copy that could drift.
+WORDS_JS = Path(__file__).resolve().parent.parent / "addon" / "words.js"
+# What the page may say about the deck it holds: the server's token, nothing else (the deck is the
+# card setup's, chosen here).
+DECK_TOKEN_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 SHISUKO_HOME = Path(os.environ.get("SHISUKO_HOME") or Path.home() / ".shisu-ko")
 CONFIG_PATH = SHISUKO_HOME / "portal.json"
 YOMITAN_API_DOCS = "https://github.com/yomidevs/yomitan-api"
@@ -747,6 +753,13 @@ class Services:
             # Whisper's word timings per cue, for the word sweep; a server without them ignores it.
             "words": True,
         }
+        deck = body.get("deck")
+        if isinstance(deck, dict):
+            # The word colours: the card setup's deck (none: the deck the server saw a card mined
+            # into), the note's first field as the word, as the extension reads it by default.
+            since = deck.get("since")
+            payload["deck"] = {"name": str((self.card() or {}).get("deck") or ""),
+                               "since": since if isinstance(since, str) and DECK_TOKEN_RE.fullmatch(since) else None}
         status, data = request(SHISUKO_URL, "POST", "/sync", json.dumps(payload).encode(),
                                {"Content-Type": "application/json"}, timeout=10)
         reply = json.loads(data) if data else {}
@@ -1891,7 +1904,7 @@ class Handler(BaseHTTPRequestHandler):
             name = "icon-180.png"
         if not STATIC_NAME_RE.match(name) or ".." in name:
             return self.json(404, {"ok": False, "error": "not found"})
-        file = STATIC_DIR / name
+        file = WORDS_JS if name == "words.js" else STATIC_DIR / name
         if not file.is_file():
             return self.json(404, {"ok": False, "error": "not found"})
         extra = {"Content-Security-Policy": CSP} if name.endswith(".html") else {}

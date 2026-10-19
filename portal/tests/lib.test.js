@@ -312,3 +312,33 @@ test("ankiSyncText shows the server's Anki sync: off, syncing, the error, the la
   assert.equal(L.ankiSyncText({ state: "unreachable", last: null, error: "AnkiConnect is not answering" }, clock),
     "Anki sync failed: AnkiConnect is not answering");
 });
+
+// ------------------------------------------------------------ word colours
+
+const W = require("../../addon/words.js");
+const ROWS = [[30, "猫", "", "new", "atamadaka"], [10, "更に", "さらに", "learning", null], [20, "食べる", "", "learned", "nakadaka"]];
+
+test("applyDeck keeps the rows a full answer brings and applies a delta to them", () => {
+  let held = { token: null, status: null, rows: new Map() };
+  held = L.applyDeck(held, { token: "e1.1", status: "ok", full: true, notes: ROWS, removed: [] });
+  assert.equal(held.token, "e1.1");
+  assert.deepEqual(L.deckEntries(held.rows.values()), [["更に", "learning", null], ["さらに", "learning", null], ["食べる", "learned", "nakadaka"], ["猫", "new", "atamadaka"]]);
+  held = L.applyDeck(held, { token: "e1.2", status: "ok", full: false, notes: [[30, "猫", "", "learned", "atamadaka"]], removed: [20] });
+  assert.deepEqual(L.deckEntries(held.rows.values()), [["更に", "learning", null], ["さらに", "learning", null], ["猫", "learned", "atamadaka"]]);
+  // A verdict without rows (Anki away from the start, no deck) holds none; junk changes nothing.
+  assert.equal(L.applyDeck(held, { token: "nodeck", status: "no_deck" }).rows.size, 0);
+  assert.equal(L.applyDeck(held, null), held);
+  assert.equal(L.applyDeck(held, { token: "e1.3", status: "ok", notes: [[1, "", "", "new", null], "x"] }).rows.size, 2);
+});
+
+test("the server's rows mark a line through words.js, cut into the tokens Yomitan gave", () => {
+  const index = W.buildIndex(L.deckEntries(ROWS), []);
+  const text = "猫が食べる";
+  const marks = L.statusAt(W.markWords(text, index));
+  assert.deepEqual(marks, ["new", null, "learned", "learned", "learned"]);
+  // A token spanning a word and a particle is cut where the colour changes; a ruby piece stays whole.
+  const unit = { start: 0, end: 2, segs: [["猫が", ""]] };
+  assert.deepEqual(L.markedSegs(unit, marks), [{ text: "猫", reading: "", status: "new" }, { text: "が", reading: "", status: null }]);
+  const verb = { start: 2, end: 5, segs: [["食", "た"], ["べる", ""]] };
+  assert.deepEqual(L.markedSegs(verb, marks), [{ text: "食", reading: "た", status: "learned" }, { text: "べる", reading: "", status: "learned" }]);
+});

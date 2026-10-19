@@ -860,18 +860,27 @@ def test_start_anki_watcher_starts_the_miner_beside_the_sync(monkeypatch, tmp_pa
     monkeypatch.delenv("SHISUKO_CONTAINER", raising=False)
     app = make_app(monkeypatch, tmp_path)
     args = lambda **kw: SimpleNamespace(**{"anki_sync": None, "anki_url": None, "mine": None, "mine_picture": "on", **kw})  # noqa: E731
+    expired = []
+    monkeypatch.setattr(server.DeckIndexes, "notes_added", lambda self, ids: expired.append(ids))
     watcher = server.start_anki_watcher(args(anki_sync="off"), app)
-    assert started == ["anki-mine", "anki-sync"] and watcher.sync_on is False
-    assert isinstance(app.miner.frames, server.FrameGrabber) and watcher.on_new == app.miner.notes_added
+    assert started == ["anki-mine", "anki-deck", "anki-sync"] and watcher.sync_on is False
+    assert isinstance(app.miner.frames, server.FrameGrabber) and isinstance(app.decks, server.DeckIndexes)
+    # A new note reaches both: the miner judges it, and the deck indexes are read again.
+    watcher.on_new([5])
+    assert app.miner.jobs.get_nowait() == ("auto", 5) and expired == [[5]]
     app.miner = None
     server.start_anki_watcher(args(mine_picture="off"), app)
     assert app.miner.frames is None
     started.clear()
-    app.miner = None
-    assert server.start_anki_watcher(args(anki_sync="off", mine="off"), app) is None
+    app.miner = app.decks = None
+    # The sync and the mining off: the watcher still runs, for the word colours alone.
+    watcher = server.start_anki_watcher(args(anki_sync="off", mine="off"), app)
+    assert started == ["anki-deck", "anki-sync"] and app.miner is None and watcher.fast is None
+    started.clear()
+    app.decks = None
     monkeypatch.setenv("SHISUKO_CONTAINER", "1")
     assert server.start_anki_watcher(args(), app) is None
-    assert started == [] and app.miner is None
+    assert started == [] and app.miner is None and app.decks is None
     monkeypatch.delenv("SHISUKO_CONTAINER")
     stand_in = SimpleNamespace(exit_code=None)  # what the tests hand main(): no sessions, no miner
     assert server.start_anki_watcher(args(anki_sync="off"), stand_in) is None

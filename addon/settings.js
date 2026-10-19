@@ -47,7 +47,6 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   // the video playing; off, it attaches only what the viewer mines by hand (Alt+Shift+M). The
   // field names and the clip settings below go to the server inside every /sync.
   autoMine: true,
-  ankiUrl: "http://127.0.0.1:8765",
   ankiImageField: "Picture",
   ankiAudioField: "SentenceAudio",
   ankiSentenceField: "",

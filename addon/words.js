@@ -2,10 +2,11 @@
 
 /*
  * Word colours: which words of a subtitle have an Anki card, and what that card says about them.
- * Loaded before background.js and content.js (see manifest.json), so both sides read a note the
- * same way:
- *  - the background turns a deck's notes into [word, status, pitch] entries,
- *  - the content script builds an index from them and marks the words of every line.
+ * Loaded before content.js (see manifest.json), and served to the phone portal:
+ *  - the server reads a deck's notes into [word, status, pitch] entries with a port of the note
+ *    reading below (plainWord() to statusOf(); wc_* in server.py, held equal by the golden test,
+ *    server/tests/test_deck_golden.py and addon/tests/deck-golden.test.js),
+ *  - a client builds an index from them and marks the words of every line.
  *
  * A card's word is a dictionary form; the subtitle has it conjugated (食べる, 食べました). The
  * matcher therefore knows a handful of endings: enough to find a verb or adjective in its usual
@@ -488,7 +489,7 @@ const SHISUKO_WORDS = (() => {
   }
 
   // The field the word is read from: the one the settings name, else the first, the same rule
-  // as the background's noteSummary().
+  // as the server's wc_note_word().
   function wordFieldOf(list, settings) {
     const wordName = str((settings || {}).ankiWordField).trim();
     if (!wordName) return list.find((field) => field.order === 0);
@@ -571,7 +572,7 @@ const SHISUKO_WORDS = (() => {
     return reading && reading !== word && reading.length <= MAX_WORD_LEN ? reading : "";
   }
 
-  // `sets` holds the note ids of the five findNotes queries the background runs on a deck.
+  // `sets` holds the note ids of the five searches the server runs on a deck (DECK_STATUS_QUERIES).
   function statusOf(sets, noteId) {
     const has = (name) => {
       const set = sets && sets[name];

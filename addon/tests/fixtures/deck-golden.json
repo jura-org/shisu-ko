@@ -1,0 +1,908 @@
+{
+ "about": "Invented notes for the word colours' golden test. The extension's deck path until 0.22.0 read them into `entries` (deck-golden.test.js keeps that path and checks it); the server's DeckIndex reads them into `rows` (test_deck_golden.py), and the background's deckEntries() turns those rows into the same entries. UPDATE_GOLDEN=1 node --test addon/tests/deck-golden.test.js writes the entries anew.",
+ "deck": "Japanese",
+ "notes": [
+  {
+   "noteId": 1001,
+   "deck": "Japanese",
+   "status": "review",
+   "mod": 11,
+   "fields": {
+    "Word": {
+     "value": "食べる",
+     "order": 0
+    },
+    "Reading": {
+     "value": "たべる",
+     "order": 1
+    },
+    "PitchAccentPosition": {
+     "value": "[2]",
+     "order": 2
+    },
+    "Glossary": {
+     "value": "to eat",
+     "order": 3
+    },
+    "Sentence": {
+     "value": "ご飯を<b>食べる</b>。",
+     "order": 4
+    }
+   }
+  },
+  {
+   "noteId": 1002,
+   "deck": "Japanese",
+   "status": "learning",
+   "mod": 12,
+   "fields": {
+    "Word": {
+     "value": "更に",
+     "order": 0
+    },
+    "Reading": {
+     "value": "さらに",
+     "order": 1
+    },
+    "PitchAccentPosition": {
+     "value": "[1]",
+     "order": 2
+    },
+    "Glossary": {
+     "value": "(adv, uk, JMdict (English)) furthermore",
+     "order": 3
+    }
+   }
+  },
+  {
+   "noteId": 1003,
+   "deck": "Japanese",
+   "status": "new",
+   "mod": 13,
+   "fields": {
+    "Word": {
+     "value": "<ruby>猫<rt>ねこ</rt></ruby>",
+     "order": 0
+    },
+    "Reading": {
+     "value": "ねこ",
+     "order": 1
+    },
+    "PitchAccentGraph": {
+     "value": "<svg viewBox=\"0 0 100 100\"><circle r=\"15\" cx=\"15\" cy=\"25\" style=\"fill:none\"/><circle r=\"5\" cx=\"15\" cy=\"25\"/><circle r=\"15\" cx=\"50\" cy=\"75\"/></svg>",
+     "order": 2
+    }
+   }
+  },
+  {
+   "noteId": 1004,
+   "deck": "Japanese",
+   "status": "suspended",
+   "mod": 14,
+   "fields": {
+    "Word": {
+     "value": "犬",
+     "order": 0
+    },
+    "Reading": {
+     "value": "いぬ",
+     "order": 1
+    },
+    "PitchAccentGraph": {
+     "value": "<svg viewBox=\"0 0 100 100\"><circle r=\"15\" cx=\"15\" cy=\"75\"/><circle r=\"15\" cx=\"50\" cy=\"25\"/><path d=\"M85 25 l10 0\"/></svg>",
+     "order": 2
+    }
+   }
+  },
+  {
+   "noteId": 1005,
+   "deck": "Japanese",
+   "status": "review",
+   "mod": 15,
+   "fields": {
+    "Word": {
+     "value": " 見[み]る",
+     "order": 0
+    },
+    "Furigana": {
+     "value": "見[み]る",
+     "order": 1
+    },
+    "Pitch": {
+     "value": "平板",
+     "order": 2
+    }
+   }
+  },
+  {
+   "noteId": 1006,
+   "deck": "Japanese",
+   "status": "new",
+   "mod": 16,
+   "fields": {
+    "Word": {
+     "value": "",
+     "order": 0
+    },
+    "Reading": {
+     "value": "から",
+     "order": 1
+    }
+   }
+  },
+  {
+   "noteId": 1007,
+   "deck": "Japanese",
+   "status": "new",
+   "mod": 17,
+   "fields": {
+    "Word": {
+     "value": "これは単語の欄に貼り付けられた長い例文であって単語ではありません。そうでしょう、とても長いですから。",
+     "order": 0
+    },
+    "Reading": {
+     "value": "",
+     "order": 1
+    }
+   }
+  },
+  {
+   "noteId": 1008,
+   "deck": "Japanese",
+   "status": "learning",
+   "mod": 18,
+   "fields": {
+    "Word": {
+     "value": "卵",
+     "order": 0
+    },
+    "Reading": {
+     "value": "<span style=\"display:inline-block;position:relative;\"><span>た</span><span style=\"border-color:currentColor;border-bottom-width:2px;\"></span></span><span style=\"display:inline-block;position:relative;\"><span>ま</span><span style=\"border-color:currentColor;border-top-width:2px;border-right-width:2px;\"></span></span><span style=\"display:inline-block;position:relative;\"><span>ご</span><span style=\"border-color:currentColor;border-bottom-width:2px;\"></span></span>",
+     "order": 1
+    },
+    "Glossary": {
+     "value": "egg",
+     "order": 2
+    }
+   }
+  },
+  {
+   "noteId": 1009,
+   "deck": "Japanese",
+   "status": "review",
+   "mod": 19,
+   "fields": {
+    "Word": {
+     "value": "R&amp;B",
+     "order": 0
+    },
+    "Reading": {
+     "value": "",
+     "order": 1
+    }
+   }
+  },
+  {
+   "noteId": 1010,
+   "deck": "Japanese",
+   "status": "learning",
+   "mod": 20,
+   "fields": {
+    "Word": {
+     "value": "<b>勉強</b><br>second line",
+     "order": 0
+    },
+    "Furigana": {
+     "value": "勉強[べんきょう]",
+     "order": 1
+    },
+    "Pitch": {
+     "value": "0",
+     "order": 2
+    },
+    "Expression": {
+     "value": "勉強する",
+     "order": 3
+    }
+   }
+  },
+  {
+   "noteId": 1011,
+   "deck": "Japanese",
+   "status": "review",
+   "mod": 21,
+   "fields": {
+    "Word": {
+     "value": "沢山",
+     "order": 0
+    },
+    "Reading": {
+     "value": "たくさん",
+     "order": 1
+    },
+    "PitchAccentPosition": {
+     "value": "たくꜜさん",
+     "order": 2
+    },
+    "Glossary": {
+     "value": "<span title=\"word usually written using kana alone\">uk</span> many",
+     "order": 3
+    }
+   }
+  },
+  {
+   "noteId": 1012,
+   "deck": "Other",
+   "status": "new",
+   "mod": 22,
+   "fields": {
+    "Word": {
+     "value": "鳥",
+     "order": 0
+    },
+    "Reading": {
+     "value": "とり",
+     "order": 1
+    }
+   }
+  },
+  {
+   "noteId": 1013,
+   "deck": "Japanese::Sub",
+   "status": "new",
+   "mod": 23,
+   "fields": {
+    "Word": {
+     "value": "魚",
+     "order": 0
+    },
+    "Reading": {
+     "value": "さかな",
+     "order": 1
+    },
+    "PitchAccentPosition": {
+     "value": "[0]",
+     "order": 2
+    }
+   }
+  },
+  {
+   "noteId": 1014,
+   "deck": "Japanese",
+   "status": "new",
+   "mod": 24,
+   "fields": {
+    "word": {
+     "value": "水",
+     "order": 0
+    },
+    "reading": {
+     "value": "みず",
+     "order": 1
+    },
+    "pitch": {
+     "value": "[0]",
+     "order": 2
+    }
+   }
+  },
+  {
+   "noteId": 1015,
+   "deck": "Japanese",
+   "status": "review",
+   "mod": 25,
+   "fields": {
+    "Word": {
+     "value": "ある",
+     "order": 0
+    },
+    "Reading": {
+     "value": "ある",
+     "order": 1
+    },
+    "PitchAccentPosition": {
+     "value": "[1]",
+     "order": 2
+    }
+   }
+  },
+  {
+   "noteId": 1016,
+   "deck": "Japanese",
+   "status": "learning",
+   "mod": 26,
+   "fields": {
+    "Word": {
+     "value": "﻿ 山",
+     "order": 0
+    },
+    "Reading": {
+     "value": "やま",
+     "order": 1
+    },
+    "PitchAccentPosition": {
+     "value": "<ol><li>[2]</li><li>[0]</li></ol>",
+     "order": 2
+    }
+   }
+  },
+  {
+   "noteId": 1017,
+   "deck": "Japanese",
+   "status": "new",
+   "mod": 27,
+   "fields": {
+    "Word": {
+     "value": "猫😀",
+     "order": 0
+    },
+    "Reading": {
+     "value": "",
+     "order": 1
+    }
+   }
+  },
+  {
+   "noteId": 1018,
+   "deck": "Japanese",
+   "status": "new",
+   "mod": 28,
+   "fields": {
+    "Word": {
+     "value": "橋",
+     "order": 0
+    },
+    "SentenceFurigana": {
+     "value": "はしをわたる",
+     "order": 1
+    },
+    "PitchAccentPosition": {
+     "value": "[2]",
+     "order": 2
+    }
+   }
+  },
+  {
+   "noteId": 1019,
+   "deck": "Japanese",
+   "status": "suspended",
+   "mod": 29,
+   "fields": {
+    "Word": {
+     "value": "今日",
+     "order": 0
+    },
+    "Reading": {
+     "value": "きょう",
+     "order": 1
+    },
+    "PitchAccentPosition": {
+     "value": "きょꜜう",
+     "order": 2
+    },
+    "Glossary": {
+     "value": "Usually written using kana alone",
+     "order": 3
+    }
+   }
+  },
+  {
+   "noteId": 1020,
+   "deck": "Japanese",
+   "status": "review",
+   "mod": 30,
+   "fields": {
+    "Expression": {
+     "value": "話す",
+     "order": 0
+    },
+    "Word": {
+     "value": "はなす",
+     "order": 1
+    },
+    "PitchAccentGraph": {
+     "value": "<svg viewBox=\"0 0 100 100\"><circle r=\"15\" cx=\"15\" cy=\"75\"/><circle r=\"15\" cx=\"50\" cy=\"25\"/><path d=\"M85 25 l10 0\"/></svg>",
+     "order": 2
+    },
+    "Reading": {
+     "value": "はなす",
+     "order": 3
+    }
+   }
+  }
+ ],
+ "cases": [
+  {
+   "settings": {
+    "ankiWordField": "",
+    "ankiPitchField": ""
+   },
+   "entries": [
+    [
+     "食べる",
+     "learned",
+     "nakadaka"
+    ],
+    [
+     "更に",
+     "learning",
+     "atamadaka"
+    ],
+    [
+     "さらに",
+     "learning",
+     "atamadaka"
+    ],
+    [
+     "猫",
+     "new",
+     "atamadaka"
+    ],
+    [
+     "犬",
+     "suspended",
+     "heiban"
+    ],
+    [
+     "見る",
+     "learned",
+     "heiban"
+    ],
+    [
+     "卵",
+     "learning",
+     "nakadaka"
+    ],
+    [
+     "R&B",
+     "learned",
+     null
+    ],
+    [
+     "勉強",
+     "learning",
+     "heiban"
+    ],
+    [
+     "沢山",
+     "learned",
+     "nakadaka"
+    ],
+    [
+     "たくさん",
+     "learned",
+     "nakadaka"
+    ],
+    [
+     "魚",
+     "new",
+     "heiban"
+    ],
+    [
+     "水",
+     "new",
+     "heiban"
+    ],
+    [
+     "ある",
+     "learned",
+     "atamadaka"
+    ],
+    [
+     "山",
+     "learning",
+     "odaka"
+    ],
+    [
+     "猫😀",
+     "new",
+     null
+    ],
+    [
+     "橋",
+     "new",
+     "nakadaka"
+    ],
+    [
+     "今日",
+     "suspended",
+     "atamadaka"
+    ],
+    [
+     "きょう",
+     "suspended",
+     "atamadaka"
+    ],
+    [
+     "話す",
+     "learned",
+     "heiban"
+    ]
+   ],
+   "rows": [
+    [
+     1001,
+     "食べる",
+     "",
+     "learned",
+     "nakadaka"
+    ],
+    [
+     1002,
+     "更に",
+     "さらに",
+     "learning",
+     "atamadaka"
+    ],
+    [
+     1003,
+     "猫",
+     "",
+     "new",
+     "atamadaka"
+    ],
+    [
+     1004,
+     "犬",
+     "",
+     "suspended",
+     "heiban"
+    ],
+    [
+     1005,
+     "見る",
+     "",
+     "learned",
+     "heiban"
+    ],
+    [
+     1008,
+     "卵",
+     "",
+     "learning",
+     "nakadaka"
+    ],
+    [
+     1009,
+     "R&B",
+     "",
+     "learned",
+     null
+    ],
+    [
+     1010,
+     "勉強",
+     "",
+     "learning",
+     "heiban"
+    ],
+    [
+     1011,
+     "沢山",
+     "たくさん",
+     "learned",
+     "nakadaka"
+    ],
+    [
+     1013,
+     "魚",
+     "",
+     "new",
+     "heiban"
+    ],
+    [
+     1014,
+     "水",
+     "",
+     "new",
+     "heiban"
+    ],
+    [
+     1015,
+     "ある",
+     "",
+     "learned",
+     "atamadaka"
+    ],
+    [
+     1016,
+     "山",
+     "",
+     "learning",
+     "odaka"
+    ],
+    [
+     1017,
+     "猫😀",
+     "",
+     "new",
+     null
+    ],
+    [
+     1018,
+     "橋",
+     "",
+     "new",
+     "nakadaka"
+    ],
+    [
+     1019,
+     "今日",
+     "きょう",
+     "suspended",
+     "atamadaka"
+    ],
+    [
+     1020,
+     "話す",
+     "",
+     "learned",
+     "heiban"
+    ]
+   ]
+  },
+  {
+   "settings": {
+    "ankiWordField": "word",
+    "ankiPitchField": "PitchAccentGraph"
+   },
+   "entries": [
+    [
+     "食べる",
+     "learned",
+     "nakadaka"
+    ],
+    [
+     "更に",
+     "learning",
+     "atamadaka"
+    ],
+    [
+     "さらに",
+     "learning",
+     "atamadaka"
+    ],
+    [
+     "猫",
+     "new",
+     "atamadaka"
+    ],
+    [
+     "犬",
+     "suspended",
+     "heiban"
+    ],
+    [
+     "見る",
+     "learned",
+     "heiban"
+    ],
+    [
+     "卵",
+     "learning",
+     "nakadaka"
+    ],
+    [
+     "R&B",
+     "learned",
+     null
+    ],
+    [
+     "勉強",
+     "learning",
+     "heiban"
+    ],
+    [
+     "沢山",
+     "learned",
+     "nakadaka"
+    ],
+    [
+     "たくさん",
+     "learned",
+     "nakadaka"
+    ],
+    [
+     "魚",
+     "new",
+     "heiban"
+    ],
+    [
+     "水",
+     "new",
+     "heiban"
+    ],
+    [
+     "ある",
+     "learned",
+     "atamadaka"
+    ],
+    [
+     "山",
+     "learning",
+     "odaka"
+    ],
+    [
+     "猫😀",
+     "new",
+     null
+    ],
+    [
+     "橋",
+     "new",
+     "nakadaka"
+    ],
+    [
+     "今日",
+     "suspended",
+     "atamadaka"
+    ],
+    [
+     "きょう",
+     "suspended",
+     "atamadaka"
+    ],
+    [
+     "はなす",
+     "learned",
+     "heiban"
+    ]
+   ],
+   "rows": [
+    [
+     1001,
+     "食べる",
+     "",
+     "learned",
+     "nakadaka"
+    ],
+    [
+     1002,
+     "更に",
+     "さらに",
+     "learning",
+     "atamadaka"
+    ],
+    [
+     1003,
+     "猫",
+     "",
+     "new",
+     "atamadaka"
+    ],
+    [
+     1004,
+     "犬",
+     "",
+     "suspended",
+     "heiban"
+    ],
+    [
+     1005,
+     "見る",
+     "",
+     "learned",
+     "heiban"
+    ],
+    [
+     1008,
+     "卵",
+     "",
+     "learning",
+     "nakadaka"
+    ],
+    [
+     1009,
+     "R&B",
+     "",
+     "learned",
+     null
+    ],
+    [
+     1010,
+     "勉強",
+     "",
+     "learning",
+     "heiban"
+    ],
+    [
+     1011,
+     "沢山",
+     "たくさん",
+     "learned",
+     "nakadaka"
+    ],
+    [
+     1013,
+     "魚",
+     "",
+     "new",
+     "heiban"
+    ],
+    [
+     1014,
+     "水",
+     "",
+     "new",
+     "heiban"
+    ],
+    [
+     1015,
+     "ある",
+     "",
+     "learned",
+     "atamadaka"
+    ],
+    [
+     1016,
+     "山",
+     "",
+     "learning",
+     "odaka"
+    ],
+    [
+     1017,
+     "猫😀",
+     "",
+     "new",
+     null
+    ],
+    [
+     1018,
+     "橋",
+     "",
+     "new",
+     "nakadaka"
+    ],
+    [
+     1019,
+     "今日",
+     "きょう",
+     "suspended",
+     "atamadaka"
+    ],
+    [
+     1020,
+     "はなす",
+     "",
+     "learned",
+     "heiban"
+    ]
+   ]
+  },
+  {
+   "settings": {
+    "ankiWordField": "expression",
+    "ankiPitchField": "accent"
+   },
+   "entries": [
+    [
+     "勉強する",
+     "learning",
+     "heiban"
+    ],
+    [
+     "話す",
+     "learned",
+     "heiban"
+    ]
+   ],
+   "rows": [
+    [
+     1010,
+     "勉強する",
+     "",
+     "learning",
+     "heiban"
+    ],
+    [
+     1020,
+     "話す",
+     "",
+     "learned",
+     "heiban"
+    ]
+   ]
+  }
+ ]
+}

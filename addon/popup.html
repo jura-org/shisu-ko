@@ -74,10 +74,10 @@
       <p class="hint"><kbd>Alt+Shift+M</kbd> mines the current line by hand. The server adds the audio and the picture, through AnkiConnect.</p>
     </section>
 
-    <!-- Both read the cards of one Anki deck: the one the last mined card went to, unless the
-         select names another. popup.js asks Anki for its decks only while one of the two is on
-         (the first ask brings up AnkiConnect's permission dialog) and says under the select which
-         deck is looked at, or what stands in the way. -->
+    <!-- Both read the cards of one Anki deck, which the server reads: the one the last mined card
+         went to, unless the select names another. popup.js asks the server for Anki's decks only
+         while one of the two is on and says under the select which deck is looked at, or what
+         stands in the way. -->
     <section>
       <h2>Word colours</h2>
       <label class="row check">
@@ -280,10 +280,6 @@
     <details>
       <summary>Anki, clips and server</summary>
       <div class="drawer">
-        <label class="row field">
-          <span class="lead">AnkiConnect URL</span>
-          <input type="text" id="ankiUrl" spellcheck="false">
-        </label>
         <div class="grid">
           <label class="row field">
             <span class="lead">Image field <span class="soft">any case</span></span>

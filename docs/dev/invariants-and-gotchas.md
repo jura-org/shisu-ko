@@ -64,7 +64,14 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   the cue's row, Yomitan's `<b>` kept, and leaves any other text alone (see `mining.md`); the viewer's
   own mine reaches it as `/sync`'s `mine`, so mining added no endpoint. `addon/tests/settings.test.js`
   holds that no file in `addon/` names `updateNoteFields`, `storeMediaFile`, `addNote` or
-  `browser.downloads`; the extension reads Anki for the word colours alone (see `mining.md`).
+  `browser.downloads`.
+- The server reads Anki; the extension makes no AnkiConnect call (0.23.0). The word colours' deck
+  is `DeckIndexes` in `server.py`, sent as rows with `/sync`'s opt-in `deck`; the extension lost
+  its AnkiConnect client, its permission dialog, its deck caches and the `ankiUrl` setting, and
+  `background.test.js` greps `addon/` for AnkiConnect's port and actions. The server's note
+  reading is a port of words.js's (`plainWord()` ... `statusOf()`) and must stay equal to it: the
+  golden test and the random-field run in `test_deck_index.py` hold that. The matcher and the
+  particle ruling stay in words.js alone (see `word-colours.md`).
 - The extension's permissions are pinned to the 0.19.1 lists less `downloads` (gone in 0.22.0 with the Downloads fallback) by `ALLOWED_PERMISSIONS` in
   `scripts/tests/build.test.mjs`, for both built manifests, host permissions and content-script
   matches included. A new permission or host permission sends a release to the Chrome Web Store's
@@ -312,8 +319,9 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   variable on Windows). The engine runs on HIP device 0, which on a machine with an AMD
   processor's graphics and an AMD card may be the integrated one; `HIP_VISIBLE_DEVICES` picks the
   card.
-- AnkiConnect: send requests without a `Content-Type` header (a "simple" request needs no CORS
-  preflight), call `requestPermission` first, find the newest card with `findNotes("added:1")`.
+- AnkiConnect: send requests without a `Content-Type` header and without an `Origin`: AnkiConnect
+  then takes the request as a local program's and asks no `requestPermission`, which only browser
+  origins need (the server's `anki_connect()`). Find the newest card with `findNotes("added:1")`.
 - `data_collection_permissions` in the manifest requires `strict_min_version` 140 or later.
 - `notifications` is a required permission, not an optional one: the update notification is
   created from the start-up check, where no popup is open to ask for a grant. The GitHub check

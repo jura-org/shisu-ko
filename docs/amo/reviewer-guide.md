@@ -15,13 +15,14 @@ popup dictionaries such as Yomitan can scan them. Sentence mining is the server'
 extension passes the user's Anki field names and clip settings to it inside the same request, and
 the viewer's Alt+Shift+M as a field of the next one; the server writes the line's audio and a
 frame of the video into Anki through the AnkiConnect add-on (http://127.0.0.1:8765). The
-extension never writes to Anki and saves no files. Two further options, off
-by default, read one Anki deck through AnkiConnect to colour the words of a line that have a
-card by the card's state and to draw an overbar in the colour of the card's pitch accent; the
-text stays text nodes, inside inline spans that carry only two data attributes.
+extension never writes to Anki, never contacts AnkiConnect and saves no files. Two further
+options, off by default, colour the words of a line that have a card by the card's state and draw
+an overbar in the colour of the card's pitch accent; the server reads that deck from Anki and
+sends each card's word, state and pitch accent back with the cues. The text stays text nodes,
+inside inline spans that carry only two data attributes.
 
 Nothing is sent to us or to any third party. The extension only ever contacts youtube.com (as a
-content script), the local server, the local AnkiConnect and, for its update check, GitHub's
+content script), the local server and, for its update check, GitHub's
 public API (one anonymous GET, see PERMISSIONS). It contains no remote code, no
 minified or generated code, no third-party libraries and no build step: the uploaded zip is the
 source, identical to the addon/ folder of https://github.com/Multysquid/shisu-ko (tag v<version>)
@@ -118,18 +119,19 @@ The demo recording in the README shows the expected behaviour: https://github.co
 
 10. Optional, the word colours (needs Anki with AnkiConnect and a deck with a few Japanese
     words in it): in the popup's "Word colours" section tick "Colour words by their Anki card"
-    and pick the deck in the "Deck" select (Anki asks once whether to allow the extension; the
-    list is fetched then, and the hint under the select reads "Looking at <deck>" for the
-    automatic entry, or nothing for a chosen one). Left on "Automatic", the deck is the one the
-    last card mined in step 5 went to (the extension asks Anki for that note's deck with
-    findCards / getDecks), and nothing is looked up before a card was mined. On the
+    and pick the deck in the "Deck" select (the list comes from the server, GET
+    /health?decks=1, and the hint under the select reads "Looking at <deck>" for the automatic
+    entry, or nothing for a chosen one). Left on "Automatic", the deck is the one the last card
+    the server mined in step 5 went to (the server asks Anki for it), and nothing is looked up
+    before a card was mined. On the
     video, every word of a subtitle that has a card in that deck turns green (a card in review),
     yellow (learning), orange (suspended) or red (new), in the transcript panel as well; a verb
-    is found in its conjugations. The deck is read again every 30 s while a video is open, so
-    suspending a card in Anki changes its colour within a minute. "Overbar by pitch accent"
+    is found in its conjugations. The server reads the deck again every 30 s while a video is
+    open and sends only what changed, so suspending a card in Anki changes its colour within a
+    minute. "Overbar by pitch accent"
     draws a line over each such word in the colour of the pattern in the card's pitch accent
     field (blue heiban, red atamadaka, orange nakadaka, green odaka), if the note has one. With
-    both off, nothing is asked of Anki beyond step 5. Inspecting a subtitle shows the text as
+    both off, /sync asks the server for no deck. Inspecting a subtitle shows the text as
     text nodes inside <span class="shisuko-word" data-status=... data-pitch=...>, nothing else.
     Four more rules colour without a card, all under "More word colour options" in the popup's
     Word colours section: particles in green ("Particles count as known"), katakana words in
@@ -141,12 +143,11 @@ The demo recording in the README shows the expected behaviour: https://github.co
 
 PERMISSIONS
 
-- storage: the settings (browser.storage.local, the known-words list among them), beside them the deck the last mined card went
-  to ("ankiDeckSeen": the deck name, the note id and a time, what the word colours' automatic
-  deck means) and the result of the update check (below); browser.storage.session holds a few
-  records for the browser session (the launch and update records below, and the words and
-  pitch accents read from the deck for the word colours, "deckNotes", so a restarted
-  background page need not read the deck again).
+- storage: the settings (browser.storage.local, the known-words list among them) and the result
+  of the update check (below); browser.storage.session holds a few records for the browser
+  session (the launch and update records below). The "ankiDeckSeen" record 0.22.0 kept (the
+  automatic deck's name) goes to the server once, in the first /sync that asks for the deck, and
+  is then removed: the server keeps the automatic deck now.
 - tabs: the popup calls browser.tabs.query({url: <youtube origins>}) to reload the open YouTube
   tabs after the host permission is granted (a query filtered by URL needs this permission); the
   background script routes the keyboard commands with tabs.query({active: true}) and
@@ -154,8 +155,8 @@ PERMISSIONS
   address of the YouTube page being watched, sent to the local server in /sync (below).
 - host permissions *://www.youtube.com/*, *://m.youtube.com/*, *://youtube.com/*: the content
   script that draws the subtitles.
-- host permissions http://127.0.0.1/* and http://localhost/*: the companion server (port 8790)
-  and AnkiConnect (port 8765). Both URLs are settings with these defaults.
+- host permissions http://127.0.0.1/* and http://localhost/*: the companion server (port 8790),
+  whose URL is a setting with this default.
 - notifications: three notifications, all created in background.js (ids shisuko-update,
   shisuko-updated and shisuko-update-failed). "Shisu-ko <release> is available" / "The server
   runs <server's version>. Click to update it now." when a newer release of the server is out
@@ -213,18 +214,15 @@ CODE THAT MAY NEED A WORD
   with an empty body
   (only from the popup's Update button or a click on the update notification; the server
   answers {ok, restarting, version} and exits so that its own launcher runs the project's
-  update.py and starts it again, or 409 {ok: false, error} when it cannot); anki():
-  AnkiConnect JSON requests, reads only. After the server reports a note it filled: findCards /
-  getDecks for that note, to remember its deck for the word colours. For the word colours (only while
-  one of the two options is on; the "word colours" section of background.js): deckNames for
-  the popup's deck list, findNotes on the one deck with is:suspended / -is:suspended / is:new /
-  is:learn / is:review clauses (five searches, and a sixth, edited:<days>, on a refresh, with
-  notesModTime on its result, so that only edited notes are read again), notesInfo on those
-  notes in chunks of 200, of which the word field, the pitch accent field and the modification
-  time are kept, and deckNamesAndIds only for a deck named "current" or "filtered", which
-  Anki's search reads as keywords. The deck's index is kept for 30 s and asked for by a tab
-  every 30 s while a video is open and the tab visible. words.js, shared by background.js and
-  content.js, reads the fields and finds the words in a line; it is pure, without DOM.
+  update.py and starts it again, or 409 {ok: false, error} when it cannot). For the word
+  colours (only while one of the two options is on; the "word colours" section of
+  background.js): the /sync body also carries deck: {name, word, pitch, since}, the deck and the
+  two field names the popup names and a token for the rows already held, and the answer's deck
+  brings rows of [note id, word, reading, status, pitch], all of them the first time and the
+  changed ones after that, kept in memory for every tab; the popup's deck list is GET
+  /health?decks=1. The content script asks the background for the entries every 2 s, answered
+  from memory. words.js, loaded before content.js, finds the words in a line; it is pure,
+  without DOM.
 - background.js, startServer(): the only use of nativeMessaging (above). It remembers a
   launch in browser.storage.session (the host's answer and a deadline 90 s ahead) so a reopened
   popup does not start a second server while the first is still loading its model; the record
@@ -252,8 +250,8 @@ transmits nothing about the user off the device: its peers besides youtube.com a
 programs on the same computer that the user installed for this purpose (the companion server
 and Anki), and what they receive (the id and playback position of the video being watched, and
 the Anki field names and clip settings the server mines with; the extension sends Anki nothing)
-is the add-on's stated primary function; what the add-on reads from Anki for the word colours (one deck's notes) stays on the
-device, in memory and in the extension's storage. The one remote request, the anonymous release check against GitHub's public API
+is the add-on's stated primary function; what the server sends back for the word colours (one
+deck's words, card states and pitch accents) stays on the device, in memory. The one remote request, the anonymous release check against GitHub's public API
 described under PERMISSIONS, carries no data about the user, the browser or the videos
 watched. The privacy policy on the listing describes this in full.
 

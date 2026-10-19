@@ -18,9 +18,11 @@ function loadSchema() {
 
 test("the schema is frozen and has the expected core keys", () => {
   const schema = loadSchema();
-  for (const key of ["enabled", "serverUrl", "fontScale", "pauseOnHover", "lingerSeconds", "autoMine", "ankiUrl"]) {
+  for (const key of ["enabled", "serverUrl", "fontScale", "pauseOnHover", "lingerSeconds", "autoMine"]) {
     assert.ok(key in schema, `missing ${key}`);
   }
+  // The server reads Anki (--anki-url); the extension names no AnkiConnect address.
+  assert.equal("ankiUrl" in schema, false);
   assert.equal(schema.serverUrl, "http://127.0.0.1:8790");
   // The status badge shows until the viewer switches it off (Alt+Shift+H); the progress messages
   // are a separate, narrower switch.
@@ -83,7 +85,8 @@ test("the manifest names the five commands, and the content script handles each"
 
 test("settings.js is loaded before the scripts that use it", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ADDON, "manifest.json"), "utf8"));
-  assert.deepEqual(manifest.background.scripts, ["browser-api.js", "settings.js", "words.js", "background.js"]);
+  // The background reads no note (the server does): words.js is the content script's alone.
+  assert.deepEqual(manifest.background.scripts, ["browser-api.js", "settings.js", "background.js"]);
   for (const entry of manifest.content_scripts) assert.deepEqual(entry.js, ["browser-api.js", "settings.js", "words.js", "content.js"]);
   const html = fs.readFileSync(path.join(ADDON, "popup.html"), "utf8");
   assert.ok(html.indexOf('src="browser-api.js"') < html.indexOf('src="settings.js"'));

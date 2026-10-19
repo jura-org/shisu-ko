@@ -41,11 +41,23 @@ const mediaBytes = (() => {
   return data;
 })();
 const mediaDataUrl = `data:audio/wav;base64,${mediaBytes.toString("base64")}`;
-// The fixture AnkiConnect: the extension may read it (the word colours, the deck a mined note went
-// to) and never write to it. Mining is the server's (Miner in server.py), tested in
-// server/tests/test_mining.py; here the fixture server stands in for it.
+// The fixture AnkiConnect, which the extension must never call: the server reads Anki for the word
+// colours (DeckIndexes in server.py) and writes the mined media (Miner); here the fixture server
+// stands in for both. The stored settings name it under ankiUrl, the address 0.22.0 kept, so an
+// extension that still read that setting would knock here.
 const anki = { actions: [] };
-const ANKI_WRITES = ["updateNoteFields", "storeMediaFile", "addNote", "updateNote", "sync"];
+// The deck the fixture server reads for the word colours: rows as /sync's `deck` carries them, the
+// first answer every row, the next ones the rows changed since the token the client names.
+const deck = { bodies: [], version: 1, rows: new Map([[1, [1, "テスト", "", "new", "heiban"]], [2, [2, "字幕", "", "learned", "atamadaka"]]]), changed: new Map() };
+function deckAnswer(asked) {
+  const token = `smoke.${deck.version}`;
+  if (asked.since === token) return undefined;
+  const base = /^smoke\.(\d+)$/.exec(asked.since || "");
+  if (!base) return { token, status: "ok", deck: "Smoke::Mining", automatic: !asked.name, full: true, notes: [...deck.rows.values()], removed: [] };
+  const ids = new Set();
+  for (let v = Number(base[1]) + 1; v <= deck.version; v++) for (const id of deck.changed.get(v) || []) ids.add(id);
+  return { token, status: "ok", deck: "Smoke::Mining", automatic: !asked.name, full: false, notes: [...ids].map((id) => deck.rows.get(id)), removed: [] };
+}
 // The fixture server's mining log, as server.py's /sync answers it: one entry per mine asked for.
 const mining = { bodies: [], log: [] };
 async function requestBody(req) {
@@ -71,7 +83,9 @@ const api = await listen(async (req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
   if (url.pathname === "/health") {
     healthCount++;
-    return json(res, { model: "smoke", device: "cpu", compute_type: "test" });
+    // The popup's deck list comes from the server too (/health?decks=1).
+    const decks = url.searchParams.get("decks") === "1" ? { anki_decks: { ok: true, decks: ["Default", "Smoke::Mining"], seen: "Smoke::Mining" } } : {};
+    return json(res, { model: "smoke", device: "cpu", compute_type: "test", ...decks });
   }
   if (url.pathname === "/sync") {
     syncCount++;
@@ -79,6 +93,8 @@ const api = await listen(async (req, res) => {
     const id = typeof body.video_id === "string" ? body.video_id : "";
     syncSeen.set(id, (syncSeen.get(id) || 0) + 1);
     mining.bodies.push({ id, anki: body.anki, mine: body.mine, mined_since: body.mined_since });
+    const deckReply = body.deck ? deckAnswer(body.deck) : undefined;
+    if (body.deck) deck.bodies.push(body.deck);
     // A mine is answered once per nonce, the way the server dedupes the resends.
     if (body.mine && !mining.log.some((entry) => entry.nonce === body.mine.nonce)) {
       mining.log.push({ seq: mining.log.length, nonce: body.mine.nonce, ok: true, status: "attached", note: 404,
@@ -86,7 +102,8 @@ const api = await listen(async (req, res) => {
     }
     const since = typeof body.mined_since === "number" ? body.mined_since : null;
     const minedLog = { mined: since === null ? [] : mining.log.filter((entry) => entry.seq >= since), mined_next: mining.log.length };
-    const head = { session: "smoke-session", status: "ready", duration: 3600, covered: [[0, 3600]], next: 1, ...minedLog };
+    const head = { session: "smoke-session", status: "ready", duration: 3600, covered: [[0, 3600]], next: 1, ...minedLog,
+      ...(deckReply ? { deck: deckReply } : {}) };
     if (languagePaused) return json(res, { ...head, cues: [], language_paused: true, heard: "en" });
     // Cues come with the first request only, the way the real server answers a `since` cursor. A
     // tab returning from standby with a reset cursor would therefore go blank instead of keeping
@@ -100,16 +117,10 @@ const api = await listen(async (req, res) => {
     const cues = body.since ? [] : id === regressionVideoId ? regressionCues : [{ id: 1, start: 0, end: 3600, text: "これはテスト字幕です", seg: 1 }];
     return json(res, { ...head, cues });
   }
-  if (url.pathname === "/anki" && req.method === "POST") {
-    const request = await requestBody(req);
-    anki.actions.push(request.action);
-    let result = null;
-    if (request.action === "requestPermission") result = { permission: "granted" };
-    // A mined note's deck, for the word colours (rememberDeck in background.js).
-    else if (request.action === "findCards") result = [9001];
-    else if (request.action === "getDecks") result = { "Smoke::Mining": [9001] };
-    else return json(res, { result: null, error: `unknown action ${request.action}` }, 400);
-    return json(res, { result, error: null });
+  if (url.pathname === "/anki") {
+    const request = req.method === "POST" ? await requestBody(req) : {};
+    anki.actions.push(request.action || req.method);
+    return json(res, { result: null, error: "the extension must not call AnkiConnect" }, 400);
   }
   return json(res, { error: "not found" }, 404);
 });
@@ -147,7 +158,7 @@ try {
   // ankiAutoSync is what 0.20.0 and 0.21.0 stored for their Anki sync: left in a viewer's storage,
   // it must change nothing (no AnkiConnect `sync`, asserted at the end of the run).
   await worker.evaluate((stored) => new Promise((resolve) => chrome.storage.local.set(stored, resolve)),
-    { settings: { serverUrl: closedHealthUrl, ankiAutoSync: true }, updateCheck });
+    { settings: { serverUrl: closedHealthUrl, ankiAutoSync: true, ankiUrl: `http://127.0.0.1:${api.port}/anki` }, updateCheck });
   const popup = await context.newPage();
   await popup.goto(`chrome-extension://${extensionId}/popup.html`);
   await poll(() => popup.locator("#server-status").textContent(), (value) => value === "Server offline");
@@ -157,12 +168,16 @@ try {
   await poll(() => popup.locator("#update-result").textContent(), (value) => value === "No release found, checked just now");
   assert.equal(await popup.locator("#update-banner").isHidden(), true, "no banner without a release");
   await popup.locator("#serverUrl").fill(`http://127.0.0.1:${api.port}`);
-  await popup.locator("#ankiUrl").fill(`http://127.0.0.1:${api.port}/anki`);
   await popup.locator("#pauseOnHover").check();
+  // The word colours: the deck list and its hint come from the server's /health?decks=1.
+  await popup.locator("#cardStatus").check();
+  await popup.locator("#pitchAccent").check();
   await popup.locator("#showTranscript").check();
   await popup.waitForTimeout(600);
   await poll(() => popup.locator("#server-status").textContent(), (value) => value === "Server online");
   assert.ok(healthCount > 0, "popup health check must reach the fixture server");
+  await poll(() => popup.locator("#deck-hint").textContent(), (value) => value === "Looking at Smoke::Mining", 5000);
+  assert.deepEqual(await popup.locator("#cardStatusDeck option").evaluateAll((options) => options.map((o) => o.value)), ["", "Default", "Smoke::Mining"]);
   await popup.close();
 
   const openWatch = async (id, options = {}) => {
@@ -187,6 +202,16 @@ try {
   const page = await openWatch(videoId);
   await poll(() => page.locator(".shisuko-subtext").textContent(), (value) => value.includes("これはテスト字幕です"), 10000);
   assert.ok(syncCount > 0, "content script must reach the fixture server");
+
+  // The word colours from the server's rows: テスト new with its heiban overbar, 字幕 learned.
+  const marks = () => page.locator(".shisuko-subtext .shisuko-word").evaluateAll((spans) => spans.map((s) => [s.textContent, s.dataset.status || null, s.dataset.pitch || null]));
+  await poll(marks, (value) => JSON.stringify(value) === JSON.stringify([["テスト", "new", "heiban"], ["字幕", "learned", "atamadaka"]]), 10000);
+  assert.deepEqual(deck.bodies[0], { name: "", word: "", pitch: "", since: null }, "the automatic deck, words.js's default fields, nothing held");
+  assert.ok(deck.bodies.some((b) => b.since === "smoke.1"), "the next /sync names the token held");
+  // A card reviewed: the next answer is that row alone, and the line follows it.
+  deck.rows.set(1, [1, "テスト", "", "learned", "heiban"]);
+  deck.changed.set(++deck.version, [1]);
+  await poll(marks, (value) => value[0] && value[0][1] === "learned", 10000);
   assert.equal(await page.locator(".shisuko-transcript").evaluate((el) => !el.classList.contains("shisuko-hidden")), true);
 
   const video = page.locator("video");
@@ -264,8 +289,6 @@ try {
   const resent = mining.bodies.filter((entry) => entry.mine && entry.mine.nonce === nonce).length;
   await page.waitForTimeout(2500);
   assert.equal(mining.bodies.filter((entry) => entry.mine && entry.mine.nonce === nonce).length, resent, "an answered mine is not sent again");
-  // The note the server attached to tells the background its deck, for the word colours.
-  await poll(() => anki.actions.includes("getDecks"), Boolean, 5000);
 
   // The popup's Anki settings reach the server inside /sync; the extension itself writes nothing.
   const cdp = await context.newCDPSession(page);
@@ -399,9 +422,8 @@ try {
   await regression.close();
   await regressionPopup.close();
 
-  const writes = anki.actions.filter((action) => ANKI_WRITES.includes(action));
-  assert.deepEqual(writes, [], `the extension wrote to Anki: ${anki.actions.join(", ")}`);
-  console.log(`browser smoke passed (syncs=${syncCount}, anki reads=${anki.actions.length}, mines=${mining.log.length}, ` +
+  assert.deepEqual(anki.actions, [], `the extension called AnkiConnect: ${anki.actions.join(", ")}`);
+  console.log(`browser smoke passed (syncs=${syncCount}, AnkiConnect calls=${anki.actions.length}, deck asks=${deck.bodies.length}, mines=${mining.log.length}, ` +
     `${[...syncSeen].map(([id, count]) => `${id}=${count}`).join(" ")})`);
 } finally {
   await context?.close();

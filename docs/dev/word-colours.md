@@ -1,6 +1,6 @@
 # Word colours
 
-The card-status and pitch-accent colouring of subtitle words: `addon/words.js`, the deck index in `addon/background.js`, the drawing in `addon/content.js` and the popup controls.
+The card-status and pitch-accent colouring of subtitle words: `addon/words.js`, the deck index in `server/server.py`, the rows in `addon/background.js`, the drawing in `addon/content.js` and the portal, and the popup controls.
 
 ## How word colours work
 
@@ -25,11 +25,12 @@ until a deck answer builds the index, a failed ask (no card mined and no deck ch
 or refusing) builds one of the known list alone, and the names, known words, particles and
 katakana words are drawn from that (`lookOf()` draws plain text only before the first answer, see
 "The content side"). `addon/words.js`
-(`SHISUKO_WORDS`, a plain frozen object, loaded after `settings.js` and before the
-two scripts in both `background.scripts` and `content_scripts[0].js`, and by `service-worker.js`)
-is shared: the background turns one deck's notes into `[word, status, pitch]` entries (a word
-usually written in kana twice, under its reading as well), the content script builds an index
-from them and marks the words of every line. Everything in words.js is pure, without DOM.
+(`SHISUKO_WORDS`, a plain frozen object, loaded after `settings.js` and before `content.js` in
+`content_scripts[0].js`, and served to the phone portal from the checkout) is the matcher: the
+server turns one deck's notes into `[word, status, pitch]` entries (a word usually written in
+kana twice, under its reading as well) with a port of words.js's note reading, the background
+keeps them for every tab, and the content script (or the portal page) builds an index from them
+and marks the words of every line. Everything in words.js is pure, without DOM.
 
 ### words.js
 
@@ -367,84 +368,110 @@ from them and marks the words of every line. Everything in words.js is pure, wit
     人|がい|た), the particle or grammar word there is `learned` too.
 - Tests: `addon/tests/words.test.js`.
 
-### The background index (`addon/background.js`, "word colours" section)
+### The server's deck index (`server/server.py`, "word colours")
 
-- `deckSearch(name)` -> `"deck:NAME"` with `\`, `"`, `*`, `_` backslash-escaped inside the quotes
-  (Anki's syntax; the deck and its subdecks). `deckScope(url, deck)`: the names `current` and
-  `filtered` are keywords to Anki's search with no escape, so those two are searched as
-  `did:<id,...>` (the deck's own id and its subdecks' from `deckNamesAndIds`), null when no such
-  deck exists (an empty deck, like any other missing name: AnkiConnect answers `[]`; the popup's
-  deck list is the guard).
-- `fetchDeckIndex(url, deck, settings, signal)`: the five `findNotes` searches (`STATUS_QUERIES`,
-  each `${scope} <clause>`): `suspended` `is:suspended`, `unsuspended` `-is:suspended`, `new`
-  `is:new -is:suspended`, `learning` `is:learn -is:suspended`, `review` `is:review -is:learn
-  -is:suspended` (since Anki 2.1.44 the three go by the card's type, which a suspended card keeps).
-  The deck's ids are suspended ∪ unsuspended, sorted ascending: Anki's `findNotes` has no ORDER
-  BY (a review that moves a due reorders its answer), and the same deck must give the same
-  entries or every tab would take them in again. `notesInfo` (chunks of `NOTES_INFO_CHUNK`, 200,
-  `CARD_STATUS_TIMEOUT_MS` 20 s per request) runs only for ids not in the note cache (`notes:
-  Map<id, {word, reading, pitch, mod}>`, kept across refreshes and mines, ids gone from the deck dropped)
-  and for known notes edited since `checkedAt`: a sixth search `${scope} edited:<days>` (days =
-  `max(2, ceil(elapsed / day) + 1)`; an Anki without it finds nothing) lists candidates and
-  `notesModTime` re-reads only those whose `mod` moved (without the action, every candidate).
-  Word = `SHISUKO_WORDS.plainWord(noteSummary(info, settings).word)` (`ankiWordField`, else
-  order 0; over `MAX_WORD_LEN` stored as `""`), pitch = `SHISUKO_WORDS.pitchOf(info.fields,
-  settings)`, reading = `SHISUKO_WORDS.kanaReadingOf(info.fields, settings)`. Entries: one
-  `[word, status, pitch]` per note with a word and a non-null `statusOf(sets, id)`, followed by
-  `[reading, status, pitch]` when the reading is not empty, by ascending id. A `notesInfo` chunk that fails keeps what `known` said
-  for its ids (a re-read note keeps its colour and old pitch) and is asked again on the next
-  refresh; a `TypeError` or `AbortError` fails the ask as a whole. `dropped()` (the `signal`) is
-  checked before every request and once more after the loop, so a fetch dropped during its last
-  request answers nobody. Returns `{deck, wordField, pitchField, at, fetchedAt, checkedAt,
-  entries, notes, changed}`: `at` is kept from the previous index when the entries came out the
-  same (`sameEntries`), so a tab holding them hears "unchanged"; `fetchedAt` is the clock the
-  TTL runs on; `changed` = a note read (`read > 0`) or dropped (`notes.size !== known.size`) or
-  the record restored, and decides whether the session record is written.
-- The cache: `cardIndex = {deck, wordField, pitchField, at, fetchedAt, checkedAt, entries,
-  notes}` and the fetch under way `cardIndexInFlight = {deck, wordField, pitchField, promise,
-  controller, expired}`, both named by the deck and the trimmed `ankiWordField` /
-  `ankiPitchField` they were read with; `indexFor(index, deck, settings)` compares all three and
-  is what the fresh and stale answers, the flight joining and `fetchDeckIndex`'s `previous` go
-  by. `refreshCardIndex(url, deck, settings)` joins a flight for the same deck and fields and
-  aborts one for anything else through its `AbortController` before starting anew (the walk ends
-  at its next request with an error marked `dropped`; the waiting `cardStatus` re-runs once for
-  what is set now). `dropCardIndex()` (the `browser.storage.onChanged` listener, when one of
-  `CARD_INDEX_SETTINGS` = `cardStatusDeck`, `ankiPitchField`, `ankiWordField` changed; `ankiUrl`
-  is not among them) forgets the index, moves `cardIndexGeneration` on, aborts the flight and
-  clears the session record. `expireCardIndex()` sets `fetchedAt = 0` and marks a flight
-  `expired` (its index lands expired), the notes staying. The notes also live in
-  `storage.session` under `DECK_NOTES_KEY` (`deckNotes` = `{format, deck, wordField, pitchField,
-  at, checkedAt, entries, notes: [[id, word, pitch, mod, reading]]}`, `notesRecord()`), so a
-  return to YouTube after the event page ended does not read the whole deck again:
-  `restoreNotes(deck, settings)` ignores a record whose `format` is not `DECK_NOTES_FORMAT` (2:
-  a record without readings would keep them out until each note is edited), a record for another
-  deck or other fields, and hands back `at` and `entries` only with a
-  positive `at` (0 is what a tab holding nothing sends), so the stamp survives a restart when the
-  entries came out the same; the page that restored it writes it once more.
-- The deck: `rememberDeck(url, noteId)`, from `minedNote` (a tab heard in `/sync`'s `mined` log
-  that the server filled a note; see `mining.md`), not awaited by the tab: `findCards {query: "nid:<id>"}` -> `getDecks {cards}` -> the deck with most of them ->
-  `storage.local` `DECK_SEEN_KEY` (`ankiDeckSeen` = `{deck, at, noteId}`) and `expireCardIndex()`,
-  so the new card shows red at the next ask rather than after the TTL; errors are `console.debug`.
-  `seenDeck()` reads the record; `resolveDeck(settings)` -> `{deck, automatic}`: the trimmed
-  `cardStatusDeck`, else the seen deck (`automatic: true`), else `{deck: null, automatic: true}`.
-- `cardStatus(msg, retried)`, the handler of `{type: "cardStatus", since?}`: captures
-  `cardIndexGeneration`, then `getSettings()`; not `wordColoursOn(settings)` (`cardStatus ||
-  pitchAccent`) -> `{ok: false, reason: "off"}`; no deck -> `{ok: false, reason: "noDeck",
-  error: "No card mined yet; pick a deck in the popup"}`; `ankiPermission(url)` false -> `{ok:
-  false, reason: "denied", error}` (the shared helper: one dialog at a time, see the mining
-  section); the generation moved while the dialog was up -> once more for the settings of now;
-  an index for this deck and fields with `fetchedAt` under `CARD_STATUS_TTL_MS` (30 s) is
-  answered from memory, else `refreshCardIndex()`. The answer is `{ok: true, unchanged: true,
-  at, deck}` when `msg.since === at`, else `{ok: true, deck, automatic, at, entries}`. On a
-  failure the old index is answered with `stale: true` when it has entries, else `{ok: false,
-  reason: "offline", error: "Anki is not running or AnkiConnect is not installed"}` for a
-  `TypeError` or `reason: "error"` with the message; a `dropped` error re-runs once.
-- `ankiDecks()`, the popup's `{type: "ankiDecks"}`: `{ok: true, decks: string[] (from
-  `deckNames`, sorted), seen: string | null}` or `{ok: false, reason: "offline" | "denied" |
-  "error", error, seen}`, through `ankiPermission()` as well. The message switch routes both.
-- Tests: `addon/tests/background.test.js` (a fake AnkiConnect answering by `query`).
-  `_loadBackground.js` loads `words.js` between `settings.js` and `background.js` and exposes
-  `CARD_STATUS_TTL_MS`, `DECK_SEEN_KEY`, `DECK_NOTES_KEY` and `DECK_NOTES_FORMAT`.
+The server reads Anki; the extension makes no AnkiConnect call. The split runs along the
+delicate line: the server produces the raw entries `buildIndex()` takes, and the clients build
+the index and mark the words with words.js itself, so the matcher and the particle ruling live
+in one file.
+
+- The note reading, `wc_plain_word()`, `wc_reading_of()`, `wc_pitch_of()`,
+  `wc_kana_reading_of()`, `wc_usually_kana()`, `wc_status_of()` and `wc_note_word()`: words.js's
+  `plainWord()` … `statusOf()` and the background page's former `noteSummary()` word, ported line
+  for line. JavaScript is matched where Python differs: lengths and slices count UTF-16 code units
+  (`u16len()`, `u16slice()`; a surrogate pair the cut would split is left out whole, where
+  JavaScript keeps a lone half that UTF-8 cannot carry), `\s` is JavaScript's whitespace
+  (`_JS_SPACE_CLASS`, U+FEFF in, U+001C-U+001F out), `\d` and `\b` are ASCII and a
+  case-insensitive pattern folds ASCII alone (`_JS_I` = `re.I | re.A`: Python's Unicode folding
+  matches ſ to s), a JSON object's keys come in JavaScript's order (`_js_key_order()`: array
+  indices first), `Number()` and `String()` are `js_number()` and `js_str()`, and the script
+  tests go by Node 24's ranges (`_HAN`, `_HIRAGANA`, `_KATAKANA`). `TAG_LIST`'s 200 is counted in
+  code units after the match, which finds a match at the same `(` as JavaScript's
+  `{0,200}(?=[()])`. `test_deck_index.py` runs both sides over 4,000 random field sets and over
+  values two units either side of each limit (320, 1,000 and 16,000 code units, with a surrogate
+  pair, markup or furigana at the cut), and finds no difference. Node runs words.js; without it
+  the test skips, except under CI, where it fails.
+- `DeckIndex(deck, word, pitch)`: one deck read with one word field and one pitch field.
+  `refresh()` (the deck thread only) runs the algorithm of the extension's former `fetchDeckIndex()`: `scope()` (`deck_search()`
+  escapes `\`, `"`, `*`, `_`; `current` and `filtered` go by `did:` from `deckNamesAndIds`, None
+  when no such deck), the five `DECK_STATUS_QUERIES`, the ids sorted ascending, `edited:<days>`
+  (`max(2, ceil(elapsed / day) + 1)`) and `notesModTime` for the notes already known, `notesInfo`
+  in chunks of `DECK_NOTES_CHUNK` (200, `DECK_REQUEST_TIMEOUT` 20 s) for the rest. `notes` (id ->
+  word, reading, pitch, mod) is kept across refreshes; a chunk Anki refuses keeps what its notes
+  said; `AnkiUnreachable` or a refused search fails the refresh whole. `rows` (id ->
+  `[id, word, reading, status, pitch]`, a note with a word and a card) is what a client gets.
+  `publish()` moves `version` only when a row or the status changed, and keeps the rows held when
+  a refresh fails (colours a minute old beat none). `history` holds the ids each of the last
+  `DECK_HISTORY` (32) versions changed (None where no delta reaches across: a status change).
+  `answer(since)`: None for a client holding the token (`<epoch>.<version>`, the epoch random per
+  index, so a token from another deck or another server start never passes); else the status
+  and, while ok, every row (`full`) or the rows changed since the client's version with the ids
+  gone (`removed`). `due()`: `DECK_TTL` (30 s) old and asked about in the last `DECK_TTL`;
+  `expire()` makes it due at the next ask and lands a refresh under way expired.
+- `DeckIndexes`: the indexes by (resolved deck, word, pitch), so the extension and the portal
+  asking for the same deck share one; an index nobody asked about for `DECK_IDLE` (10 min) is
+  dropped. `ask(request)` never waits for Anki: the first ask answers `loading` and wakes the
+  `anki-deck` thread (`run_forever()`, `step()`). The deck is the request's `name`, else `seen`,
+  the deck of the last card the Miner attached media to (`note_mined()` from `Miner.outcome()`,
+  `learn_deck()`: `findCards nid:<id>` -> `getDecks`, the deck with most cards), kept in
+  `~/.shisu-ko/anki-deck.json` (`{deck, at, note}`, `DECK_SEEN_PATH`) across restarts. A server
+  without one takes the request's `seen`: the deck an extension of 0.22.0 or older kept in
+  `storage.local` (`ankiDeckSeen`), which the background sends with each deck request until a
+  server that reads Anki answered one, and then removes (`legacyDeckName()`, `handedOver()`).
+  Neither means `{token: "nodeck", status: "no_deck"}`:
+  a collection is never searched by guesswork. `notes_added()`, from `AnkiWatcher`'s look, expires
+  every index, so a card just made shows within seconds. `deck_names()` is `/health?decks=1`.
+- `resolve_word_colours()`: on, except inside the Docker image without `--anki-url`;
+  `start_anki_watcher()` then starts the deck thread, and the watcher runs for it even with the
+  sync and the mining off.
+- Transport. A `/sync` body's `deck: {name, word, pitch, since, seen}` (`deck_request()`: a deck
+  name of 1-200 characters without control characters, field names as `anki`'s, a token of
+  `[A-Za-z0-9._-]{1,64}` or null; a malformed `seen` is dropped, never refused) gets `deck` in the answer only when the token moved; a body
+  without `deck` is answered exactly as before. A malformed one is answered
+  `{token: "invalid", status: "error", error}`, never a refused `/sync`; a server without Anki
+  `{token: "off", status: "off"}`. `GET /health?decks=1` adds `anki_decks: {ok, decks, seen,
+  error, offline}`.
+- Tests: `server/tests/test_deck_index.py` (a fake AnkiConnect answering by deck, clause and
+  `edited:`), `test_deck_golden.py`.
+
+### The golden test
+
+`addon/tests/fixtures/deck-golden.json` holds invented notes (ruby, furigana brackets, the four
+ways Yomitan writes a pitch, `uk` in both spellings, a sentence in the word field, U+FEFF, an
+emoji, subdecks, three pairs of field settings), the `entries` the extension's deck path read
+them into until 0.22.0, and the `rows` the server reads them into. `deck-golden.test.js` keeps
+that old path (`oldDeckEntries()`: `noteSummary()`'s word, `plainWord()`, `kanaReadingOf()`,
+`pitchOf()`, `statusOf()`, the entry loop), checks it gives `entries` (when it was written, the
+background page's own `fetchDeckIndex()` gave the same), turns `rows` into entries with the
+background's `deckEntries()` and marks a line both ways; `test_deck_golden.py` holds the server's
+rows to `rows`, through `/sync`. Same entries, same `buildIndex()`, same marks.
+`UPDATE_GOLDEN=1 node --test addon/tests/deck-golden.test.js` writes the entries anew.
+
+### The background's rows (`addon/background.js`, "word colours")
+
+- `syncRequest(body)`: the `/sync` of the tab that holds the server (the election, `mining.md`)
+  carries `deck` from `deckRequest(settings)` when `wordColoursOn(settings)` (`enabled` and
+  `cardStatus || pitchAccent`): the trimmed `cardStatusDeck`, `ankiWordField`, `ankiPitchField`
+  and the token held. Another deck or field (`deckState.key`) starts the state over
+  (`freshDeck()`), so the server sends every row of the new index. The answer's `deck` is taken
+  here (`takeDeck()`) and removed before the tab sees the answer; an answer for a state replaced
+  meanwhile is dropped. A server that answers no `deck` to a client holding nothing predates
+  0.23.0: status `old`, `SERVER_TOO_OLD_TEXT`.
+- `takeDeck(answer)`: `full` replaces the rows, else the delta's rows and `removed` apply; a
+  status other than ok holds none. `deckEntries(rows)` (pure) gives `buildIndex()`'s entries by
+  note id, the word then its kana reading. `at` moves only when the entries changed.
+- `cardStatus(msg)`, the content script's ask, answers from memory: `{ok: false, reason: "off"}`
+  without `wordColoursOn()`; `{ok: true, unchanged: true, at, deck}` for `msg.since === at`;
+  `{ok: true, deck, automatic, at, entries}`; `reason: "pending"` before the server's first
+  answer (or `loading`); else the server's status as the reason (`no_deck`, `offline`, `error`,
+  `old`; the server's `off` is `unavailable`, since `off` makes the tab drop its colours) with
+  its error. One copy for every tab: a tab standing by gets the rows the holder's `/sync` brought.
+- `ankiDecks()`, the popup's `{type: "ankiDecks"}`: `GET /health?decks=1` -> `{ok: true, decks
+  (sorted), seen}` or `{ok: false, reason: "offline" | "error", error, seen}`; no `seen` when the
+  server did not answer.
+- Tests: `addon/tests/background.test.js` (a fake server queueing `deck` answers) and the grep
+  test "nothing in the extension talks to AnkiConnect" (no `8765`, no quoted AnkiConnect action
+  in `addon/*.js` / `*.html`).
 
 ### The content side (`addon/content.js`, "word colours" section)
 
@@ -458,10 +485,10 @@ from them and marks the words of every line. Everything in words.js is pure, wit
   `refreshWordMarks()` ran with), and three WeakMaps: `lineTexts` (transcript line -> its
   `.shisuko-linetext` span), `drawnKeys` (element -> the `drawKey()` of what `renderText()` last
   drew in it), `cueLooks` (cue -> `{serial, cardStatus, pitchAccent, katakana, particles, starts,
-  runs, key}`). Constants `WORD_INDEX_REFRESH_MS` 30 s, `WORD_INDEX_LOG_MS` 60 s,
-  `WORD_INDEX_MINE_DELAY_MS` 1.5 s, `WORD_INDEX_PROBE_MAX` 64, `WORD_SETTINGS` = `cardStatus`,
-  `pitchAccent`, `cardStatusDeck`, `ankiPitchField`, `ankiWordField` (if the background's
-  `CARD_INDEX_SETTINGS` ever gains `ankiUrl`, add it here too).
+  runs, key}`). Constants `WORD_INDEX_REFRESH_MS` 2 s (an ask is a message answered from the background's memory, so a card just made shows within seconds), `WORD_INDEX_LOG_MS` 60 s,
+  `WORD_INDEX_PROBE_MAX` 64, `WORD_SETTINGS` = `cardStatus`, `pitchAccent`, `cardStatusDeck`,
+  `ankiPitchField`, `ankiWordField` (the three the background's `deckRequest()` names, and the two
+  switches).
 - `renderText(el, cue)` is the one writer of a cue's text, used by `setSubtitle()` for
   `state.subText` and by `transcriptLine()` for the line's span: `lookOf(cue)` gives the runs,
   `drawRuns()` puts them in a `DocumentFragment` and `replaceChildren()`s it: a string run is a text
@@ -494,21 +521,18 @@ from them and marks the words of every line. Everything in words.js is pure, wit
 - `pollWordIndex()` runs from `syncTick()` and asks only when `wordColoursOn()`, `state.video &&
   state.videoId` (the home page and a player left behind off a watch page never ask, a settings
   change included), the tab visible, nothing in flight and `WORD_INDEX_REFRESH_MS` past: `{type:
-  "cardStatus", since: wordIndexAt}`. A tab standing by for another (`state.standby`, see "One tab at a time" in `mining.md`) asks like any other: the index is the deck's and the election is about the
-  server, which this never reaches, and the standby tab's lines stay on screen and must be
+  "cardStatus", since: wordIndexAt}`. A tab standing by for another (`state.standby`, see "One tab at a time" in `mining.md`) asks like any other: the rows are the deck's, which the holder's `/sync` brought, and the standby tab's lines stay on screen and must be
   recoloured too. An answer from before `wordIndexGeneration` moved is thrown
   away. `unchanged` keeps everything; a new `at` with the same key moves the stamp only; new
   entries go into `wordEntries`, rebuild the index with the known list of now, move the serial
   and call `refreshWordMarks()`; `reason: "off"` drops
-  the index and takes the colours off; any other failure (`noDeck`, `offline`, `denied`, `error`)
+  the index and takes the colours off; any other failure (`pending`, `no_deck`, `offline`, `unavailable`, `old`, `error`)
   is a `console.debug` line at most once per `WORD_INDEX_LOG_MS`, never a toast, and, while no
   index is held, builds one of the known list alone (`rebuildWordIndex()` over no entries) and
   draws it with `refreshWordMarks()`: the known words, the particles, the katakana words and the
   names need no deck. Its stamp and key stay unset, so the first deck answer with entries replaces
-  it; an index already held (a deck read before Anki closed) stays as it was. `stale` answers
-  count as fresh. After a successful mine
-  `mineCue()` sets `wordIndexAskedAt` so the next ask goes out `WORD_INDEX_MINE_DELAY_MS` after
-  it, once the background has expired its index.
+  it; an index already held (a deck read before Anki closed) stays as it was. A mine needs no
+  word from the tab: the server reads the new card's deck and sends its row with a later `/sync`.
 - The storage listener: a change to any of `WORD_SETTINGS` runs `dropWordIndex()` (index and entries
   null, serial and generation on, stamp, key and `askedAt` 0), then `refreshWordMarks()` (plain text
   again at once, in place) and, with the colours on, `pollWordIndex()`. A change to `knownWords`
@@ -593,21 +617,35 @@ one dropped; `decksOk` true for a listed set, false for a failure, null while an
 paints `#deck-hint` only while a checkbox is on: the error (warn) when not ok, `No deck named <name>
 in Anki` (error) for an unlisted manual deck, nothing for a listed one, `The last mined card's deck
 <seen> is no longer in Anki; mine a card, or choose a deck` (warn), `Looking at <seen>`, or
-`Automatic: no card mined yet — mine one, or choose a deck` (warn). Anki is asked from `init()` only
-when `cardStatus || pitchAccent` is stored on (the first ask brings up AnkiConnect's dialog, which a
-viewer who never uses the feature must not meet), from `onChange` after the debounced save when a
-checkbox was turned on or `ankiUrl` edited (`decksCheckPending = "feature"`, only when a feature is
-on in the form the save wrote) or the deck select changed (`"deck"`, always), and, while the newest
+`Automatic: no card mined yet — mine one, or choose a deck` (warn). The background asks the server
+(`/health?decks=1`), which asks Anki. That happens from `init()` only when `cardStatus ||
+pitchAccent` is stored on (a viewer who never uses the feature has Anki asked nothing), from
+`onChange` after the debounced save when a checkbox was turned on (`decksCheckPending =
+"feature"`, only when a feature is on in the form the save wrote) or the deck select changed (`"deck"`, always), and, while the newest
 answer failed and a feature is on, again every `DECKS_RETRY_MS` (30 s) from a clock `init()` sets
 beside the health refresh (`retryDecks()`; a good answer is never re-asked by the clock, and the
 clock, like the health poll, ticks only while the page is visible, `document.hidden`), because the
 options page (`options_ui.page` = popup.html) lives for hours. The save clears the hint when both
-features are off. A deck, a checkbox or `ankiUrl` written by the other copy of the form (the options
+features are off. A deck or a checkbox written by the other copy of the form (the options
 page and the toolbar popup) lands through `onStorageChanged()`, which rebuilds the deck option from
 Anki's last list (`renderDeckOptions(decksListed, decksSeen, value)`: a select shows nothing for a
 value without an option) and asks Anki by the `onChange` rules less the save (`landed`: a deck, a
-feature that landed checked, or the URL while a feature is on; a feature landing unchecked asks
-nothing; both features off clears the hint). 
+feature that landed checked; a feature landing unchecked asks nothing; both features off clears
+the hint). There is no AnkiConnect URL setting since 0.23.0: the server's `--anki-url` names Anki.
 Tests: `addon/tests/popup.test.js`.
 `addon/tests/settings.test.js` holds the defaults: the colours off, `particlesKnown` false,
 `katakanaKnown` false, `properNames` false, `knownWords` empty.
+
+### The portal (`portal/static/app.js`, `lib.js`)
+
+Settings > Word colours (`wordColours`, off by default like `cardStatus`). On, the page's
+`/api/sync` carries `deck: {since}`; `portal.py` asks the server for the card setup's deck (none:
+the server's automatic deck) with the note's first field as the word, so it shares the
+extension's index when the deck is the same, and passes the answer's `deck` back. The page keeps
+the rows with `L.applyDeck()` and `L.deckEntries()` (the background's rules), builds the index
+with words.js's `buildIndex(entries, [])` (`portal.py` serves `addon/words.js` itself as
+`/words.js`, never a copy) and marks each line with `markWords()` without options;
+`L.statusAt()` and `L.markedSegs()` cut Yomitan's tokens where the status changes (a ruby piece
+stays whole). A status is a 2 px underline in the system colours (`.cue .wc[data-status]` in
+`app.css`), so the word sweep keeps the text's own light. Tests: `portal/tests/lib.test.js`,
+`test_portal.py`.

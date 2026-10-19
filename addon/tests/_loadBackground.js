@@ -11,7 +11,6 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const SETTINGS_PATH = path.join(__dirname, "..", "settings.js");
-const WORDS_PATH = path.join(__dirname, "..", "words.js");
 const SOURCE_PATH = path.join(__dirname, "..", "background.js");
 
 function makeMemoryStorage(initial) {
@@ -23,6 +22,10 @@ function makeMemoryStorage(initial) {
     },
     async set(patch) {
       store = { ...store, ...patch };
+    },
+    async remove(key) {
+      store = { ...store };
+      for (const name of [].concat(key)) delete store[name];
     },
     _dump() {
       return store;
@@ -40,6 +43,8 @@ function btoa(binary) {
 function notifyingStorage(storage, listeners) {
   return {
     get: (key) => storage.get(key),
+    // A test's own storage may have no remove(): nothing to remove there.
+    remove: async (key) => (typeof storage.remove === "function" ? storage.remove(key) : undefined),
     async set(patch) {
       const before = await storage.get(undefined);
       await storage.set(patch);
@@ -128,8 +133,6 @@ function loadBackground(overrides = {}) {
   // settings.js defines SHISUKO_DEFAULT_SETTINGS in the shared global lexical scope, exactly as the
   // manifest loads it before background.js in Firefox.
   new vm.Script(fs.readFileSync(SETTINGS_PATH, "utf8"), { filename: SETTINGS_PATH }).runInContext(sandbox);
-  // words.js sits between them in the manifest too: the deck index reads notes through SHISUKO_WORDS.
-  new vm.Script(fs.readFileSync(WORDS_PATH, "utf8"), { filename: WORDS_PATH }).runInContext(sandbox);
   new vm.Script(source, { filename: SOURCE_PATH }).runInContext(sandbox);
   // Top-level `const`/`let` (DEFAULT_SETTINGS, REQUEST_TIMEOUT_MS, sleep) live in the global
   // *lexical* environment, not as globalThis properties, but that environment is shared across
@@ -141,10 +144,7 @@ function loadBackground(overrides = {}) {
       " globalThis.START_WINDOW_MS = START_WINDOW_MS;" +
       " globalThis.GITHUB_LATEST_URL = GITHUB_LATEST_URL; globalThis.UPDATE_CHECK_MAX_AGE_MS = UPDATE_CHECK_MAX_AGE_MS;" +
       " globalThis.UPDATE_WINDOW_MS = UPDATE_WINDOW_MS; globalThis.UPDATE_POLL_MS = UPDATE_POLL_MS;" +
-      " globalThis.ANKI_PERMISSION_RECHECK_MS = ANKI_PERMISSION_RECHECK_MS;" +
-      " globalThis.CARD_STATUS_TTL_MS = CARD_STATUS_TTL_MS; globalThis.DECK_SEEN_KEY = DECK_SEEN_KEY;" +
-      " globalThis.DECK_NOTES_KEY = DECK_NOTES_KEY; globalThis.DECK_NOTES_FORMAT = DECK_NOTES_FORMAT;" +
-      " globalThis.ankiWatch = ankiWatch;" +
+      " globalThis.SERVER_TOO_OLD_TEXT = SERVER_TOO_OLD_TEXT; globalThis.deckState = () => deckState;" +
       " globalThis.HOLD_TIMEOUT_MS = HOLD_TIMEOUT_MS; globalThis.FOCUS_STALE_MS = FOCUS_STALE_MS;" +
       " globalThis.syncers = syncers; globalThis.activeTabs = activeTabs;",
     { filename: SOURCE_PATH }

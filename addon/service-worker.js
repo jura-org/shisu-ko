@@ -1,1 +1,1 @@
-importScripts("browser-api.js", "settings.js", "words.js", "background.js");
+importScripts("browser-api.js", "settings.js", "background.js");

@@ -7,7 +7,8 @@
 
   const SETTINGS_KEY = "portal.settings";
   const RECENT_KEY = "portal.recent";
-  const DEFAULTS = { pauseOnLookup: true, autoPause: false, speed: 1, listening: false, furigana: false, sweep: true };
+  // wordColours is off by default, like the extension's cardStatus.
+  const DEFAULTS = { pauseOnLookup: true, autoPause: false, speed: 1, listening: false, furigana: false, sweep: true, wordColours: false };
   const SPEEDS = [0.75, 1, 1.25, 1.5];
   const SYNC_PLAYING_MS = 1000;
   const SYNC_PAUSED_MS = 5000;
@@ -94,6 +95,11 @@
     lastSavedAt: 0,
     lastShieldTap: null,
     inDeck: new Map(), // term -> boolean, from /api/canadd
+    // The word colours: the deck's rows as the server sent them (L.applyDeck), and the words.js
+    // index built from them; wordsKey is its entries as JSON, so an unchanged deck draws nothing.
+    deck: { token: null, status: null, rows: new Map() },
+    wordIndex: null,
+    wordsKey: "",
     sheet: { open: false, pausedIt: false, cue: null, span: null, entries: [], pick: 0, def: null, seq: 0 },
   };
 
@@ -666,7 +672,8 @@
     state.lastSyncAt = Date.now();
     let res;
     try {
-      res = await api("/api/sync", { video_id: state.videoId, t: state.t, since: state.since, paused: !state.playing });
+      const deck = settings.wordColours ? { deck: { since: state.deck.token } } : {};
+      res = await api("/api/sync", { video_id: state.videoId, t: state.t, since: state.since, paused: !state.playing, ...deck });
     } catch {
       res = null;
     } finally {
@@ -704,9 +711,37 @@
       document.title = data.title;
       remember();
     }
+    if (data.deck) takeDeck(data.deck);
     if (Array.isArray(data.cues) && data.cues.length) mergeCues(data.cues);
     if (typeof data.next === "number") state.since = data.next;
     renderServerStatus();
+  }
+
+  // ------------------------------------------------------------ word colours
+
+  // The server's deck rows in, the index rebuilt when the entries changed, every row drawn again.
+  function takeDeck(answer) {
+    state.deck = L.applyDeck(state.deck, answer);
+    const entries = state.deck.status === "ok" ? L.deckEntries(state.deck.rows.values()) : [];
+    const key = JSON.stringify(entries);
+    if (key === state.wordsKey) return;
+    state.wordsKey = key;
+    state.wordIndex = entries.length ? SHISUKO_WORDS.buildIndex(entries, []) : null;
+    redrawRows();
+  }
+
+  // One status per character of a cue, or null without colours.
+  function cueMarks(cue) {
+    if (!settings.wordColours || !state.wordIndex) return null;
+    return L.statusAt(SHISUKO_WORDS.markWords(cue.text, state.wordIndex));
+  }
+
+  function redrawRows() {
+    for (const cue of state.cues) {
+      const row = state.rowById.get(cue.id);
+      if (row) fillCue(row, cue);
+    }
+    state.focusKey = null;
   }
 
   function renderServerStatus() {
@@ -868,6 +903,7 @@
     const ruby = settings.furigana && isJa();
     row.classList.toggle("furigana", ruby);
     const scan = !state.tokens.has(cue.id) && state.tokenFailed.has(cue.id);
+    const marks = cueMarks(cue);
     for (const unit of L.cueUnits(cue.text, state.tokens.get(cue.id))) {
       if (scan && L.hasKanji(unit.text) || scan && /[ぁ-ゖァ-ヺ]/.test(unit.text)) unit.term = "?"; // a scan start
       // A break opportunity before every unit but punctuation, which stays with the word before it.
@@ -877,17 +913,24 @@
       if (unit.term === "?") span.dataset.scan = "1";
       span.dataset.start = String(unit.start);
       span.dataset.end = String(unit.end);
-      for (const [text, reading] of unit.segs) {
+      const pieces = marks ? L.markedSegs(unit, marks) : unit.segs.map(([text, reading]) => ({ text, reading, status: null }));
+      for (const { text, reading, status } of pieces) {
+        let node = text;
         if (ruby && reading && L.hasKanji(text)) {
-          const ruby = document.createElement("ruby");
-          ruby.append(text);
+          node = document.createElement("ruby");
+          node.append(text);
           const rt = document.createElement("rt");
           rt.textContent = reading;
-          ruby.append(rt);
-          span.append(ruby);
-        } else {
-          span.append(text);
+          node.append(rt);
         }
+        if (status) {
+          const mark = document.createElement("span");
+          mark.className = "wc";
+          mark.dataset.status = status;
+          mark.append(node);
+          node = mark;
+        }
+        span.append(node);
       }
       row.append(span);
     }
@@ -1651,15 +1694,12 @@
     $("set-furigana").checked = settings.furigana;
     $("set-listening").checked = settings.listening;
     $("set-sweep").checked = settings.sweep;
+    $("set-colours").checked = settings.wordColours;
     for (const b of $("set-speed").children) b.classList.toggle("on", Number(b.dataset.speed) === settings.speed);
-    // Furigana changes every cue's markup and height; redraw the list once when it flips.
-    if (state.furiganaShown !== undefined && state.furiganaShown !== settings.furigana) {
-      for (const cue of state.cues) {
-        const row = state.rowById.get(cue.id);
-        if (row) fillCue(row, cue);
-      }
-    }
-    state.furiganaShown = settings.furigana;
+    // Furigana and the word colours change every cue's markup; redraw the list once when one flips.
+    const drawn = `${settings.furigana} ${settings.wordColours}`;
+    if (state.drawnWith !== undefined && state.drawnWith !== drawn) redrawRows();
+    state.drawnWith = drawn;
     state.focusKey = null;
     updateVeil();
   }
@@ -1690,6 +1730,7 @@
     bindSwitch("set-furigana", "furigana");
     bindSwitch("set-listening", "listening");
     bindSwitch("set-sweep", "sweep");
+    bindSwitch("set-colours", "wordColours");
     $("settings-backdrop").addEventListener("click", closeSettings);
     $("set-anki").addEventListener("click", openAnkiSetup);
     bindAnkiSetup();
