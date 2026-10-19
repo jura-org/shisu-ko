@@ -27,9 +27,10 @@ from _serverlib import isolate_home, loaded_server, remove_temporary_homes
 REAL_HOME = Path.home() / ".shisu-ko"
 WATCHED = ("rocm", "rocm.new", "rocm.old", "cache/rocm-download")
 # Written by the viewer's own server while the tests run, never by a test: native_host.launch()
-# appends the server's output to server.log (the Start button on Linux/macOS), and a server
-# started meanwhile creates its server-<port>.lock.
-OWN_SERVER_FILES = re.compile(r"server\.log|server-\d+\.lock")
+# appends the server's output to server.log (the Start button on Linux/macOS), a server started
+# meanwhile creates its server-<port>.lock, and one that attaches media to a card notes its deck
+# in anki-deck.json (DeckIndexes.save_seen()).
+OWN_SERVER_FILES = re.compile(r"server\.log|server-\d+\.lock|anki-deck\.json(?:\.tmp)?")
 
 
 def top_level(folder: Path, dirs_too: bool = False) -> Optional[dict]:

@@ -4373,7 +4373,8 @@ def resolve_anki_sync(args, environ=os.environ) -> tuple:
 
 
 def start_anki_watcher(args, app=None) -> Optional[AnkiWatcher]:
-    """The watcher for the sync and, given the App, the miner; None when both are off."""
+    """The watcher for the sync and, given the App, the miner and the word colours' deck indexes;
+    None when all three are off."""
     on, url = resolve_anki_sync(args)
     container = " (inside the container; pass --anki-url to turn it on)"
     if not on:
@@ -4382,20 +4383,34 @@ def start_anki_watcher(args, app=None) -> Optional[AnkiWatcher]:
     mining = isinstance(app, App) and resolve_mining(args)
     if isinstance(app, App) and not mining:
         log.info("anki mine: off%s", container if getattr(args, "mine", None) is None else "")
-    if not on and not mining:
+    colours = isinstance(app, App) and resolve_word_colours(args)
+    if isinstance(app, App) and not colours:
+        log.info("anki word colours: off%s", container)
+    if not on and not mining and not colours:
         return None
 
     def call(action, params, timeout):
         return anki_connect(url, action, params, timeout)
 
+    listeners = []
     miner = None
     if mining:
         picture = getattr(args, "mine_picture", "on") != "off"
         miner = Miner(app, call, frames=FrameGrabber(app.fetcher) if picture else None)
         app.miner = miner
+        listeners.append(miner.notes_added)
         threading.Thread(target=miner.run_forever, daemon=True, name="anki-mine").start()
         log.info("anki mine: new notes get their line's audio%s", " and picture" if picture else " (no picture: --mine-picture off)")
-    watcher = AnkiWatcher(call, url=url, sync=on, on_new=miner.notes_added if miner else None,
+    if colours:
+        app.decks = DeckIndexes(call)
+        listeners.append(app.decks.notes_added)
+        threading.Thread(target=app.decks.run_forever, daemon=True, name="anki-deck").start()
+
+    def on_new(ids):
+        for listener in listeners:
+            listener(ids)
+
+    watcher = AnkiWatcher(call, url=url, sync=on, on_new=on_new if listeners else None,
                           fast=miner.watching if miner else None)
     threading.Thread(target=watcher.run_forever, daemon=True, name="anki-sync").start()
     return watcher
@@ -4976,6 +4991,9 @@ class Miner:
 
     def outcome(self, s: Session, nonce: Optional[str], status: str, message: str, note=None) -> dict:
         event = {"nonce": nonce, "ok": status == "attached", "status": status, "message": message, "note": note}
+        decks = getattr(self.app, "decks", None)
+        if status == "attached" and note is not None and decks is not None:
+            decks.note_mined(note)  # the word colours' automatic deck follows the mining
         return self.record(s, event, self.clock())
 
     # ---- the work
@@ -5103,6 +5121,814 @@ def resolve_mining(args, environ=os.environ) -> bool:
     return not (mode is None and in_container(environ) and not getattr(args, "anki_url", None))
 
 
+def resolve_word_colours(args, environ=os.environ) -> bool:
+    """Whether the server reads decks for the word colours: always, but inside the Docker image only
+    with --anki-url, as for the sync. A deck is read only once a client asks for it."""
+    return not (in_container(environ) and not getattr(args, "anki_url", None))
+
+
+# --------------------------------------------------------------------------- word colours: reading a note
+#
+# The word colours mark the words of a line by the viewer's Anki cards. The server reads the deck
+# and turns each note into the entries words.js's buildIndex() takes ([word, status, pitch], and
+# [reading, status, pitch] for a word usually written in kana); the clients build the index and
+# mark the words with words.js itself, so the matcher and its rules (a particle never takes the
+# colour of the word before it) live in one place. What follows is words.js's note reading, line
+# for line: plainWord(), readingOf(), pitchOf(), kanaReadingOf(), statusOf(). The golden test
+# (test_deck_index.py and addon/tests/deck-golden.test.js over one fixture) keeps the two equal.
+#
+# JavaScript is matched where Python differs: a length or a slice counts UTF-16 code units, \s is
+# JavaScript's whitespace, \d and \b are ASCII, a case-insensitive pattern folds ASCII alone, and
+# a script test (Han, Hiragana, Katakana) goes by the ranges below.
+
+_JS_SPACE_CHARS = "\t\n\x0b\x0c\r \u00a0\u1680" + "".join(map(chr, range(0x2000, 0x200B))) + "\u2028\u2029\u202f\u205f\u3000\ufeff"
+_JS_SPACE_CLASS = "\t\n\x0b\x0c\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+_WS = f"[{_JS_SPACE_CLASS}]"
+_NWS = f"[^{_JS_SPACE_CLASS}]"
+_JS_I = re.I | re.A  # JavaScript's /i without /u: ASCII letters fold, nothing else does
+
+
+def _ranges(spec: str) -> tuple:
+    out = []
+    for part in spec.split():
+        a, _, b = part.partition("-")
+        out.append((int(a, 16), int(b or a, 16)))
+    return tuple(out)
+
+
+# \p{Script=...} as Node 24's ICU has it (Unicode 16).
+_HAN = _ranges("2e80-2e99 2e9b-2ef3 2f00-2fd5 3005 3007 3021-3029 3038-303b 3400-4dbf 4e00-9fff f900-fa6d "
+               "fa70-fad9 16fe2-16fe3 16ff0-16ff6 20000-2a6df 2a700-2b81d 2b820-2cead 2ceb0-2ebe0 2ebf0-2ee5d "
+               "2f800-2fa1d 30000-3134a 31350-33479")
+_HIRAGANA = _ranges("3041-3096 309d-309f 1b001-1b11f 1b132 1b150-1b152 1f200")
+_KATAKANA = _ranges("30a1-30fa 30fd-30ff 31f0-31ff 32d0-32fe 3300-3357 ff66-ff6f ff71-ff9d 1aff0-1aff3 "
+                    "1aff5-1affb 1affd-1affe 1b000 1b120-1b122 1b155 1b164-1b167")
+
+
+def _in_script(ch: str, ranges: tuple) -> bool:
+    code = ord(ch)
+    return any(a <= code <= b for a, b in ranges)
+
+
+def _is_kana(ch: str) -> bool:
+    return _in_script(ch, _HIRAGANA) or _in_script(ch, _KATAKANA)
+
+
+def _kana_only(text: str) -> bool:
+    return bool(text) and all(ch in "ー・ｰ" or _is_kana(ch) for ch in text)
+
+
+def _has_kanji(text: str) -> bool:
+    return any(_in_script(ch, _HAN) for ch in text)
+
+
+def u16len(text: str) -> int:
+    """A string's length as JavaScript counts it, in UTF-16 code units."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def u16slice(text: str, n: int) -> str:
+    """text.slice(0, n) as JavaScript cuts it. A pair the cut would split is left out whole, where
+    JavaScript keeps its first half: a lone surrogate cannot be sent as UTF-8."""
+    if len(text) <= n // 2 or u16len(text) == len(text):
+        return text[:n]
+    units = 0
+    for i, ch in enumerate(text):
+        units += 2 if ord(ch) > 0xFFFF else 1
+        if units > n:
+            return text[:i]
+    return text
+
+
+def js_trim(text: str) -> str:
+    return text.strip(_JS_SPACE_CHARS)
+
+
+def js_str(value) -> str:
+    """String(value) for what JSON can hold: null and a missing value are ""."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return value if isinstance(value, str) else str(value)
+
+
+def js_number(value) -> float:
+    """Number(value): null is 0, a string is read as a decimal number, anything else is NaN."""
+    if value is None or value is False:
+        return 0.0
+    if value is True:
+        return 1.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = js_trim(value)
+        if not text:
+            return 0.0
+        try:
+            return float(text) if re.fullmatch(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", text) else math.nan
+        except ValueError:
+            return math.nan
+    return math.nan
+
+
+WC_MAX_WORD_LEN = 40  # words.js MAX_WORD_LEN
+_WC_MAX_WORD_FIELD_LEN = 8 * WC_MAX_WORD_LEN
+_WC_MAX_READING_FIELD_LEN = 1000
+_WC_MAX_FIELD_HTML_LEN = 16000
+
+_WC_TAGS = re.compile(r"<[^<>]*>")
+_WC_ENTITIES = re.compile(r"&(nbsp|amp|lt|gt|quot|#39);", _JS_I)
+_WC_RT_RP = re.compile(r"<(?:rt|rp)\b[^<>]*>.*?</(?:rt|rp|ruby)\b[^<>]*>", _JS_I | re.S)
+_WC_HAS_RT = re.compile(r"<rt\b", _JS_I)
+_WC_RUBY = re.compile(rf"<ruby\b[^<>]*>(.*?)</ruby{_WS}*>", _JS_I | re.S)
+_WC_RT = re.compile(r"<rt\b[^<>]*>(.*?)(?=</?(?:rt|rp|ruby)\b|\Z)", _JS_I | re.S)
+_WC_LINE_BREAKS = re.compile(rf"<br{_WS}*/?>|</(?:p|div|li|tr){_WS}*>", _JS_I)
+_WC_FURIGANA = re.compile(rf"{_WS}?({_NWS}+?)\[([^\]]*)\]")
+_WC_BRACKETS = re.compile(r"\[[^\]]*\]")
+_WC_SPACE = re.compile(f"{_WS}+")
+_WC_SMALL_KANA = set("ゃゅょャュョぁぃぅぇぉァィゥェォヮゎ")
+
+
+def _wc_strip_markup(raw) -> str:
+    text = u16slice(js_str(raw), _WC_MAX_FIELD_HTML_LEN)
+    text = _WC_RT_RP.sub("", text)
+    text = _WC_LINE_BREAKS.sub("\n", text)
+    text = _WC_TAGS.sub("", text)
+    return _WC_ENTITIES.sub(lambda m: _ENTITY_TEXT.get(m.group(1).lower(), ""), text)
+
+
+def _wc_plain_text(raw) -> str:
+    return js_trim(_WC_SPACE.sub(" ", _wc_strip_markup(raw)))
+
+
+def wc_plain_word(raw) -> str:
+    """words.js plainWord(): a field's first line without markup or furigana; "" for an empty field."""
+    for line in _wc_strip_markup(raw).split("\n"):
+        line = u16slice(line.lstrip(_JS_SPACE_CHARS), _WC_MAX_WORD_FIELD_LEN)
+        word = js_trim(_WC_SPACE.sub(" ", _WC_BRACKETS.sub("", _WC_FURIGANA.sub(r"\1", line))))
+        if word:
+            return word
+    return ""
+
+
+def _wc_mora_count(kana: str) -> int:
+    return sum(1 for ch in kana if ch not in _WC_SMALL_KANA and (ch in "ーｰ" or _is_kana(ch)))
+
+
+def wc_reading_of(raw) -> str:
+    """words.js readingOf(): the ruby's <rt> texts, the furigana's brackets or the field itself, when kana."""
+    text = js_str(raw)
+    if u16len(text) > _WC_MAX_READING_FIELD_LEN:
+        return ""
+    if _WC_HAS_RT.search(text):
+        def ruby(m):
+            parts = [found.group(1) for found in _WC_RT.finditer(m.group(1))]
+            return "".join(parts) if parts else m.group(1)
+        text = _WC_RUBY.sub(ruby, text)
+    reading = _WC_SPACE.sub("", _WC_FURIGANA.sub(r"\2", _wc_plain_text(text)))
+    return reading if _kana_only(reading) else ""
+
+
+_WC_LIST_ITEM = re.compile(r"<li\b", _JS_I)
+_WC_MORA_SPAN = re.compile(rf'<span style="[^"<>]*display:{_WS}*inline-block[^"<>]*"[^<>]*>', _JS_I)
+_WC_MORA_LINE = re.compile(r'<span style="[^"<>]*border-color:[^"<>]*"[^<>]*>', _JS_I)
+_WC_DROP_LINE = re.compile(r"border-right-width", _JS_I)
+_WC_SVG_OPEN = re.compile(r"<svg\b", _JS_I)
+_WC_SVG_CLOSE = re.compile(r"</svg\b", _JS_I)
+_WC_CIRCLE = re.compile(r"<circle\b([^<>]*)>", _JS_I)
+_WC_RADIUS = re.compile(rf'\br{_WS}*={_WS}*"?{_WS}*([0-9]+(?:\.[0-9]+)?)', _JS_I)
+_WC_HOLLOW = re.compile(rf'fill{_WS}*:{_WS}*none|\bfill{_WS}*={_WS}*"?{_WS}*none', _JS_I)
+_WC_MORA_RADIUS = 10
+
+
+def _wc_graph_pitch(piece: str) -> Optional[tuple]:
+    found = _WC_SVG_OPEN.search(piece)
+    if not found:
+        return None
+    svg = piece[found.start():]
+    close = _WC_SVG_CLOSE.search(svg)
+    if close:
+        svg = svg[:close.start()]
+    moras = n = 0
+    for circle in _WC_CIRCLE.finditer(svg):
+        radius = _WC_RADIUS.search(circle.group(1))
+        if not radius or float(radius.group(1)) < _WC_MORA_RADIUS:
+            continue
+        moras += 1
+        if n == 0 and _WC_HOLLOW.search(circle.group(1)):
+            n = moras
+    return (n, moras) if moras else None
+
+
+def _wc_drawn_pitch(raw: str) -> Optional[tuple]:
+    for piece in _WC_LIST_ITEM.split(raw):
+        lines = []
+        for chunk in _WC_MORA_SPAN.split(piece)[1:]:
+            line = _WC_MORA_LINE.search(chunk)
+            if line:
+                lines.append(line.group(0))
+        if lines:
+            drop = next((i for i, line in enumerate(lines) if _WC_DROP_LINE.search(line)), -1)
+            return drop + 1, len(lines)
+        graph = _wc_graph_pitch(piece)
+        if graph:
+            return graph
+    return None
+
+
+def _wc_category(n: int, moras: int) -> str:
+    if n == 0:
+        return "heiban"
+    if n == 1:
+        return "atamadaka"
+    return "odaka" if n == moras else "nakadaka"
+
+
+_WC_CATEGORY = re.compile(r"heiban|平板|atamadaka|頭高|nakadaka|中高|odaka|尾高", _JS_I)
+_WC_CATEGORY_OF = {"heiban": "heiban", "平板": "heiban", "atamadaka": "atamadaka", "頭高": "atamadaka",
+                   "nakadaka": "nakadaka", "中高": "nakadaka", "odaka": "odaka", "尾高": "odaka"}
+_WC_POSITION = re.compile(r"\[([0-9]+)\]")
+_WC_DIGITS_ONLY = re.compile(f"[0-9{_JS_SPACE_CLASS}]+")
+_WC_DOWNSTEP = "ꜜ"
+
+
+def _wc_parse_pitch(text, reading, word) -> Optional[str]:
+    raw = u16slice(js_str(text), _WC_MAX_FIELD_HTML_LEN)
+    plain = _wc_plain_text(raw)
+    named = _WC_CATEGORY.search(plain) if plain else None
+    if named:
+        return _WC_CATEGORY_OF[named.group(0).lower()]
+    drawn = _wc_drawn_pitch(raw)
+    if drawn:
+        return _wc_category(*drawn)
+    if not plain:
+        return None
+    position = _WC_POSITION.search(plain)
+    drop = plain.find(_WC_DOWNSTEP)
+    if position:
+        n = int(position.group(1))
+    elif _WC_DIGITS_ONLY.fullmatch(plain):
+        n = int(re.search(r"[0-9]+", plain).group(0))
+    elif drop >= 0:
+        n = _wc_mora_count(plain[:drop])
+    else:
+        return None
+    kana = _WC_SPACE.sub("", plain.replace(_WC_DOWNSTEP, ""))
+    moras = -1
+    if _kana_only(kana):
+        moras = _wc_mora_count(kana)
+    elif _kana_only(js_str(reading)):
+        moras = _wc_mora_count(reading)
+    elif _kana_only(js_str(word)):
+        moras = _wc_mora_count(word)
+    return _wc_category(n, moras)
+
+
+_WC_PITCH_FIELD = re.compile(r"pitch|accent|アクセント", _JS_I)
+_WC_READING_FIELD = re.compile(r"reading|furigana|読み|よみ", _JS_I)
+_WC_SENTENCE_FIELD = re.compile(r"sentence|文", _JS_I)
+
+
+def _js_key_order(fields: dict) -> list:
+    """A JSON object's keys in the order JavaScript lists them: array indices first, ascending."""
+    index = [k for k in fields if re.fullmatch(r"0|[1-9][0-9]*", k) and int(k) < 2 ** 32 - 1]
+    taken = set(index)
+    return sorted(index, key=int) + [k for k in fields if k not in taken]
+
+
+def _wc_same_field(names: list, name) -> Optional[str]:
+    wanted = js_trim(js_str(name))
+    if not wanted:
+        return None
+    if wanted in names:
+        return wanted
+    same = [each for each in names if each.lower() == wanted.lower()]
+    return same[0] if len(same) == 1 else None
+
+
+def _wc_fields_in_order(fields) -> list:
+    """(name, value, order) of a note's fields, lowest order first (words.js fieldsInOrder())."""
+    if not isinstance(fields, dict):
+        return []
+    out = []
+    for name in _js_key_order(fields):
+        field = fields[name]
+        if not isinstance(field, (dict, list)):
+            continue
+        field = field if isinstance(field, dict) else {}
+        order = js_number(field["order"]) if "order" in field else math.nan
+        out.append((name, js_str(field.get("value")), order if math.isfinite(order) else math.inf))
+    return sorted(out, key=lambda f: f[2])
+
+
+def _wc_word_field(fields_list: list, word_name: str):
+    wanted = js_trim(word_name)
+    if not wanted:
+        return next((f for f in fields_list if f[2] == 0), None)
+    name = _wc_same_field([f[0] for f in fields_list], wanted)
+    return next((f for f in fields_list if f[0] == name), None)
+
+
+def _wc_pitch_fields(fields_list: list, pitch_name: str) -> list:
+    wanted = _wc_same_field([f[0] for f in fields_list], pitch_name)
+    named = next((f for f in fields_list if f[0] == wanted), None) if wanted else None
+    return [named] if named else [f for f in fields_list if _WC_PITCH_FIELD.search(f[0])]
+
+
+def _wc_is_reading_field(field) -> bool:
+    return bool(_WC_READING_FIELD.search(field[0])) and not _WC_SENTENCE_FIELD.search(field[0])
+
+
+def _wc_reading_from(fields_list: list, skip) -> str:
+    field = next((f for f in fields_list if not skip(f) and _wc_is_reading_field(f)), None)
+    return wc_reading_of(field[1]) if field else ""
+
+
+def wc_pitch_of(fields, word_name: str = "", pitch_name: str = "") -> Optional[str]:
+    """words.js pitchOf(): the first pitch field that reads, else a pattern drawn in a reading field."""
+    fields_list = _wc_fields_in_order(fields)
+    candidates = _wc_pitch_fields(fields_list, pitch_name)
+    word_field = _wc_word_field(fields_list, word_name)
+    word = wc_plain_word(word_field[1]) if word_field else ""
+    for pitch in candidates:
+        found = _wc_parse_pitch(pitch[1], _wc_reading_from(fields_list, lambda f, p=pitch: f is p), word)
+        if found:
+            return found
+    for field in fields_list:
+        if any(field is c for c in candidates) or not _wc_is_reading_field(field):
+            continue
+        drawn = _wc_drawn_pitch(u16slice(field[1], _WC_MAX_FIELD_HTML_LEN))
+        if drawn:
+            return _wc_category(*drawn)
+    return None
+
+
+_WC_USUALLY_KANA = "usually written using kana alone"
+# words.js TAG_LIST, /\(([^()]{0,200})(?=[()])/g, with the 200 counted in UTF-16 code units after
+# the match: a "(" whose run is longer matches nowhere in JavaScript, nor here.
+_WC_TAG_LIST = re.compile(r"\(([^()]*)(?=[()])")
+
+
+def wc_usually_kana(fields) -> bool:
+    for _, value, _ in _wc_fields_in_order(fields):
+        if _WC_USUALLY_KANA in value.lower():
+            return True
+        for found in _WC_TAG_LIST.finditer(value):
+            items = found.group(1)
+            if u16len(items) <= 200 and any(js_trim(_WC_TAGS.sub("", item)) == "uk" for item in items.split(",")):
+                return True
+    return False
+
+
+def wc_kana_reading_of(fields, word_name: str = "", pitch_name: str = "") -> str:
+    """words.js kanaReadingOf(): the kana a kanji word is subtitled in when its dictionary says so."""
+    fields_list = _wc_fields_in_order(fields)
+    word_field = _wc_word_field(fields_list, word_name)
+    word = wc_plain_word(word_field[1]) if word_field else ""
+    if not _has_kanji(word) or not wc_usually_kana(fields):
+        return ""
+    pitches = _wc_pitch_fields(fields_list, pitch_name)
+    reading = _wc_reading_from(fields_list, lambda f: f is word_field or any(f is p for p in pitches))
+    return reading if reading and reading != word and u16len(reading) <= WC_MAX_WORD_LEN else ""
+
+
+def wc_status_of(sets: dict, note_id: int) -> Optional[str]:
+    """words.js statusOf() over the five searches of DECK_STATUS_QUERIES."""
+    def has(name):
+        return note_id in sets.get(name, ())
+    if not has("unsuspended"):
+        return "suspended" if has("suspended") else None
+    if has("new"):
+        return "new"
+    if has("learning"):
+        return "learning"
+    if has("review"):
+        return "learned"
+    return "learning"  # an Anki before 2.1.44, or a set a search left out: the middle guess
+
+
+def wc_note_word(fields, word_name: str = "") -> str:
+    """The word of a note as the extension read it: noteSummary()'s word field through plainWord(),
+    "" when longer than words.js keeps (a sentence in the word field)."""
+    if not isinstance(fields, dict):
+        return ""
+    if js_trim(word_name):
+        key = _wc_same_field(list(fields), word_name)
+        entry = fields.get(key) if key else None
+        raw = js_str(entry.get("value") or "") if isinstance(entry, dict) else ""
+    else:
+        raw = next((js_str(f.get("value") or "") for f in (fields[k] for k in _js_key_order(fields))
+                    if isinstance(f, dict) and f and js_number(f.get("order")) == 0 and "order" in f), "")
+    word = wc_plain_word(js_trim(raw))
+    return "" if u16len(word) > WC_MAX_WORD_LEN else word
+
+
+# --------------------------------------------------------------------------- word colours: the deck index
+#
+# One deck read with one pair of field names is one DeckIndex: what notesInfo said about each note
+# (kept across refreshes, read again only for a note that is new or edited) and the rows a client
+# turns into buildIndex() entries, [id, word, reading, status, pitch] for each note with a word and
+# a card. The five status searches are cheap and run at every refresh, since they are what a review
+# changes; a refresh is due once the index is DECK_TTL old and a client asks, or at once after a
+# new note. A client names the deck in /sync's `deck` and the token it holds; the answer carries
+# `deck` only when the token moved: every row the first time, the rows that changed after that.
+#
+# The deck is the one the client names, else the one the last card the Miner attached to went to
+# (`seen`, kept in DECK_SEEN_PATH across restarts, as the extension kept it in its own storage).
+# Nothing mined and nothing named is no deck: a collection is never searched by guesswork.
+
+DECK_TTL = 30.0  # an index this fresh is answered as it is
+DECK_REQUEST_TIMEOUT = 20.0  # per AnkiConnect request: a large deck takes its time
+DECK_NOTES_CHUNK = 200  # notes per notesInfo call
+DECK_IDLE = 600.0  # an index no client asked about for this long is dropped
+DECK_HISTORY = 32  # versions a delta may start from; an older token gets every row again
+DECK_NAME_RE = re.compile(r"[^\x00-\x1f\x7f]{1,200}")
+DECK_TOKEN_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+DECK_SEEN_PATH = APP_DIR / "anki-deck.json"
+DECK_NO_DECK_TEXT = "No card mined yet; pick a deck in the popup"
+DECK_OFF_TEXT = "This server reads no Anki (in the Docker image, start it with --anki-url)"
+# Since Anki 2.1.44 is:new, is:learn and is:review go by the card's type, which a suspended card
+# keeps, so each of the three leaves suspended cards out; suspended and unsuspended together are
+# the deck.
+DECK_STATUS_QUERIES = {
+    "suspended": "is:suspended",
+    "unsuspended": "-is:suspended",
+    "new": "is:new -is:suspended",
+    "learning": "is:learn -is:suspended",
+    "review": "is:review -is:learn -is:suspended",
+}
+
+
+def deck_search(name: str) -> str:
+    """The search clause for one deck and its subdecks: `\\`, `"`, `*` and `_` escaped in the quotes."""
+    return '"deck:' + re.sub(r'([\\"*_])', r"\\\1", name) + '"'
+
+
+def deck_request(value) -> dict:
+    """The validated `deck` of a /sync body: {name, word, pitch, since}; ValueError when malformed.
+    An empty name is the automatic deck; empty field names are words.js's defaults."""
+    if not isinstance(value, dict):
+        raise ValueError("deck must be an object")
+    out = {"name": "", "word": "", "pitch": "", "since": None}
+    name = value.get("name", "")
+    if not isinstance(name, str) or (name.strip() and not DECK_NAME_RE.fullmatch(name.strip())):
+        raise ValueError("deck.name is not a deck name")
+    out["name"] = name.strip()
+    for key in ("word", "pitch"):
+        field_name = value.get(key, "")
+        if not isinstance(field_name, str) or not ANKI_FIELD_NAME_RE.fullmatch(field_name.strip()):
+            raise ValueError(f"deck.{key} is not a field name")
+        out[key] = field_name.strip()
+    since = value.get("since")
+    if since is not None and (not isinstance(since, str) or not DECK_TOKEN_RE.fullmatch(since)):
+        raise ValueError("deck.since is malformed")
+    out["since"] = since
+    return out
+
+
+def deck_note(info: dict, word_field: str, pitch_field: str) -> tuple:
+    """(word, reading, pitch) of one notesInfo answer, as the extension read a note."""
+    fields = info["fields"]
+    return (wc_note_word(fields, word_field), wc_kana_reading_of(fields, word_field, pitch_field),
+            wc_pitch_of(fields, word_field, pitch_field))
+
+
+def deck_rows_entries(rows) -> list:
+    """The buildIndex() entries a client makes of the rows (deckEntries() in background.js), by id."""
+    entries = []
+    for _, word, reading, status, pitch in sorted(rows, key=lambda row: row[0]):
+        entries.append([word, status, pitch])
+        if reading:
+            entries.append([reading, status, pitch])
+    return entries
+
+
+class DeckIndex:
+    """One deck read with one word field and one pitch field; see the section comment above.
+    refresh() runs on the deck thread alone; answer() is called by /sync's threads."""
+
+    def __init__(self, deck: str, word: str, pitch: str, clock=time.time):
+        self.deck, self.word, self.pitch, self.clock = deck, word, pitch, clock
+        self.lock = threading.Lock()
+        # A new index starts a new epoch, so a token for another deck or another server never
+        # passes for one of this.
+        self.epoch = uuid.uuid4().hex[:8]
+        self.version = 0
+        self.history: list = []  # (version, the ids it changed, or None where no delta reaches across)
+        self.status, self.error = "loading", None
+        self.notes: dict = {}  # id -> (word, reading, pitch, mod): what notesInfo said
+        self.rows: dict = {}  # id -> [id, word, reading, status, pitch]
+        self.fetched_at = 0.0  # 0: due at the next ask
+        self.checked_at = 0.0  # when the notes were last looked through for edits
+        self.wanted_at = clock()
+        self.refreshing = False
+        self.expired = False  # a new note arrived while a refresh ran: its result lands expired
+
+    def token(self) -> str:
+        return f"{self.epoch}.{self.version}"
+
+    def due(self, now: float) -> bool:
+        """Whether a refresh is due: the index is DECK_TTL old (or expired) and a client asked lately."""
+        return not self.refreshing and now - self.fetched_at >= DECK_TTL and now - self.wanted_at <= DECK_TTL
+
+    def expire(self) -> None:
+        with self.lock:
+            self.fetched_at = 0.0
+            if self.refreshing:
+                self.expired = True
+
+    # ---- reading Anki (the deck thread)
+
+    def scope(self, call) -> Optional[str]:
+        """Anki reads the names "current" and "filtered" as keywords that cannot be escaped, so those
+        two are searched by deck id; None when no deck of that name exists."""
+        if self.deck not in ("current", "filtered"):
+            return deck_search(self.deck)
+        named = call("deckNamesAndIds", {}, DECK_REQUEST_TIMEOUT)
+        ids = [int(i) for name, i in (named.items() if isinstance(named, dict) else ())
+               if (name == self.deck or name.startswith(self.deck + "::")) and isinstance(i, int)]
+        return "did:" + ",".join(map(str, ids)) if ids else None
+
+    def edited(self, call, scope: str, now: float) -> set:
+        """The notes edited since the last look (`edited:` counts days back from the coming day
+        rollover, so one more than the days elapsed always reaches it); an Anki without the search
+        finds nothing, and the words then lag an edit."""
+        days = max(2, math.ceil((now - self.checked_at) / 86400.0) + 1)
+        try:
+            return set(note_ids(call("findNotes", {"query": f"{scope} edited:{days}"}, DECK_REQUEST_TIMEOUT)))
+        except RuntimeError as exc:
+            log.debug("anki deck: the search for edited notes failed (%s)", exc)
+            return set()
+
+    def changed(self, call, ids: list) -> set:
+        """Which of the notes the edit search listed really changed, by modification time. An Anki
+        without notesModTime reads every one of them again."""
+        try:
+            times = call("notesModTime", {"notes": ids}, DECK_REQUEST_TIMEOUT)
+        except RuntimeError as exc:
+            log.debug("anki deck: notesModTime failed for %d notes (%s)", len(ids), exc)
+            return set(ids)
+        reported = {}
+        for k, row in enumerate(times if isinstance(times, list) else []):
+            row = row if isinstance(row, dict) else {}
+            note, mod = row.get("noteId"), row.get("mod")
+            reported[note if isinstance(note, int) else ids[k] if k < len(ids) else None] = mod if isinstance(mod, int) else 0
+        return {i for i in ids if reported.get(i) != self.notes[i][3]}
+
+    def refresh(self, call) -> None:
+        """Read the deck again. AnkiUnreachable or a refused search fails the refresh as a whole: the
+        rows held stay, and with none held the index says why. A notesInfo chunk Anki refuses (a
+        note deleted since the search) costs those notes alone, which keep what they said before."""
+        started = self.clock()
+        with self.lock:
+            self.refreshing, self.expired = True, False
+        try:
+            rows = self.read(call, started)
+        except (AnkiUnreachable, RuntimeError) as exc:
+            log.debug("anki deck: reading %r failed (%s)", self.deck, exc)
+            self.publish(None, "offline" if isinstance(exc, AnkiUnreachable) else "error", anki_error_text(exc), started)
+            return
+        except Exception:
+            self.publish(None, "error", "the server failed to read the deck; see its log", started)
+            raise
+        self.publish(rows, "ok", None, started)
+
+    def read(self, call, started: float) -> dict:
+        scope = self.scope(call)
+        sets = {name: set(note_ids(call("findNotes", {"query": f"{scope} {clause}"}, DECK_REQUEST_TIMEOUT)))
+                if scope is not None else set() for name, clause in DECK_STATUS_QUERIES.items()}
+        ids = sorted(sets["suspended"] | sets["unsuspended"])
+        members = set(ids)
+        known = self.notes
+        edited = self.edited(call, scope, started) if scope is not None and known else set()
+        suspect = [i for i in ids if i in edited and i in known]
+        reread = self.changed(call, suspect) if suspect else set()
+        notes = {i: known[i] for i in ids if i in known and i not in reread}
+        missing = [i for i in ids if i not in notes]
+        for start in range(0, len(missing), DECK_NOTES_CHUNK):
+            chunk = missing[start:start + DECK_NOTES_CHUNK]
+            try:
+                infos = call("notesInfo", {"notes": chunk}, DECK_REQUEST_TIMEOUT)
+            except RuntimeError as exc:
+                log.debug("anki deck: notesInfo failed for %d notes (%s)", len(chunk), exc)
+                notes.update({i: known[i] for i in chunk if i in known})
+                continue
+            for k, info in enumerate(infos if isinstance(infos, list) else []):
+                reported = info.get("noteId") if isinstance(info, dict) else None
+                note_id = reported if isinstance(reported, int) and not isinstance(reported, bool) else chunk[k] if k < len(chunk) else None
+                if note_id not in members or not isinstance(info, dict) or not isinstance(info.get("fields"), dict):
+                    continue  # a note that vanished answers {}
+                mod = info.get("mod")
+                notes[note_id] = (*deck_note(info, self.word, self.pitch), mod if isinstance(mod, int) else 0)
+        self.notes = notes
+        rows = {}
+        for note_id in ids:
+            note = notes.get(note_id)
+            status = wc_status_of(sets, note_id)
+            if note and note[0] and status:
+                rows[note_id] = [note_id, note[0], note[1], status, note[2]]
+        return rows
+
+    def publish(self, rows: Optional[dict], status: str, error: Optional[str], started: float) -> None:
+        """The refresh's outcome. The version moves only when what a client holds changes: a row,
+        or the status. A failure with rows held keeps them (colours a minute old beat none)."""
+        with self.lock:
+            self.refreshing = False
+            self.fetched_at = 0.0 if self.expired else started
+            if rows is None:
+                if self.status == "ok":
+                    return
+                if (status, error) != (self.status, self.error):
+                    self.status, self.error = status, error
+                    self.bump(None)
+                return
+            self.checked_at = started
+            if self.status != "ok":
+                self.status, self.error, self.rows = "ok", None, rows
+                self.bump(None)
+                return
+            changed = {i for i in self.rows.keys() | rows.keys() if self.rows.get(i) != rows.get(i)}
+            self.rows = rows
+            if changed:
+                self.bump(changed)
+
+    def bump(self, changed: Optional[set]) -> None:
+        self.version += 1
+        self.history = (self.history + [(self.version, changed)])[-DECK_HISTORY:]
+
+    # ---- answering (/sync's threads)
+
+    def answer(self, since: Optional[str]) -> Optional[dict]:
+        """What a client holding `since` needs: None when it holds this index as it is, else the
+        state and, while ok, every row (`full`) or the rows changed since its token."""
+        with self.lock:
+            self.wanted_at = self.clock()
+            token = self.token()
+            if since == token:
+                return None
+            out = {"token": token, "status": self.status, "deck": self.deck}
+            if self.status != "ok":
+                if self.error:
+                    out["error"] = self.error
+                return out
+            changed = self.changed_since(since)
+            if changed is None:
+                out.update(full=True, notes=[self.rows[i] for i in sorted(self.rows)], removed=[])
+            else:
+                out.update(full=False, notes=[self.rows[i] for i in sorted(changed) if i in self.rows],
+                           removed=sorted(i for i in changed if i not in self.rows))
+            return out
+
+    def changed_since(self, since: Optional[str]) -> Optional[set]:
+        """The ids changed after the version `since` names, or None when only every row will do."""
+        epoch, _, version = (since or "").partition(".")
+        if epoch != self.epoch or not version.isdigit() or int(version) >= self.version:
+            return None
+        base = int(version)
+        steps = [entry for entry in self.history if entry[0] > base]
+        if len(steps) != self.version - base or any(changed is None for _, changed in steps):
+            return None
+        return set().union(*(changed for _, changed in steps))
+
+
+def note_ids(value) -> list:
+    return [i for i in value if isinstance(i, int) and not isinstance(i, bool)] if isinstance(value, list) else []
+
+
+class DeckIndexes:
+    """The deck indexes clients ask for, keyed by (deck, word field, pitch field), and the deck the
+    last mined card went to. `call(action, params, timeout)` is AnkiConnect. One thread
+    (run_forever()) does every read of Anki; ask() never waits for one."""
+
+    def __init__(self, call, path: Optional[Path] = None, clock=time.time):
+        self.call, self.clock = call, clock
+        self.path = DECK_SEEN_PATH if path is None else path
+        self.cond = threading.Condition()
+        self.indexes: dict = {}
+        self.mined: "queue.Queue" = queue.Queue()  # note ids whose deck becomes the automatic one
+        self.seen = self.load_seen()
+
+    def load_seen(self) -> Optional[str]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            log.warning("Ignoring %s (%s)", self.path, exc)
+            return None
+        deck = data.get("deck") if isinstance(data, dict) else None
+        return deck if isinstance(deck, str) and DECK_NAME_RE.fullmatch(deck) else None
+
+    def save_seen(self, deck: str, note_id: int) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            tmp.write_text(json.dumps({"deck": deck, "at": int(self.clock() * 1000), "note": note_id}) + "\n",
+                           encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            log.warning("anki deck: could not write %s (%s)", self.path, exc)
+
+    # ---- what clients and the watcher hand over
+
+    def ask(self, request: dict) -> Optional[dict]:
+        """/sync's `deck` answer for a validated request (deck_request()), None when the client is
+        up to date. The first ask for an index answers `loading` and starts its read."""
+        automatic = not request["name"]
+        with self.cond:
+            deck = request["name"] or self.seen
+            if not deck:
+                token = "nodeck"
+                return None if request["since"] == token else {
+                    "token": token, "status": "no_deck", "error": DECK_NO_DECK_TEXT, "automatic": True}
+            key = (deck, request["word"], request["pitch"])
+            index = self.indexes.get(key)
+            if index is None:
+                index = self.indexes[key] = DeckIndex(deck, request["word"], request["pitch"], self.clock)
+            answer = index.answer(request["since"])
+            if index.due(self.clock()):
+                self.cond.notify()
+        if answer is not None:
+            answer["automatic"] = automatic
+        return answer
+
+    def notes_added(self, ids) -> None:
+        """A new note (AnkiWatcher's look): every index is read again at its next ask, so a card just
+        made shows in its colour within seconds rather than after DECK_TTL."""
+        with self.cond:
+            for index in self.indexes.values():
+                index.expire()
+            self.cond.notify()
+
+    def note_mined(self, note_id: int) -> None:
+        """The Miner attached to this note: its deck becomes the automatic one."""
+        self.mined.put(note_id)
+        with self.cond:
+            self.cond.notify()
+
+    def deck_names(self) -> dict:
+        """/health?decks=1's `anki_decks`: Anki's deck names for the popup, and the automatic deck."""
+        try:
+            names = self.call("deckNames", {}, ANKI_REQUEST_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 - Anki closed or refusing: the popup says so
+            return {"ok": False, "error": anki_error_text(exc), "seen": self.seen,
+                    "offline": isinstance(exc, AnkiUnreachable)}
+        decks = sorted((str(name) for name in names), key=lambda n: (n.casefold(), n)) if isinstance(names, list) else []
+        return {"ok": True, "decks": decks, "seen": self.seen}
+
+    # ---- the deck thread
+
+    def learn_deck(self, note_id: int) -> None:
+        """The deck a note's cards sit in (the one with most of them, should a note type spread its
+        cards) becomes `seen`. Best effort: the mine is done whatever this finds."""
+        try:
+            cards = self.call("findCards", {"query": f"nid:{note_id}"}, DECK_REQUEST_TIMEOUT)
+            decks = self.call("getDecks", {"cards": cards if isinstance(cards, list) else []}, DECK_REQUEST_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("anki deck: could not tell note %d's deck (%s)", note_id, exc)
+            return
+        counted = [(len(ids) if isinstance(ids, list) else 0, name) for name, ids in
+                   (decks.items() if isinstance(decks, dict) else ())]
+        most = max(counted, key=lambda pair: pair[0], default=(0, None))
+        if not most[0] or not isinstance(most[1], str) or not DECK_NAME_RE.fullmatch(most[1]):
+            return
+        with self.cond:
+            moved = most[1] != self.seen
+            self.seen = most[1]
+        if moved:
+            log.info("anki deck: the word colours' automatic deck is now %r", most[1])
+        self.save_seen(most[1], note_id)
+        self.notes_added([note_id])
+
+    def step(self) -> None:
+        """Learn the decks of mined notes, read every index that is due, drop those nobody asks about."""
+        while True:
+            try:
+                note_id = self.mined.get_nowait()
+            except queue.Empty:
+                break
+            self.learn_deck(note_id)
+        now = self.clock()
+        with self.cond:
+            for key in [k for k, index in self.indexes.items() if now - index.wanted_at > DECK_IDLE]:
+                del self.indexes[key]
+            due = [index for index in self.indexes.values() if index.due(now)]
+        for index in due:
+            index.refresh(self.call)
+
+    def run_forever(self) -> None:
+        while True:
+            try:
+                self.step()
+            except Exception:  # noqa: BLE001 - the deck thread never takes the server down
+                log.exception("anki deck: unexpected error")
+            with self.cond:
+                self.cond.wait(DECK_TTL)
+
+
 # --------------------------------------------------------------------------- application
 
 class App:
@@ -5136,6 +5962,7 @@ class App:
         self.sweep = self.old_record_sweep() if sweep else iter(())  # the server's own; tools and tests sweep nothing
         self.anki_watcher: Optional[AnkiWatcher] = None  # main() starts it: tools and tests watch nothing
         self.miner: Optional[Miner] = None  # start_anki_watcher() sets it when new notes are attached to
+        self.decks: Optional[DeckIndexes] = None  # start_anki_watcher() sets it for the word colours
         self.transcriber = Transcriber(self)
         self.transcriber.start()
 
