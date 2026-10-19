@@ -7,6 +7,7 @@ YouTube.
 """
 from __future__ import annotations
 
+import copy
 import io
 import math
 from types import SimpleNamespace
@@ -261,6 +262,43 @@ def test_escape_html_keeps_text_text_and_the_seam_a_line_break():
     assert server.escape_html("<script>x</script>") == "&lt;script&gt;x&lt;/script&gt;"
 
 
+# ------------------------------------------------------------------ the whole line, not Yomitan's fragment
+# addon/tests/background.test.js's extendSentenceField() cases from 0.21.1, ported one for one.
+
+grow = server.grow_sentence
+
+
+def test_grow_sentence_grows_a_fragment_into_the_cue_and_keeps_yomitans_bold():
+    assert grow("これは<b>猫</b>です。", "これは猫です。とても可愛い。") == "これは<b>猫</b>です。とても可愛い。"
+
+
+def test_grow_sentence_writes_the_cue_plain_when_the_bold_word_cannot_be_located():
+    # Normalising drops the space inside the bold span, so "thecat" is not in the raw cue.
+    assert grow("Look at <b>the cat</b>.", "Look at the cat. It sleeps.") == "Look at the cat. It sleeps."
+
+
+def test_grow_sentence_leaves_a_field_that_already_holds_the_whole_cue_alone():
+    assert grow("これは<b>猫</b>です。", "これは猫です。") is None
+    assert grow("これは<b>猫</b>です。とても可愛い。", "これは猫です。とても可愛い。") is None
+
+
+def test_grow_sentence_refuses_text_that_is_not_part_of_the_cue():
+    assert grow("まったく別の文です。", "これは猫です。とても可愛い。") is None
+    assert grow("", "これは猫です。") is None
+
+
+def test_grow_sentence_writes_the_transcription_as_text_with_only_its_own_bold_as_markup():
+    assert (grow("これは<b>猫</b>です。", "これは猫です。<script>alert(1)</script>とても可愛い。")
+            == "これは<b>猫</b>です。&lt;script&gt;alert(1)&lt;/script&gt;とても可愛い。")
+    assert grow("Look at <b>the cat</b>.", "Look at the cat. 1<2 & \"so\" it's") == "Look at the cat. 1&lt;2 &amp; &quot;so&quot; it&#39;s"
+
+
+def test_grow_sentence_grows_inside_its_own_row_never_across_the_seam():
+    assert grow("これは<b>猫</b>です。", "これは猫です。とても可愛い\n待って!") == "これは<b>猫</b>です。とても可愛い"
+    assert grow("<b>体</b>動かない", "体動かない\n待って!") is None  # the whole row already
+    assert grow("<b>待って</b>", "体動かない。もう\n待って!今すぐ") == "<b>待って</b>!今すぐ"
+
+
 def test_anki_settings_fill_the_defaults_and_refuse_what_is_not_a_field_name():
     assert server.anki_settings({}) == server.ANKI_SETTINGS_DEFAULT
     got = server.anki_settings({"picture": " picture ", "audio": "sentenceAudio", "sentence": "Sentence",
@@ -313,7 +351,8 @@ class FakeAnki:
         if action == "notesInfo":
             if self.on_update is not None:
                 self.on_update()
-            return [{"noteId": i, "fields": self.notes[i]} if i in self.notes else {} for i in params["notes"]]
+            # A copy, as AnkiConnect's JSON is: a later write must not change an earlier answer.
+            return [{"noteId": i, "fields": copy.deepcopy(self.notes[i])} if i in self.notes else {} for i in params["notes"]]
         if action == "storeMediaFile":
             name = params["filename"].lower()  # recent Ankis store the name lowercased
             self.media[name] = params["data"]
@@ -507,6 +546,69 @@ def test_a_stored_name_with_markup_is_escaped_in_the_field(rig):
     rig.miner.call = odd_names
     assert rig.miner.attach_new(nid)["ok"]
     assert rig.anki.notes[nid]["Picture"]["value"] == '<img src="x&quot;&gt;&lt;script&gt;.jpg">'
+
+
+CAT = [{"id": 0, "start": 10.0, "end": 14.0, "text": "これは猫です。とても可愛い。"}]
+
+
+def test_yomitans_fragment_grows_to_the_whole_line_and_says_so(rig):
+    rig.session(cues=CAT)
+    nid = fresh_id()
+    rig.anki.add(nid, note_fields(Expression="猫", Sentence="これは<b>猫</b>です。"))
+    event = rig.miner.attach_new(nid)
+    assert event["ok"] and "sentence extended" in event["message"]
+    assert rig.anki.updates[-1]["fields"].keys() == {"Picture", "SentenceAudio", "Sentence"}
+    assert rig.anki.notes[nid]["Sentence"]["value"] == "これは<b>猫</b>です。とても可愛い。"
+
+
+def test_a_fragment_from_further_into_the_line_keeps_its_bold_where_it_was(rig):
+    rig.session(cues=CAT)
+    nid = fresh_id()
+    rig.anki.add(nid, note_fields(Sentence="とても<b>可愛い</b>。"))
+    assert rig.miner.attach_new(nid)["ok"]
+    assert rig.anki.notes[nid]["Sentence"]["value"] == "これは猫です。とても<b>可愛い</b>。"
+
+
+def test_a_card_with_its_media_still_gets_the_whole_line(rig):
+    rig.session(cues=CAT)
+    nid = fresh_id()
+    rig.anki.add(nid, note_fields(Sentence="これは<b>猫</b>です。", Picture='<img src="p.jpg">', SentenceAudio="[sound:a.mp3]"))
+    assert rig.miner.attach_new(nid)["ok"]
+    assert rig.anki.updates[-1]["fields"] == {"Sentence": "これは<b>猫</b>です。とても可愛い。"}
+    assert rig.clips == [] and rig.grabs == []
+
+
+def test_a_sentence_edited_while_the_media_was_made_is_not_grown(rig):
+    rig.session(cues=CAT)
+    nid = fresh_id()
+    rig.anki.add(nid, note_fields(Sentence="これは<b>猫</b>です。"))
+    reads = []
+
+    def edit_on_second_read():
+        reads.append(1)
+        if len(reads) == 2:
+            rig.anki.notes[nid]["Sentence"]["value"] = "猫がいる。"
+
+    rig.anki.on_update = edit_on_second_read
+    assert rig.miner.attach_new(nid)["ok"]
+    assert "Sentence" not in rig.anki.updates[-1]["fields"]
+    assert rig.anki.notes[nid]["Sentence"]["value"] == "猫がいる。"
+
+
+def test_a_line_that_merely_resembles_the_sentence_leaves_it_alone(rig):
+    rig.session()
+    nid = fresh_id()
+    rig.anki.add(nid, note_fields(Sentence="これはテスト字幕ですよ"))  # matched by bigrams, not contained
+    assert rig.miner.attach_new(nid)["ok"]
+    assert "Sentence" not in rig.anki.updates[-1]["fields"]
+
+
+def test_the_viewers_mine_grows_the_newest_cards_fragment_too(rig):
+    s = rig.session(cues=CAT)
+    nid = fresh_id()
+    rig.anki.add(nid, note_fields(Sentence="これは<b>猫</b>です。"))
+    event = rig.miner.mine_now(s, s.anki, {"cue_id": 0, "nonce": "n1", "session": None})
+    assert event["ok"] and rig.anki.notes[nid]["Sentence"]["value"] == "これは<b>猫</b>です。とても可愛い。"
 
 
 def test_no_picture_attaches_the_audio_alone(rig):

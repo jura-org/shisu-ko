@@ -4580,6 +4580,31 @@ def escape_html(text) -> str:
     return html.escape(str(text), quote=True).replace("&#x27;", "&#39;").replace("\r\n", "\n").replace("\n", "<br>")
 
 
+_BOLD = re.compile(r"<b\b[^>]*>(.*?)</b>", re.I | re.S)  # \b: <br> is no bold
+
+
+def grow_sentence(existing, cue_text) -> Optional[str]:
+    """Yomitan cuts its sentence out of the line on screen at 。！？, so a card can hold a fragment of
+    the cue. The cue's text instead, as HTML with Yomitan's <b> around the same word; None when
+    `existing` is no fragment of it: the whole line already, or text of the viewer's own.
+
+    A cue can hold two utterances joined by the newline seam_for() put between them, and Yomitan
+    ends its sentence there: the fragment grows inside its own row, never into the other speaker's
+    (0.21.1's extendSentenceField())."""
+    have = match_normalize(existing)
+    full = str(cue_text or "")
+    text = next((row for row in full.split("\n") if have in match_normalize(row)), full)
+    want = match_normalize(text)
+    if not have or len(have) >= len(want) or have not in want:
+        return None
+    bold = _BOLD.search(str(existing))
+    word = match_normalize(bold.group(1)) if bold else ""
+    at = text.find(word) if word else -1
+    if at < 0:
+        return escape_html(text)
+    return escape_html(text[:at]) + "<b>" + escape_html(word) + "</b>" + escape_html(text[at + len(word):])
+
+
 def note_summary(fields, settings: dict) -> dict:
     """{sentence, word} of a note: the sentence field the settings name (else "Sentence"), the word
     field they name, else the field with order 0, where every Yomitan template puts the expression."""
@@ -4898,8 +4923,6 @@ class Miner:
         for order, s in enumerate(candidates):
             with s.lock:
                 settings, cues, t = s.anki, list(s.cues), s.want_t
-            if not self.wanted(fields, settings):
-                continue
             note = note_summary(fields, settings)
             if not match_normalize(note["sentence"]):
                 continue  # a card without a sentence names no line; the word alone is in every video
@@ -4907,10 +4930,13 @@ class Miner:
             if found and (best is None or (found[1], found[2], -order) > best[:3]):
                 best = (found[1], found[2], -order, s, settings, found[0])
         if best is None:
-            log.debug("anki mine: note %d matches no line of %s, or has no empty picture or audio field; left alone",
+            log.debug("anki mine: note %d matches no line of %s; left alone",
                       note_id, ", ".join(s.video_id for s in candidates))
             return None
         _, _, _, s, settings, cue = best
+        if not any(self.targets(fields, settings)) and self.sentence_update(fields, settings, cue)[1] is None:
+            log.debug("anki mine: note %d already has its picture, audio and whole line; left alone", note_id)
+            return None
         return self.attach(s, settings, cue, note_id, fields, auto=True)
 
     # ---- the viewer's own mine: a cue into the newest note
@@ -4956,49 +4982,60 @@ class Miner:
         return (picture if picture and not field_value(fields, picture) else None,
                 audio if audio and not field_value(fields, audio) else None)
 
-    def wanted(self, fields: dict, settings: dict) -> bool:
-        return any(self.targets(fields, settings))
+    @staticmethod
+    def sentence_update(fields: dict, settings: dict, cue: dict) -> tuple:
+        """(sentence key, its new HTML or None). An empty field gets the cue only when the settings
+        name it; a filled one grows from Yomitan's fragment to the cue (grow_sentence()), the one
+        write into a filled field."""
+        key = field_key(fields, settings["sentence"] or "Sentence")
+        have, text = field_value(fields, key), str(cue.get("text") or "")
+        if not key or not text:
+            return key, None
+        if not have:
+            return key, escape_html(text) if settings["sentence"] else None
+        return key, grow_sentence(have, text)
 
     def attach(self, s: Session, settings: dict, cue: dict, note_id: int, fields: dict, auto: bool,
                nonce: Optional[str] = None) -> dict:
         what = "new" if auto else "newest"
         picture_key, audio_key = self.targets(fields, settings)
-        if not picture_key and not audio_key:
-            named = [settings["picture"]] if self.frames is not None else []
-            named.append(settings["audio"])
-            if not any(field_key(fields, name) for name in named):
-                return self.outcome(s, nonce, "no_fields", missing_fields_error(what, named, fields), note_id)
+        named = ([settings["picture"]] if self.frames is not None else []) + [settings["audio"]]
+        if not any(field_key(fields, name) for name in named):
+            return self.outcome(s, nonce, "no_fields", missing_fields_error(what, named, fields), note_id)
+        sentence_key, sentence = self.sentence_update(fields, settings, cue)
+        if not picture_key and not audio_key and sentence is None:
             return self.outcome(s, nonce, "filled", f"The {what} card already has its picture and audio; nothing changed", note_id)
         base = f"shisuko_{s.video_id}_{int(round(float(cue['start']) * 1000))}"
-        update, lost = {}, []
+        update, notes = {}, []
         if audio_key:
             clip = self.clip(s, cue, settings)
             if clip is None:
-                lost.append("no audio")
+                notes.append("no audio")
             else:
                 data, _, ext = clip
                 update[audio_key] = f"[sound:{escape_html(self.store(f'{base}.{ext}', data))}]"
         if picture_key:
             picture = self.picture(s, cue)
             if picture is None:
-                lost.append("no picture")
+                notes.append("no picture")
             else:
                 update[picture_key] = f'<img src="{escape_html(self.store(f"{base}.jpg", picture))}">'
-        # The viewer's mine fills a sentence field the settings name, when the card left it empty.
-        sentence_key = field_key(fields, settings["sentence"]) if settings["sentence"] else None
-        if not auto and sentence_key and not field_value(fields, sentence_key):
-            update[sentence_key] = escape_html(cue.get("text") or "")
-        # Read again just before writing: Yomitan, the viewer or another tool may have filled a
-        # field while the clip and the frame were made, and a filled field is never overwritten.
+        if sentence is not None:
+            update[sentence_key] = sentence
+        # Read again just before writing: Yomitan, the viewer or another tool may have changed a
+        # field while the clip and the frame were made. Only a field still holding what it held
+        # when read is written, so an edit made meanwhile is never overwritten.
         latest = self.note_info(note_id)
         if latest is None:
             return self.outcome(s, nonce, "no_note", f"The {what} card is no longer in Anki; nothing attached", note_id)
-        update = {key: value for key, value in update.items() if not field_value(latest["fields"], key)}
+        update = {key: value for key, value in update.items() if field_value(latest["fields"], key) == field_value(fields, key)}
         if not update:
             return self.outcome(s, nonce, "error", f"Nothing to attach to the {what} card"
-                                + (f" ({'; '.join(lost)})" if lost else ""), note_id)
+                                + (f" ({'; '.join(notes)})" if notes else ""), note_id)
         self.call("updateNoteFields", {"note": {"id": note_id, "fields": update}}, ANKI_REQUEST_TIMEOUT)
-        message = f"Added {' + '.join(update)} to the {what} Anki card" + (f" ({'; '.join(lost)})" if lost else "")
+        if sentence_key in update and field_value(fields, sentence_key):
+            notes.insert(0, "sentence extended to the whole line")
+        message = f"Added {' + '.join(update)} to the {what} Anki card" + (f" ({'; '.join(notes)})" if notes else "")
         log.info("[%s] anki mine: %s (note %d, line at %.2f s)", s.video_id, message, note_id, float(cue["start"]))
         return self.outcome(s, nonce, "attached", message, note_id)
 
