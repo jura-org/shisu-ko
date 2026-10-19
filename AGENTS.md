@@ -177,7 +177,7 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   container without `--anki-url`, `resolve_word_colours()`); its note reading (`wc_plain_word()`,
   `wc_pitch_of()`, `wc_kana_reading_of()`, `wc_status_of()`, ...) is a line-for-line port of
   words.js's, with JavaScript's string rules, and the golden test (`deck-golden.test.js` with
-  `test_deck_golden.py`) plus `test_deck_index.py`'s run over random fields hold the two equal: a
+  `test_deck_golden.py`) plus `test_deck_index.py`'s run over random and boundary fields hold the two equal: a
   change to one is a change to both. The matcher (`buildIndex()`, `markWords()`, the particle
   ruling) stays in words.js alone; the server never marks a line. `background.test.js` greps
   `addon/` for AnkiConnect's port and actions. Detail: `docs/dev/word-colours.md`.

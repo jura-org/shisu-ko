@@ -4,12 +4,14 @@ said, and hands clients the rows they turn into words.js buildIndex() entries.
 Every test drives DeckIndexes with a fake clock and a fake AnkiConnect (`FakeAnki`) that answers
 the searches the index runs by the deck, the status clause and `edited:`; nothing reaches a real
 Anki. The note reading itself (wc_plain_word(), wc_pitch_of(), ...) is words.js's: the last test
-holds the two equal over random fields when Node is on PATH, and test_deck_golden.py over the
+holds the two equal over random fields and every length limit (Node runs words.js; CI must have
+it), and test_deck_golden.py over the
 fixture both sides read.
 """
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import shutil
@@ -408,7 +410,7 @@ def test_word_colours_are_off_in_the_container_without_an_anki_url():
 # ---- the note reading is words.js's
 
 PIECES = ["食", "べ", "る", "た", "さら", "更", "に", "ꜜ", "ー", "・", "ｰ", "ゃ", "ア", "ッ", "😀", "𠀋", " ", "　", "﻿",
-          " ", "\x1c", "\n", "\t", "<br>", "<BR/>", "</div>", "<p>", "</p>", "<li>", "</li>", "<ol>", "<ruby>", "</ruby>",
+          " ", "\x1c", "\n", "\t", "<br>", "<BR/>", "</div>", "<p>", "</p>", "<li>", "</li>", "<ol>", "<ruby>", "</ruby>",
           "<rt>", "</rt>", "<rp>(", ")</rp>", "<b>", "</b>", "<", ">", "[", "]", " 食[た]べる", "お 茶[ちゃ]", "&nbsp;", "&AMP;",
           "&lt;", "&#39;", "&quot;", "heiban", "HEIBAN", "平板", "odaka", "Nakadaka", "頭高", "[0]", "[1]", "[2]", "[3]", "12", "0",
           " 3 ", "(uk)", "(adv, uk, JMdict (English))", "(UK)", "(uk-based", "usually written using kana alone",
@@ -417,17 +419,40 @@ PIECES = ["食", "べ", "る", "た", "さら", "更", "に", "ꜜ", "ー", "・
           '<span style="border-color:currentColor;border-right-width:2px;">', "</span>", '<svg viewBox="0 0 100 100">',
           "</svg>", '<circle r="15" cx="10" cy="25" style="fill:none">', '<circle r="15" cx="10" cy="75">',
           '<circle r = "5">', '<circle r="10" fill="none">', "<circle r=12 fill=none>", '<path d="M0">', "ſ", "K", "İ", "ı",
-          "x" * 50, "あ" * 30, "(" + "a" * 199 + ")", "(" + "😀" * 100 + ",uk)", "(" + "😀" * 99 + ",uk)"]
+          "x" * 50, "あ" * 30, "(" + "a" * 199 + ")", "(" + "😀" * 100 + ",uk)", "(" + "😀" * 99 + ",uk)",
+          # Ruby, furigana and entity forms Yomitan and hand-made cards hold.
+          "<ruby>食<rt>た</rt></ruby>べる", "<ruby>猫<rp>(</rp><rt>ねこ</rt><rp>)</rp></ruby>",
+          "<ruby>漢字<rt>かん</rt><rt>じ</rt></ruby>", "<RUBY>犬<RT>いぬ</RT></RUBY>", "<ruby>未<rt>み", "食べ[た]る",
+          "日本[にほん]語[ご]", "[]", "a[b", "&gt;", "&amp;nbsp;", "&#x27;", "&Nbsp;", "&amp;", "&nbsp",
+          # Long runs that cross the 320, 1000 and 16,000-unit limits when two or three meet.
+          "あ" * 150, "😀" * 80, "x" * 490, "y" * 5300, "😀" * 2700]
 NAMES = ["Word", "word", "Expression", "Reading", "reading", "Furigana", "SentenceFurigana", "読み", "例文読み", "Pitch",
          "PitchAccentPosition", "PitchAccentGraph", "アクセント", "Glossary", "Sentence", "0", "12", "Accent"]
+# words.js's limits on a word field's line, a reading field and a field's HTML, in UTF-16 units.
+LIMITS = (320, 1000, 16000)
 NODE_EVAL = """
 const W = require(process.argv[1]);
+// background.js's noteSummary() word until 0.22.0, which wc_note_word() ports with plainWord().
+function noteWord(fields, settings) {
+  const wordName = String(settings.ankiWordField || "").trim();
+  let raw = "";
+  if (wordName) {
+    const key = W.fieldKey(fields, wordName);
+    raw = key ? String((fields[key] && fields[key].value) || "").trim() : "";
+  } else {
+    for (const value of Object.values(fields)) {
+      if (value && Number(value.order) === 0) { raw = String(value.value || "").trim(); break; }
+    }
+  }
+  const word = W.plainWord(raw);
+  return word.length > W.MAX_WORD_LEN ? "" : word;
+}
 let input = "";
 process.stdin.on("data", (d) => (input += d));
 process.stdin.on("end", () => {
   const out = JSON.parse(input).map((c) => {
     const settings = { ankiWordField: c.word, ankiPitchField: c.pitch };
-    return [W.pitchOf(c.fields, settings), W.kanaReadingOf(c.fields, settings),
+    return [W.pitchOf(c.fields, settings), W.kanaReadingOf(c.fields, settings), noteWord(c.fields, settings),
             c.values.map((v) => W.plainWord(v)), c.values.map((v) => W.readingOf(v)), W.usuallyKana(c.fields)];
   });
   process.stdout.write(JSON.stringify(out));
@@ -435,28 +460,53 @@ process.stdin.on("end", () => {
 """
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="needs Node to run words.js")
-def test_the_note_reading_matches_words_js_over_random_fields():
-    rnd = random.Random(20261019)
+def random_cases(rnd, n):
     cases = []
-    for _ in range(4000):
+    for _ in range(n):
         names = rnd.sample(NAMES, rnd.randint(0, 6))
         orders = rnd.sample(range(len(names)), len(names))
         fields = {name: {"value": "".join(rnd.choice(PIECES) for _ in range(rnd.randint(0, 12))), "order": order}
                   for name, order in zip(names, orders)}
-        cases.append({"fields": fields, "values": [f["value"] for f in fields.values()],
-                      "word": rnd.choice(["", "", "word", "Reading", " Expression ", "none"]),
+        cases.append({"fields": fields, "word": rnd.choice(["", "", "word", "Reading", " Expression ", "none"]),
                       "pitch": rnd.choice(["", "", "pitch", "PitchAccentGraph", "Glossary"])})
+    return cases
+
+
+def boundary_cases():
+    """Every limit, two units either side, with a pair or markup straddling the cut: the word, the
+    reading and the pitch fields each carry the value."""
+    cases = []
+    tails = ["る", "😀る", "<b>る</b>", "[たべ]る", "[2]"]
+    for limit in LIMITS:
+        for delta in range(-2, 2):
+            for fill, units in (("あ", 1), ("😀", 2)):
+                for tail in tails:
+                    head = "a" * ((limit + delta) % units) + fill * ((limit + delta) // units)
+                    for value in (head + tail, "<br>" + head + tail, "<ruby>" + head + "<rt>" + tail):
+                        fields = {"Word": {"value": value, "order": 0}, "Reading": {"value": value, "order": 1},
+                                  "Pitch": {"value": value, "order": 2}, "Glossary": {"value": value, "order": 3}}
+                        cases.append({"fields": fields, "word": "", "pitch": ""})
+    return cases
+
+
+def py_reading(case):
+    fields = case["fields"]
+    return [server.wc_pitch_of(fields, case["word"], case["pitch"]),
+            server.wc_kana_reading_of(fields, case["word"], case["pitch"]), server.wc_note_word(fields, case["word"]),
+            [server.wc_plain_word(f["value"]) for f in fields.values()],
+            [server.wc_reading_of(f["value"]) for f in fields.values()], server.wc_usually_kana(fields)]
+
+
+# CI always has Node and must run this; elsewhere a missing Node skips it.
+@pytest.mark.skipif(shutil.which("node") is None and not os.environ.get("CI"), reason="needs Node to run words.js")
+def test_the_note_reading_matches_words_js_over_random_and_boundary_fields():
+    cases = random_cases(random.Random(20261019), 4000) + boundary_cases()
+    for case in cases:
+        case["values"] = [f["value"] for f in case["fields"].values()]
     done = subprocess.run(["node", "-e", NODE_EVAL, str(WORDS_JS)], input=json.dumps(cases), capture_output=True,
                           text=True, encoding="utf-8", check=True)
     # u16slice() leaves out a pair the cut would split, where JavaScript keeps its first half.
     lone = re.compile(r"\\ud[89a-f][0-9a-f]{2}")
-    mismatches = 0
-    for case, js in zip(cases, json.loads(done.stdout)):
-        py = [server.wc_pitch_of(case["fields"], case["word"], case["pitch"]),
-              server.wc_kana_reading_of(case["fields"], case["word"], case["pitch"]),
-              [server.wc_plain_word(v) for v in case["values"]], [server.wc_reading_of(v) for v in case["values"]],
-              server.wc_usually_kana(case["fields"])]
-        if lone.sub("", json.dumps(py)) != lone.sub("", json.dumps(js)):
-            mismatches += 1
-    assert mismatches == 0
+    mismatches = [case for case, js in zip(cases, json.loads(done.stdout))
+                  if lone.sub("", json.dumps(py_reading(case))) != lone.sub("", json.dumps(js))]
+    assert not mismatches, json.dumps(mismatches[0], ensure_ascii=False)[:2000]

@@ -387,8 +387,10 @@ in one file.
   indices first), `Number()` and `String()` are `js_number()` and `js_str()`, and the script
   tests go by Node 24's ranges (`_HAN`, `_HIRAGANA`, `_KATAKANA`). `TAG_LIST`'s 200 is counted in
   code units after the match, which finds a match at the same `(` as JavaScript's
-  `{0,200}(?=[()])`. `test_deck_index.py` runs both sides over 4,000 random field sets when Node
-  is on PATH and finds no difference (30,000 more were run by hand while porting).
+  `{0,200}(?=[()])`. `test_deck_index.py` runs both sides over 4,000 random field sets and over
+  values two units either side of each limit (320, 1,000 and 16,000 code units, with a surrogate
+  pair, markup or furigana at the cut), and finds no difference. Node runs words.js; without it
+  the test skips, except under CI, where it fails.
 - `DeckIndex(deck, word, pitch)`: one deck read with one word field and one pitch field.
   `refresh()` (the deck thread only) runs the algorithm of the extension's former `fetchDeckIndex()`: `scope()` (`deck_search()`
   escapes `\`, `"`, `*`, `_`; `current` and `filtered` go by `did:` from `deckNamesAndIds`, None
