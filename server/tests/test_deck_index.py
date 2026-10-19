@@ -117,8 +117,18 @@ def settle(decks, req):
     return first, decks.ask(dict(req, since=first["token"]))
 
 
+def rows_entries(rows) -> list:
+    """The buildIndex() entries a client makes of the rows (deckEntries() in background.js), by id."""
+    entries = []
+    for _, word, reading, status, pitch in sorted(rows, key=lambda row: row[0]):
+        entries.append([word, status, pitch])
+        if reading:
+            entries.append([reading, status, pitch])
+    return entries
+
+
 def entries_of(answer):
-    return server.deck_rows_entries(answer["notes"])
+    return rows_entries(answer["notes"])
 
 
 # ---- reading a deck

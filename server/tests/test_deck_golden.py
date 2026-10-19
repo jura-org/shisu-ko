@@ -5,7 +5,7 @@ extension's old deck path read them into, and the rows the server reads them int
 (addon/tests/deck-golden.test.js checks the old path and turns the rows into entries with the
 background's deckEntries()). Here the server's DeckIndex reads the same notes from a fake
 AnkiConnect, /sync carries its rows, and they must be the fixture's rows, whose entries
-(deck_rows_entries()) are the old path's exactly: the same buildIndex() input, the same marks.
+(rows_entries()) are the old path's exactly: the same buildIndex() input, the same marks.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from _serverlib import load_server
-from test_deck_index import Clock, FakeAnki
+from test_deck_index import Clock, FakeAnki, rows_entries
 from test_update_endpoint import Served, make_app
 
 server = load_server()
@@ -57,9 +57,9 @@ def test_the_server_gives_the_old_extension_path_s_entries(rig, case):
     answer = sync(rig.app, deck_body(case["settings"], since=first["token"]))["deck"]
     assert answer["status"] == "ok" and answer["full"] is True
     assert answer["notes"] == case["rows"]  # what deck-golden.test.js turns into entries with deckEntries()
-    assert server.deck_rows_entries(answer["notes"]) == case["entries"]
+    assert rows_entries(answer["notes"]) == case["entries"]
     # As the client receives it: through JSON.
-    assert server.deck_rows_entries(json.loads(json.dumps(answer, ensure_ascii=False))["notes"]) == case["entries"]
+    assert rows_entries(json.loads(json.dumps(answer, ensure_ascii=False))["notes"]) == case["entries"]
 
 
 def test_a_sync_without_deck_is_what_it_was(rig, monkeypatch):

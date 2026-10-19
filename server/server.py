@@ -5603,16 +5603,6 @@ def deck_note(info: dict, word_field: str, pitch_field: str) -> tuple:
             wc_pitch_of(fields, word_field, pitch_field))
 
 
-def deck_rows_entries(rows) -> list:
-    """The buildIndex() entries a client makes of the rows (deckEntries() in background.js), by id."""
-    entries = []
-    for _, word, reading, status, pitch in sorted(rows, key=lambda row: row[0]):
-        entries.append([word, status, pitch])
-        if reading:
-            entries.append([reading, status, pitch])
-    return entries
-
-
 class DeckIndex:
     """One deck read with one word field and one pitch field; see the section comment above.
     refresh() runs on the deck thread alone; answer() is called by /sync's threads."""
