@@ -321,6 +321,25 @@ def test_a_mined_note_names_the_automatic_deck_and_it_survives_a_restart(tmp_pat
     assert again.seen == "Japanese::Sub"
 
 
+def test_a_wake_during_a_read_is_not_lost(tmp_path):
+    """A deck switch or a new note while the deck thread reads Anki must not wait out DECK_TTL."""
+    _, anki, decks = make({1: note("猫", "new"), 2: note("犬", "new", deck="Other")}, tmp_path)
+    decks.ask(request())
+    real = anki.__call__
+
+    def during(action, params, timeout):
+        if action == "notesInfo" and not decks.indexes.get(("Other", "", "")):
+            decks.ask(request("Other"))  # the client switched decks while this read ran
+        return real(action, params, timeout)
+
+    decks.call = during
+    decks.step()
+    # run_forever() waits only while `wake` is unset: the next turn reads the new deck at once.
+    assert decks.wake is True
+    decks.step()
+    assert decks.ask(request("Other", since=None))["status"] == "ok"
+
+
 def test_the_miner_reports_an_attached_note(tmp_path):
     reported = []
     app = type("App", (), {"decks": type("D", (), {"note_mined": lambda self, n: reported.append(n)})()})()

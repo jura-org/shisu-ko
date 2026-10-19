@@ -5813,6 +5813,9 @@ class DeckIndexes:
         self.indexes: dict = {}
         self.mined: "queue.Queue" = queue.Queue()  # note ids whose deck becomes the automatic one
         self.seen = self.load_seen()
+        # Set with cond held by whatever wants the deck thread now. A notify alone is lost while
+        # the thread reads Anki, and the next wait would then sit out DECK_TTL.
+        self.wake = False
 
     def load_seen(self) -> Optional[str]:
         try:
@@ -5853,7 +5856,7 @@ class DeckIndexes:
                 index = self.indexes[key] = DeckIndex(deck, request["word"], request["pitch"], self.clock)
             answer = index.answer(request["since"])
             if index.due(self.clock()):
-                self.cond.notify()
+                self.poke()
         if answer is not None:
             answer["automatic"] = automatic
         return answer
@@ -5864,13 +5867,18 @@ class DeckIndexes:
         with self.cond:
             for index in self.indexes.values():
                 index.expire()
-            self.cond.notify()
+            self.poke()
 
     def note_mined(self, note_id: int) -> None:
         """The Miner attached to this note: its deck becomes the automatic one."""
         self.mined.put(note_id)
         with self.cond:
-            self.cond.notify()
+            self.poke()
+
+    def poke(self) -> None:
+        """Wake the deck thread (cond held)."""
+        self.wake = True
+        self.cond.notify()
 
     def deck_names(self) -> dict:
         """/health?decks=1's `anki_decks`: Anki's deck names for the popup, and the automatic deck."""
@@ -5929,7 +5937,8 @@ class DeckIndexes:
             except Exception:  # noqa: BLE001 - the deck thread never takes the server down
                 log.exception("anki deck: unexpected error")
             with self.cond:
-                self.cond.wait(DECK_TTL)
+                self.cond.wait_for(lambda: self.wake, DECK_TTL)
+                self.wake = False
 
 
 # --------------------------------------------------------------------------- application
