@@ -805,8 +805,27 @@ if (browser.notifications && browser.notifications.onClicked && typeof browser.n
 // (cardStatus), a tab standing by for another included.
 const SERVER_TOO_OLD_TEXT = "The word colours need Shisu-ko server 0.23.0 or newer";
 
-// The deck of the last mined card, which 0.22.0 and earlier kept here: the server keeps it now.
-browser.storage.local.remove("ankiDeckSeen").catch(() => {});
+// The deck of the last mined card, which 0.22.0 and earlier kept here; the server keeps it now.
+// It goes to the server as `seen` in each deck request until a server that reads Anki has
+// answered one (the server takes it only while it knows no deck of its own), and is then removed.
+const LEGACY_DECK_KEY = "ankiDeckSeen";
+let legacyDeck = null; // the read of that record, once: a promise of its deck name or null
+
+function legacyDeckName() {
+  legacyDeck = legacyDeck || browser.storage.local
+    .get(LEGACY_DECK_KEY)
+    .then((stored) => {
+      const deck = stored && stored[LEGACY_DECK_KEY] && stored[LEGACY_DECK_KEY].deck;
+      return typeof deck === "string" && deck.trim() ? deck.trim() : null;
+    })
+    .catch(() => null);
+  return legacyDeck;
+}
+
+function handedOver() {
+  legacyDeck = Promise.resolve(null);
+  browser.storage.local.remove(LEGACY_DECK_KEY).catch(() => {});
+}
 
 // key: the deck and fields the rows are about; rows: note id -> [id, word, reading, status, pitch];
 // at: stamps `entries`, moved only when they change, so a tab holding them hears "unchanged".
@@ -875,9 +894,14 @@ function takeDeck(answer) {
 async function syncRequest(body) {
   const settings = await getSettings();
   const deck = wordColoursOn(settings) ? deckRequest(settings) : null;
+  const seen = deck ? await legacyDeckName() : null;
+  if (seen) deck.seen = seen;
   const asked = deckState;
   const res = await apiRequest("/sync", deck && body && typeof body === "object" ? { ...body, deck } : body);
   const data = res && res.ok && res.data && typeof res.data === "object" ? res.data : null;
+  // "invalid" refused the request before reading `seen`, and "off" reads no Anki to keep it for.
+  const answer = data && data.deck;
+  if (seen && answer && typeof answer === "object" && !["invalid", "off"].includes(answer.token)) handedOver();
   if (deck && data && deckState === asked) {
     // A server that knows `deck` always answers one held nothing for: none at all is a server
     // from before the word colours moved there.
@@ -910,7 +934,8 @@ async function ankiDecks() {
   const info = res.ok && res.data && typeof res.data.anki_decks === "object" ? res.data.anki_decks : null;
   if (!res.ok) return { ok: false, reason: "offline", error: "The Shisu-ko server is not running: it reads the decks" };
   if (!info) return { ok: false, reason: "error", error: SERVER_TOO_OLD_TEXT };
-  const seen = typeof info.seen === "string" ? info.seen : null;
+  // Until the first deck request hands it over, the server may not know the deck 0.22.0 remembered.
+  const seen = typeof info.seen === "string" ? info.seen : await legacyDeckName();
   if (!info.ok) return { ok: false, reason: info.offline ? "offline" : "error", error: String(info.error || "unknown error"), seen };
   const decks = (Array.isArray(info.decks) ? info.decks : []).map(String).sort((a, b) => a.localeCompare(b));
   return { ok: true, decks, seen };

@@ -1122,10 +1122,28 @@ test("nothing in the extension talks to AnkiConnect", () => {
   }
 });
 
-test("the deck 0.22.0 remembered for the automatic choice is removed: the server keeps it now", async () => {
-  const storage = makeMemoryStorage({ ankiDeckSeen: { deck: "Japanese", at: 1, noteId: 2 }, settings: { cardStatus: true } });
-  loadBackground({ storage });
+test("the deck 0.22.0 remembered goes to the server once, and is removed once a server took it", async () => {
+  const legacy = { ankiDeckSeen: { deck: "Japanese", at: 1, noteId: 2 } };
+  // A server too old for `deck`, or one without Anki: the record stays for a server that can keep it.
+  for (const answers of [[], [{ token: "off", status: "off", error: "This server reads no Anki" }]]) {
+    const storage = makeMemoryStorage({ ...legacy, settings: { enabled: true, cardStatus: true } });
+    const server = deckServer(answers);
+    const bg = loadBackground({ storage, fetch: server.fetch });
+    await bg.dispatch(SYNC, 1);
+    assert.equal(server.bodies[0].deck.seen, "Japanese");
+    assert.equal("ankiDeckSeen" in storage._dump(), true);
+  }
+  const storage = makeMemoryStorage({ ...legacy, settings: { enabled: true, cardStatus: true } });
+  const server = deckServer([{ token: "e1.0", status: "loading", deck: "Japanese", automatic: true }],
+    { anki_decks: { ok: true, decks: ["Japanese"], seen: null } });
+  const bg = loadBackground({ storage, fetch: server.fetch });
+  // The popup names it before any /sync handed it over.
+  assert.equal(plain(await bg.dispatch({ type: "ankiDecks" })).seen, "Japanese");
+  await bg.dispatch(SYNC, 1);
+  assert.deepEqual(server.bodies[0].deck, { name: "", word: "", pitch: "", since: null, seen: "Japanese" });
   await settle();
   assert.equal("ankiDeckSeen" in storage._dump(), false);
   assert.equal(storage._dump().settings.cardStatus, true);
+  await bg.dispatch(SYNC, 1);
+  assert.equal("seen" in server.bodies[1].deck, false, "handed over once");
 });

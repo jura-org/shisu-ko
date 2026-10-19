@@ -5571,11 +5571,15 @@ def deck_search(name: str) -> str:
 
 
 def deck_request(value) -> dict:
-    """The validated `deck` of a /sync body: {name, word, pitch, since}; ValueError when malformed.
-    An empty name is the automatic deck; empty field names are words.js's defaults."""
+    """The validated `deck` of a /sync body: {name, word, pitch, since, seen}; ValueError when
+    malformed. An empty name is the automatic deck; empty field names are words.js's defaults.
+    `seen` is the automatic deck an extension of 0.22.0 or older remembered, handed over once
+    (DeckIndexes.ask()); a malformed one is dropped, never refused, as the client cannot fix it."""
     if not isinstance(value, dict):
         raise ValueError("deck must be an object")
-    out = {"name": "", "word": "", "pitch": "", "since": None}
+    seen = value.get("seen")
+    out = {"name": "", "word": "", "pitch": "", "since": None,
+           "seen": seen if isinstance(seen, str) and DECK_NAME_RE.fullmatch(seen) else None}
     name = value.get("name", "")
     if not isinstance(name, str) or (name.strip() and not DECK_NAME_RE.fullmatch(name.strip())):
         raise ValueError("deck.name is not a deck name")
@@ -5828,7 +5832,7 @@ class DeckIndexes:
         deck = data.get("deck") if isinstance(data, dict) else None
         return deck if isinstance(deck, str) and DECK_NAME_RE.fullmatch(deck) else None
 
-    def save_seen(self, deck: str, note_id: int) -> None:
+    def save_seen(self, deck: str, note_id: Optional[int] = None) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_name(self.path.name + ".tmp")
@@ -5844,7 +5848,13 @@ class DeckIndexes:
         """/sync's `deck` answer for a validated request (deck_request()), None when the client is
         up to date. The first ask for an index answers `loading` and starts its read."""
         automatic = not request["name"]
+        adopted = None
         with self.cond:
+            if self.seen is None and request["seen"]:
+                # The deck the extension remembered before 0.23.0, taken only where nothing mined
+                # through this server named one (learn_deck() outranks it from then on).
+                self.seen = adopted = request["seen"]
+                self.save_seen(adopted)
             deck = request["name"] or self.seen
             if not deck:
                 token = "nodeck"
@@ -5857,6 +5867,8 @@ class DeckIndexes:
             answer = index.answer(request["since"])
             if index.due(self.clock()):
                 self.poke()
+        if adopted:
+            log.info("anki deck: the word colours' automatic deck is %r, as the extension remembered it", adopted)
         if answer is not None:
             answer["automatic"] = automatic
         return answer
@@ -5906,12 +5918,14 @@ class DeckIndexes:
         most = max(counted, key=lambda pair: pair[0], default=(0, None))
         if not most[0] or not isinstance(most[1], str) or not DECK_NAME_RE.fullmatch(most[1]):
             return
+        # Saved with cond held, so a deck handed over by an extension (ask()) and this one land in
+        # the file in the order they were taken.
         with self.cond:
             moved = most[1] != self.seen
             self.seen = most[1]
+            self.save_seen(most[1], note_id)
         if moved:
             log.info("anki deck: the word colours' automatic deck is now %r", most[1])
-        self.save_seen(most[1], note_id)
         self.notes_added([note_id])
 
     def step(self) -> None:

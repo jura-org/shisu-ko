@@ -145,8 +145,9 @@ PERMISSIONS
 
 - storage: the settings (browser.storage.local, the known-words list among them) and the result
   of the update check (below); browser.storage.session holds a few records for the browser
-  session (the launch and update records below). The "ankiDeckSeen" record 0.22.0 kept is
-  removed at load: the server keeps the automatic deck now.
+  session (the launch and update records below). The "ankiDeckSeen" record 0.22.0 kept (the
+  automatic deck's name) goes to the server once, in the first /sync that asks for the deck, and
+  is then removed: the server keeps the automatic deck now.
 - tabs: the popup calls browser.tabs.query({url: <youtube origins>}) to reload the open YouTube
   tabs after the host permission is granted (a query filtered by URL needs this permission); the
   background script routes the keyboard commands with tabs.query({active: true}) and

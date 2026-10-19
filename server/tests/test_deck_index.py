@@ -321,6 +321,30 @@ def test_a_mined_note_names_the_automatic_deck_and_it_survives_a_restart(tmp_pat
     assert again.seen == "Japanese::Sub"
 
 
+def test_the_deck_an_old_extension_remembered_is_adopted_once_and_kept(tmp_path):
+    clock, anki, decks = make({7: note("猫", "new", deck="Japanese::Sub"), 8: note("犬", "new")}, tmp_path)
+    first, full = settle(decks, server.deck_request({"seen": "Japanese::Sub"}))
+    assert first["status"] == "loading" and first["deck"] == "Japanese::Sub" and first["automatic"] is True
+    assert [row[0] for row in full["notes"]] == [7]
+    assert json.loads((tmp_path / "anki-deck.json").read_text())["deck"] == "Japanese::Sub"
+    assert server.DeckIndexes(anki, path=tmp_path / "anki-deck.json", clock=clock).seen == "Japanese::Sub"
+    # A server that knows its own automatic deck keeps it.
+    decks.ask(server.deck_request({"seen": "Japanese"}))
+    assert decks.seen == "Japanese::Sub"
+    # A card mined later outranks the hint.
+    decks.note_mined(8)
+    decks.step()
+    assert decks.seen == "Japanese"
+    assert json.loads((tmp_path / "anki-deck.json").read_text())["deck"] == "Japanese"
+
+
+def test_a_named_deck_still_takes_the_hint_for_later(tmp_path):
+    _, _, decks = make({1: note("猫", "new")}, tmp_path)
+    answer = decks.ask(server.deck_request({"name": "Japanese", "seen": "Other"}))
+    assert answer["deck"] == "Japanese" and answer["automatic"] is False
+    assert decks.seen == "Other"
+
+
 def test_a_wake_during_a_read_is_not_lost(tmp_path):
     """A deck switch or a new note while the deck thread reads Anki must not wait out DECK_TTL."""
     _, anki, decks = make({1: note("猫", "new"), 2: note("犬", "new", deck="Other")}, tmp_path)
@@ -361,7 +385,11 @@ def test_deck_names_for_the_popup(tmp_path):
 # ---- what a client may send
 
 def test_deck_request_validation():
-    assert server.deck_request({}) == {"name": "", "word": "", "pitch": "", "since": None}
+    assert server.deck_request({}) == {"name": "", "word": "", "pitch": "", "since": None, "seen": None}
+    # A malformed hint is dropped, not refused: the colours must not fail on what 0.22.0 stored.
+    for junk in (3, "", "a\nb", "x" * 201):
+        assert server.deck_request({"seen": junk})["seen"] is None
+    assert server.deck_request({"seen": "単語帳::Sub"})["seen"] == "単語帳::Sub"
     assert server.deck_request({"name": " 単語帳::Sub ", "word": "Word ", "since": "ab12.3"})["name"] == "単語帳::Sub"
     for bad in ([], {"name": 3}, {"name": "a\nb"}, {"name": "x" * 201}, {"word": "a:b"}, {"pitch": "<b>"},
                 {"since": 5}, {"since": "a b"}, {"since": "x" * 65}):

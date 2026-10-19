@@ -412,16 +412,19 @@ in one file.
   `anki-deck` thread (`run_forever()`, `step()`). The deck is the request's `name`, else `seen`,
   the deck of the last card the Miner attached media to (`note_mined()` from `Miner.outcome()`,
   `learn_deck()`: `findCards nid:<id>` -> `getDecks`, the deck with most cards), kept in
-  `~/.shisu-ko/anki-deck.json` (`{deck, at, note}`, `DECK_SEEN_PATH`) across restarts, as the
-  extension kept it in `storage.local`; neither means `{token: "nodeck", status: "no_deck"}`:
+  `~/.shisu-ko/anki-deck.json` (`{deck, at, note}`, `DECK_SEEN_PATH`) across restarts. A server
+  without one takes the request's `seen`: the deck an extension of 0.22.0 or older kept in
+  `storage.local` (`ankiDeckSeen`), which the background sends with each deck request until a
+  server that reads Anki answered one, and then removes (`legacyDeckName()`, `handedOver()`).
+  Neither means `{token: "nodeck", status: "no_deck"}`:
   a collection is never searched by guesswork. `notes_added()`, from `AnkiWatcher`'s look, expires
   every index, so a card just made shows within seconds. `deck_names()` is `/health?decks=1`.
 - `resolve_word_colours()`: on, except inside the Docker image without `--anki-url`;
   `start_anki_watcher()` then starts the deck thread, and the watcher runs for it even with the
   sync and the mining off.
-- Transport. A `/sync` body's `deck: {name, word, pitch, since}` (`deck_request()`: a deck name
-  of 1-200 characters without control characters, field names as `anki`'s, a token of
-  `[A-Za-z0-9._-]{1,64}` or null) gets `deck` in the answer only when the token moved; a body
+- Transport. A `/sync` body's `deck: {name, word, pitch, since, seen}` (`deck_request()`: a deck
+  name of 1-200 characters without control characters, field names as `anki`'s, a token of
+  `[A-Za-z0-9._-]{1,64}` or null; a malformed `seen` is dropped, never refused) gets `deck` in the answer only when the token moved; a body
   without `deck` is answered exactly as before. A malformed one is answered
   `{token: "invalid", status: "error", error}`, never a refused `/sync`; a server without Anki
   `{token: "off", status: "off"}`. `GET /health?decks=1` adds `anki_decks: {ok, decks, seen,

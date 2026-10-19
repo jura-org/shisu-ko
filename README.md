@@ -391,9 +391,8 @@ text colour, unless it is a word on your list of known words, or a particle, kat
 you chose to colour (below). The cards come from one deck. Left on *Automatic*, that is the deck the
 last card the server put media into went to: nothing is looked up until a card is mined, and the
 first mine then names the deck (the hint under the **Deck** select says which, or "no card mined
-yet"). The server remembers it across restarts in `~/.shisu-ko/anki-deck.json`. It does not
-inherit the deck the extension remembered before 0.23.0: after the update, *Automatic* waits for
-the next card mined, or choose the deck in the select. Choose a
+yet"). The server remembers it across restarts in `~/.shisu-ko/anki-deck.json`. After the
+update from 0.22.0 or older, the extension hands the server the deck it remembered, once. Choose a
 deck in the select to look at that one instead; its subdecks count. Words are taken from the note's
 word field (the popup's **Word field**, else the note's first field), and a verb or adjective is
 found in its usual conjugations and in its noun form: a card for 食べる colours 食べました,
