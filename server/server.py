@@ -17,7 +17,8 @@ player, so cues line up whatever latency the viewer is watching at.
 
 Endpoints
   GET  /health   -> {ok, version, model, default_model, model_loading, model_error, models, device, compute_type,
-                     engine, language, launcher, anki_sync: {state, last, error}}; ?decks=1 adds
+                     engine, language, launcher, latest, anki_sync: {state, last, error}}; latest is the
+                     update check's {version, url, xpi, published, checked, error} or null; ?decks=1 adds
                      anki_decks: {ok, decks, seen, error}, Anki's deck names for the popup
   POST /sync     -> {ok, session, status, error, duration, title, live, covered, speech, cues, next, busy,
                      model, model_loading, model_error, heard, language_paused}; a body carrying the
@@ -31,6 +32,10 @@ Endpoints
                      run update.py and start it again; 409 {ok, error} when nothing would (Docker, Nix,
                      a hand start, --no-update, SHISUKO_NO_UPDATE). Extension and local non-browser
                      clients only: a loopback page may not restart the server (update_origin_allowed())
+
+With --update-check on (the default) a thread asks GitHub for the newest release once a day
+(UpdateChecker); the extension reads it from /health and makes no request of its own beyond the
+viewer's machine.
 
 With --anki-sync auto (the default outside the Docker image) a thread watches Anki's newest notes
 through AnkiConnect and asks Anki to sync with AnkiWeb after new ones (AnkiWatcher); /health
@@ -97,7 +102,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.23.0"
+VERSION = "0.24.0"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -4976,7 +4981,8 @@ class Miner:
         try:
             ids = self.call("findNotes", {"query": "added:1"}, ANKI_REQUEST_TIMEOUT)
         except Exception as exc:  # noqa: BLE001
-            return self.outcome(s, nonce, "error", anki_error_text(exc))
+            # "unreachable": no Anki at all, which the extension answers by saving to Downloads.
+            return self.outcome(s, nonce, "unreachable" if isinstance(exc, AnkiUnreachable) else "error", anki_error_text(exc))
         ids = [i for i in ids if isinstance(i, int)] if isinstance(ids, list) else []
         if not ids:
             return self.outcome(s, nonce, "no_note", "No card was added today. Create the card with Yomitan first, then mine.")
@@ -5945,6 +5951,218 @@ class DeckIndexes:
                 self.wake = False
 
 
+# --------------------------------------------------------------------------- update check
+#
+# The server, not the extension, asks GitHub for the newest release, so the extension makes no
+# request beyond the viewer's machine. One anonymous GET a day: no token, no cookie, no identifier,
+# only a User-Agent naming Shisu-ko and its version (GitHub refuses a request without one). GitHub
+# allows sixty such requests an hour per address. The answer is kept in update-check.json, so a
+# restart within the day asks nothing. The check only reports, through /health's `latest`: the
+# launcher's update.py is what downloads a release (POST /update), never the server.
+
+LATEST_RELEASE_URL = "https://api.github.com/repos/Multysquid/shisu-ko/releases/latest"  # update.py's LATEST_API_URL
+UPDATE_CHECK_PATH = APP_DIR / "update-check.json"
+UPDATE_CHECK_EVERY = 24 * 3600.0
+# After one, two, three or more failures in a row. Offline costs one quick failure per wait.
+UPDATE_CHECK_BACKOFF = (15 * 60.0, 3600.0, 6 * 3600.0)
+UPDATE_CHECK_TIMEOUT = 15.0
+UPDATE_CHECK_MAX_BYTES = 1 << 20  # GitHub's answer is a few KB; anything bigger is not it
+UPDATE_CHECK_WAKE = 3600.0  # the thread looks again at least this often: a laptop may sleep past a due time
+
+
+def update_check_headers() -> dict:
+    return {"Accept": "application/vnd.github+json", "User-Agent": f"Shisu-ko/{VERSION}"}
+
+
+def backoff_wait(failures: int) -> float:
+    """The wait after `failures` (one or more) failed checks in a row."""
+    return UPDATE_CHECK_BACKOFF[min(failures, len(UPDATE_CHECK_BACKOFF)) - 1]
+
+
+def release_from_api(data) -> Optional[dict]:
+    """{version, url, xpi, published} of GitHub's releases/latest answer, or None when it names no release.
+
+    Only https addresses are kept: the popup opens the release page in a tab. `xpi` is the signed
+    .xpi; a release AMO has not signed yet carries only shisu-ko-<version>-firefox-unsigned.xpi,
+    which regular Firefox refuses, and the popup offers no release page until the signed one is there.
+    """
+    if not isinstance(data, dict):
+        return None
+    tag = data.get("tag_name")
+    if not isinstance(tag, str) or not tag.strip():
+        return None
+
+    def https(value):
+        return value if isinstance(value, str) and value[:8].lower() == "https://" else None
+
+    xpi = None
+    for asset in data.get("assets") if isinstance(data.get("assets"), list) else []:
+        name = asset.get("name") if isinstance(asset, dict) else None
+        name = name.lower() if isinstance(name, str) else ""
+        if name.endswith(".xpi") and not name.endswith("-unsigned.xpi"):
+            xpi = https(asset.get("browser_download_url"))
+            break
+    published = data.get("published_at")
+    return {"version": re.sub(r"^v", "", tag.strip(), flags=re.I), "url": https(data.get("html_url")), "xpi": xpi,
+            "published": published if isinstance(published, str) else None}
+
+
+def fetch_latest_release(opener=None) -> dict:
+    """{"latest": release or None} or {"error": text}; never raises. A 404 is no release published yet.
+
+    The request goes through an opener of its own, never urllib's global one: nothing installed
+    there (a cookie jar, a header) can ride along. `opener` is the tests' stand-in for its open().
+    """
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(LATEST_RELEASE_URL, headers=update_check_headers())
+    open_url = opener or urllib.request.build_opener().open
+    try:
+        with open_url(request, timeout=UPDATE_CHECK_TIMEOUT) as res:
+            body = res.read(UPDATE_CHECK_MAX_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return {"latest": None}
+        if exc.code in (403, 429):
+            return {"error": "GitHub's rate limit is reached"}
+        return {"error": f"GitHub answered HTTP {exc.code}"}
+    except (OSError, ValueError):  # URLError and timeouts are OSErrors
+        return {"error": "could not reach GitHub"}
+    if len(body) > UPDATE_CHECK_MAX_BYTES:
+        return {"error": "GitHub's answer is too large"}
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return {"error": "GitHub returned a non-JSON response"}
+    latest = release_from_api(data)
+    return {"latest": latest} if latest else {"error": "GitHub's answer names no release"}
+
+
+def resolve_update_check(args, environ=os.environ) -> bool:
+    """--update-check on (the default, the Docker image included: a check only reports) unless SHISUKO_NO_UPDATE_CHECK is set."""
+    if getattr(args, "update_check", "on") == "off":
+        return False
+    return environ.get("SHISUKO_NO_UPDATE_CHECK", "").strip() in ("", "0")
+
+
+class UpdateChecker:
+    """The day's look at GitHub's newest release, kept in update-check.json across restarts.
+
+    The record: {checked, error, failures, latest}. `checked` is the wall time (ms) of the last
+    attempt, `error` its failure or None, `failures` how many failed in a row, and `latest` the
+    release of the last attempt that went through (None: no release published), which a failure
+    leaves in place. The next attempt is a day after a success, and after a failure the backoff's
+    wait, so a restart loop never asks GitHub more than that.
+    """
+
+    def __init__(self, path: Path = UPDATE_CHECK_PATH, fetch=fetch_latest_release, clock=time.time):
+        self.path = path
+        self.fetch = fetch
+        self.clock = clock
+        self.lock = threading.Lock()
+        self.record = self.load()
+
+    def load(self) -> dict:
+        record = {"checked": None, "error": None, "failures": 0, "latest": None}
+        try:
+            stored = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return record  # never checked, or a file nobody can read: a check is due
+        if not isinstance(stored, dict) or not isinstance(stored.get("checked"), int):
+            return record
+        latest = stored.get("latest")
+        record.update(checked=stored["checked"],
+                      error=stored["error"] if isinstance(stored.get("error"), str) else None,
+                      failures=stored["failures"] if isinstance(stored.get("failures"), int) and stored["failures"] > 0 else 0,
+                      latest=latest if isinstance(latest, dict) and isinstance(latest.get("version"), str) else None)
+        return record
+
+    def save(self, record: dict) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            tmp.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            log.warning("update check: could not write %s (%s); the next start checks again", self.path, exc)
+
+    def due(self) -> float:
+        """The wall time (s) of the next attempt."""
+        with self.lock:
+            checked, failures = self.record["checked"], self.record["failures"]
+        if checked is None:
+            return 0.0
+        last = checked / 1000
+        if last > self.clock() + 60:
+            return 0.0  # the clock went back past the last check: the record cannot say what is due
+        return last + (backoff_wait(failures) if failures else UPDATE_CHECK_EVERY)
+
+    def check(self) -> dict:
+        verdict = self.fetch()
+        with self.lock:
+            record = dict(self.record, checked=int(self.clock() * 1000))
+            if "error" in verdict:
+                record.update(error=verdict["error"], failures=record["failures"] + 1)
+            else:
+                record.update(error=None, failures=0, latest=verdict["latest"])
+            self.record = record
+        self.save(record)
+        if record["error"]:
+            log.info("update check failed: %s; trying again in %d min", record["error"], backoff_wait(record["failures"]) // 60)
+        else:
+            log.info("update check: asked GitHub; %s", self.describe(record))
+        return record
+
+    @staticmethod
+    def describe(record: dict) -> str:
+        latest = record["latest"]
+        if not latest:
+            return "no release published"
+        return f"the newest release is {latest['version']}, this server runs {VERSION}"
+
+    def step(self) -> float:
+        """Check when that is due; the seconds until the thread looks again."""
+        if self.clock() >= self.due():
+            self.check()
+        return max(1.0, min(self.due() - self.clock(), UPDATE_CHECK_WAKE))
+
+    def run_forever(self) -> None:
+        while True:
+            try:
+                wait = self.step()
+            except Exception:  # noqa: BLE001 - the check never takes the server down
+                log.exception("update check: unexpected error")
+                wait = UPDATE_CHECK_WAKE
+            time.sleep(wait)
+
+    def status(self) -> Optional[dict]:
+        """/health's `latest`: {version, url, xpi, published, checked, error}, or None before the first attempt."""
+        with self.lock:
+            record = self.record
+        if record["checked"] is None:
+            return None
+        latest = record["latest"] or {}
+        return {"version": latest.get("version"), "url": latest.get("url"), "xpi": latest.get("xpi"),
+                "published": latest.get("published"), "checked": record["checked"], "error": record["error"]}
+
+
+def start_update_check(args) -> Optional[UpdateChecker]:
+    """The update check's thread, or None when --update-check off or SHISUKO_NO_UPDATE_CHECK turned it off."""
+    if not resolve_update_check(args):
+        log.info("update check: off")
+        return None
+    checker = UpdateChecker()
+    with checker.lock:
+        record = dict(checker.record)
+    if record["checked"] is not None and checker.clock() < checker.due():
+        hours = (checker.due() - checker.clock()) / 3600
+        log.info("update check: from %s, %s; next check in %.1f h", checker.path.name,
+                 f"failed: {record['error']}" if record["error"] else checker.describe(record), hours)
+    threading.Thread(target=checker.run_forever, daemon=True, name="update-check").start()
+    return checker
+
+
 # --------------------------------------------------------------------------- application
 
 class App:
@@ -5979,6 +6197,7 @@ class App:
         self.anki_watcher: Optional[AnkiWatcher] = None  # main() starts it: tools and tests watch nothing
         self.miner: Optional[Miner] = None  # start_anki_watcher() sets it when new notes are attached to
         self.decks: Optional[DeckIndexes] = None  # start_anki_watcher() sets it for the word colours
+        self.update_checker: Optional[UpdateChecker] = None  # main() starts it: tools and tests check nothing
         self.transcriber = Transcriber(self)
         self.transcriber.start()
 
@@ -6000,6 +6219,7 @@ class App:
         watcher = self.anki_watcher
         out = {"ok": True, "version": VERSION, **state, "language": self.args.language,
                "launcher": self.update_blocker() is None,
+               "latest": self.update_checker.status() if self.update_checker else None,
                "anki_sync": watcher.status() if watcher else dict(ANKI_SYNC_OFF)}
         if decks:
             out["anki_decks"] = (self.decks.deck_names() if self.decks is not None
@@ -8598,6 +8818,9 @@ def parse_args(argv=None):
     p.add_argument("--download-model", metavar="NAME", help="download NAME now, showing progress, and make it the default model for later starts; used by setup")
     # amd_setup.py's test of the AMD engine (run_probe_gpu()), with SHISUKO_ENGINE=rocm; not for the viewer.
     p.add_argument("--probe-gpu", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--update-check", default="on", choices=["on", "off"],
+                   help="on (default): ask GitHub once a day, anonymously, for the newest release and report it in /health "
+                        "for the popup's update banner; nothing is downloaded. off: never (so does SHISUKO_NO_UPDATE_CHECK=1)")
     p.add_argument("--no-update", action="store_true", help="start without looking for a newer version first (run.cmd / run.sh skip server/update.py) and refuse the popup's Update button (POST /update answers 409), since the launcher would restart the server without updating")
     args = p.parse_args(argv)
     if args.initial_prompt is None:
@@ -8704,6 +8927,7 @@ def main() -> None:
         finish(2)
     server.daemon_threads = True
     app.anki_watcher = start_anki_watcher(args, app)
+    app.update_checker = start_update_check(args)
     log.info("Listening on http://%s:%d  (Ctrl+C to stop)", args.host, args.port)
     try:
         server.serve_forever()

@@ -17,7 +17,8 @@ transcribing a little ahead of where you are watching, and draws the result over
 ordinary page text. Everything runs locally: the only network traffic is yt-dlp fetching the
 audio from YouTube (and a Japanese subtitle track the video's creator uploaded, when there is one),
 the one-time model download, and a look at GitHub for a newer release,
-by `run.cmd` / `run.sh` before each start and by the extension once a day.
+by `run.cmd` / `run.sh` before each start and by the server once a day. The extension itself
+talks to nothing but the server on your machine.
 
 ## What it does
 
@@ -175,34 +176,35 @@ install the new `.xpi`; a Chrome Web Store install is updated by the store). Loc
 never overwritten, and being offline just starts the current version. `run.cmd --no-update` (or
 `SHISUKO_NO_UPDATE=1`) skips the check.
 
-**Updates.** A server that keeps running would never see a new release, so the add-on looks for
-one itself: it asks GitHub for the newest release once a day, when Firefox starts or the popup
-opens and the last check is older than that or failed (offline, the next opening tries again),
-and whenever you click **Check for updates** in the popup's *Anki, clips and server* drawer.
-When the server you are running is older, the toolbar icon gets a badge and the popup shows a
-banner with an **Update** button (**Not now** hides it until Firefox restarts). A system
-notification says so too, once per browser session, but only from the check at Firefox start,
-and only when the server is already running at that moment and can update itself; a check from
-the popup sets the badge and the banner and never notifies, so with the usual order (Firefox
-first, the server later) there is no notification. Update, or a click on the notification,
-makes the server exit and its launcher take over: `run.cmd` / `run.sh` run `update.py` (a git
-clone is fast-forwarded, a zip install is replaced with the newest release) and start the server
-again, while the popup's status line reads "Updating server" until the new version answers,
-which can take up to two minutes because the restart loads the model again. A server that
-`run.cmd` / `run.sh` did not start (Docker, Nix, `python server.py` by hand, or a `run.sh` from
-before 0.9.0 that has not been restarted since it updated itself; `run.cmd` picks its new loop
-up by itself) or that was started with `--no-update` cannot update itself; the banner then says
-the server was not started by `run.cmd` / `run.sh`, whichever of those the cause is (the server
-only reports that it cannot), and asks for a restart by hand, which
-updates as before. The extension itself is never installed by the add-on: Firefox updates it from
-the listing on addons.mozilla.org, and the banner links to the release page when only the
-extension is behind, once the release carries the signed `.xpi` (until then it says the signed
-`.xpi` is on its way). Chrome updates an install from the Chrome Web Store by itself: every
-release goes to the store by itself, and Chrome gets it once it has passed the store's review,
-which can be days after the GitHub release; until then the banner says so and offers no release
-page, since an unpacked build from there would be a second copy of the extension beside the
-store's (an unpacked build of your own keeps the link). Being offline costs one failed check,
-shown under **Check for updates**; a failed check never notifies.
+**Updates.** A server that keeps running would never see a new release, so it looks for one
+itself: once a day, soon after it starts and then every 24 hours, it asks GitHub for the newest
+release (an anonymous request; a restart within the day asks nothing, and a failed look is tried
+again after 15 minutes, then an hour, then six). `--update-check off` or `SHISUKO_NO_UPDATE_CHECK=1`
+turns that off. The extension reads the answer from the server. When the server you are running is
+older, the toolbar icon gets a badge and the popup shows a banner with an **Update** button
+(**Not now** hides it until Firefox restarts). A system notification says so too, once per
+browser session, from the browser's start, and only when the server is already running then and
+can update itself; clicking it updates the server. The line at the bottom of the popup's *Anki, clips
+and server* drawer says what the server found and when. Update, or a click on the notification,
+makes the server exit and its
+launcher take over: `run.cmd` / `run.sh` run `update.py` (a git clone is fast-forwarded, a zip
+install is replaced with the newest release) and start the server again, while the popup's
+status line reads "Updating server" until the new version answers, which can take up to two
+minutes because the restart loads the model again. A server that `run.cmd` / `run.sh` did not
+start (Docker, Nix, `python server.py` by hand, or a `run.sh` from before 0.9.0 that has not been
+restarted since it updated itself; `run.cmd` picks its new loop up by itself) or that was started
+with `--no-update` cannot update itself; the banner then says the server was not started by
+`run.cmd` / `run.sh`, whichever of those the cause is (the server only reports that it cannot),
+and asks for a restart by hand, which updates as before. Docker and Nix servers still check, so
+they can tell you that a newer image or extension is out. The extension itself is never installed
+by the add-on: Firefox updates it from the listing on addons.mozilla.org, and the banner links to
+the release page when only the extension is behind, once the release carries the signed `.xpi`
+(until then it says the signed `.xpi` is on its way). Chrome updates an install from the Chrome
+Web Store by itself: every release goes to the store by itself, and Chrome gets it once it has
+passed the store's review, which can be days after the GitHub release; until then the banner says
+so and offers no release page, since an unpacked build from there would be a second copy of the
+extension beside the store's (an unpacked build of your own keeps the link). While the server is
+offline the popup goes by the last check a server reported.
 
 **Nix / NixOS:** `nix run github:Multysquid/shisu-ko` (or `nix run .` in a checkout) starts the
 server with CUDA support; `nix run .#check` prints diagnostics; `nix develop` opens a shell with
@@ -237,11 +239,9 @@ moves on to the first listed version newer than its own (a release published the
 its number plus `.1`, the same code). Regular Firefox only keeps signed
 add-ons; Firefox Developer Edition, Nightly and ESR can instead load the unsigned zip with
 `xpinstall.signatures.required` set to `false` in `about:config`. The popup says when a newer
-release is out (see [Updates](#1-start-the-server)). Since 0.9.0 the extension needs one more permission,
-"Display notifications to you": opening the new `.xpi` over an older version lists it in the
-install prompt, and an automatic update (from the listing, for a release published there) is held back by
-Firefox until you approve it, from the notice on the application menu (≡) or under Add-ons
-and themes.
+release is out (see [Updates](#1-start-the-server)). Since 0.9.0 the extension needs
+"Display notifications to you", for that news at Firefox start; opening a newer `.xpi` over an
+older version from before 0.9.0 lists it in the install prompt.
 
 On Chrome, install [Shisu-ko from the Chrome Web Store](https://chromewebstore.google.com/detail/shisu-ko/ecenifonpkaiccmmknpbllbebbfigjnm).
 Every release goes to the store by itself, and Chrome updates the install by itself once the store
@@ -356,8 +356,12 @@ either. `--mine-picture off` attaches the audio alone, and `--mine off` stops th
 to Anki at all (see [Server options](#server-options)). A live stream's card gets its audio and no
 picture.
 
-Without Anki there is nothing to mine into: the Downloads folder fallback of earlier versions is
-gone, and with it the extension's `downloads` permission.
+Without Anki there is nothing to mine into, so a mine you ask for (Alt+Shift+M or a line's
+pickaxe) saves the line instead: when the server says Anki is not running, or mines nothing
+(`--mine off`, or the Docker image without `--anki-url`), the line's audio (from the server, with
+the popup's padding and format) and a screenshot of the video taken as you mined go to
+`Downloads/shisu-ko-mining`, and the toast says so. A DRM-protected video gives no screenshot,
+only the audio.
 
 **Sync with AnkiWeb.** The server watches Anki and asks it to sync (AnkiConnect's `sync`) a
 minute after a new card appears, so the card is on your phone without pressing Sync. It does not
@@ -579,9 +583,8 @@ start updates it anyway. When the extension is behind and the server is current 
 banner links to the release page (in Firefox once the release carries the signed `.xpi`, until
 then it says the signed `.xpi` is on its way; for an unpacked Chrome build at once), or, for a
 Chrome Web Store install, says that the store updates it once it has reviewed that version. The
-**Check for updates** link in the *Anki, clips and server* drawer asks GitHub now, whatever the
-age of the daily check, and the line under it keeps the result ("Newest release: 0.9.0, checked
-3 min ago", or why the check failed).
+line at the bottom of the *Anki, clips and server* drawer shows the server's daily check
+("Newest release: 0.9.0, the server checked 3 min ago", or why its check failed).
 
 | Setting | Meaning |
 |---|---|
@@ -643,7 +646,7 @@ The last drawer, **Anki, clips and server**, holds the image, audio, sentence, w
 accent field names (the last one
 empty means the first field named pitch or accent that holds a readable value), the audio
 padding around the sentence, the clip format (MP3 or WAV), the Shisu-ko server URL (default
-`http://127.0.0.1:8790`) and the **Check for updates** link with the result of the last check.
+`http://127.0.0.1:8790`) and the result of the server's last update check.
 
 ## How it works
 
@@ -728,18 +731,20 @@ this off). The reasoning and the measurements behind these rules are in
 current model's cues are `<video_id>.cues.json`, and when you switch models another model's
 cues are kept beside it and come back the moment you switch back.
 
-**Updates.** The one request the extension makes beyond your own machine is
-`GET https://api.github.com/repos/Multysquid/shisu-ko/releases/latest`: when the browser starts
-(or the extension is installed or updated) or the popup opens and the last check is over a day old
-or failed, so at most once a day by itself while the checks succeed (a failure is tried again
-at the next of those occasions), and on every click of **Check for updates**. It carries no account, token,
-cookie or identifier, only what any visit to GitHub carries (your IP address and the browser's
-user agent); GitHub's answer (the release's version, page and `.xpi` address, and when it was
-checked) is kept in the extension's storage. The **Update** button then sends `POST /update` to
-the local server, which exits with code 4 so that `run.cmd` / `run.sh` run `update.py` and start
-it again; the server never downloads anything itself, and the extension never installs itself.
-The browser updates it with requests of its own: Firefox from addons.mozilla.org, and Chrome, for
-a Chrome Web Store install, from the store.
+**Updates.** The extension makes no request beyond your own machine. The server makes one for
+updates: `GET https://api.github.com/repos/Multysquid/shisu-ko/releases/latest`, at most once a
+day while the checks succeed (soon after a start whose last check is over a day old, then every
+24 hours; after a failure, again in 15 minutes, an hour, then every six hours). It carries no
+account, token, cookie or identifier, only a `User-Agent` naming Shisu-ko and its version, and
+what any request carries (your IP address). GitHub's answer (the release's version, page, `.xpi`
+address and date, and when it was checked) is kept in `~/.shisu-ko/update-check.json` and
+reported to the extension in `/health`'s `latest`; the extension keeps the last one in its
+storage for while the server is offline. `--update-check off` or `SHISUKO_NO_UPDATE_CHECK=1`
+stops the request. The **Update** button then sends `POST /update` to the local server, which
+exits with code 4 so that `run.cmd` / `run.sh` run `update.py` and start it again; the server
+never downloads anything itself, and the extension never installs itself. The browser updates it
+with requests of its own: Firefox from addons.mozilla.org, and Chrome, for a Chrome Web Store
+install, from the store.
 
 ## Server options
 
@@ -784,6 +789,7 @@ sends the YouTube cookies of the browser chosen there (see [YouTube sign-in](#yo
 | `--js-runtime deno` | JavaScript runtime for yt-dlp: auto, node, deno, bun, or name:path |
 | `--allow-remote-ejs` | Lets yt-dlp fetch updated YouTube challenge-solver scripts from GitHub |
 | `--check` | Print environment diagnostics (CUDA, the AMD engine where it is installed, MLX and the backend `--device auto` would pick, yt-dlp's JavaScript runtime, downloaded models, the model a bare start would run, whether the popup's Start button has its launcher registered) and exit |
+| `--update-check on\|off` | `on` (default, Docker and Nix included): ask GitHub once a day, anonymously, for the newest release and report it in `/health` for the popup's badge and banner; nothing is downloaded. `off`: never (so does `SHISUKO_NO_UPDATE_CHECK=1`) |
 | `--no-update` | Start without looking for a newer version of Shisu-ko first (`run.cmd` / `run.sh`). The popup's **Update** button is refused too, since the launcher would restart the server without updating |
 
 `run.cmd` / `run.sh` set `SHISUKO_LAUNCHER=1` for the server they start. Only with it does
@@ -805,8 +811,9 @@ YouTube's player, and the reply carries `live: true`), `GET /clip?video_id=&star
 `GET /sessions` for debugging, and `POST /update` (body ignored), which answers
 `{ok: true, restarting: true, version}` and then exits with code 4 for the launcher, or 409
 `{ok: false, error}` with the reason when nothing would update it (no launcher, `--no-update`,
-`SHISUKO_NO_UPDATE`); `/health` carries `version` and `launcher`, true when `/update` would
-work. The server only listens on 127.0.0.1 and answers browser requests
+`SHISUKO_NO_UPDATE`); `/health` carries `version`, `launcher`, true when `/update` would
+work, and `latest`, the server's update check (`{version, url, xpi, published, checked, error}`,
+or null when the check is off or has not run yet). The server only listens on 127.0.0.1 and answers browser requests
 only from the extension itself or from pages served on this machine, so an arbitrary website
 cannot drive downloads and transcription; `/update` is narrower still and takes browser
 requests from the extension alone, never from a page, so nothing served on this machine can
@@ -1084,8 +1091,8 @@ server does not send).
 | The banner or **Update** says the server cannot update itself | The server was not started by `run.cmd` / `run.sh` (Docker, Nix, `python server.py` by hand: it has no launcher to run `update.py` after the exit), was started with `--no-update` or `SHISUKO_NO_UPDATE`, or is a 0.8.0 server, which predates the button. The banner names the first of those causes whatever the actual one, because the server only reports that it cannot. Update it the way it was started: `docker compose build`, `nix run` with the new revision, or a plain restart of `run.cmd` / `run.sh`, which updates before every start. A `run.sh` that updated itself from before 0.9.0 keeps running its old loop, so its first server is refused too; restart `run.sh` once by hand (`run.cmd` reads its new loop as soon as it has updated and needs no restart). |
 | "The server restarted but still runs X; look at its window: update.py said why" | The launcher ran `update.py` but it could not update: local changes git would overwrite, a diverged branch, a detached HEAD, no network, or a release zip that could not be downloaded. Its message is in the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS); fix that and click **Update** again, or update by hand (`git pull`, or unpack the release). |
 | **Update** ends with "No answer from the server 120 s after the update" | The server exited for the update but nothing answered within two minutes: the new version is still loading its model (a CPU load takes minutes, and a new default model is downloaded first), or it did not start (the new version crashed, or `update.py` could not reinstall the requirements). Look at the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS). A server that is still loading answers by itself in a while and the popup's status line follows; otherwise fix what the log says and click **Start server**, which is back on the status line. |
-| No update notification although GitHub has a newer release | The notification comes from one place only: the check when Firefox starts (or the extension is installed or updated), and only when the server is already running at that moment, started by `run.cmd` / `run.sh` and able to update itself. With the usual order, Firefox first and the server started later by hand or with **Start server**, there is none: the popup's own check (on opening, when the last one is over a day old or failed, and on **Check for updates** in the Anki, clips and server drawer) sets the toolbar badge and the banner but never notifies, and a profile that has never opened the popup checks nothing on its own. The line under **Check for updates** says why a check failed: offline, or GitHub's limit of sixty unauthenticated requests an hour per address (shared with everything else on your connection that asks GitHub's API). The notification is shown once per browser session; **Not now** hides the banner until Firefox restarts, and the toolbar badge stays either way. |
-| Firefox keeps the old extension after an update, or its menu button shows a notice that Shisu-ko requires new permissions | 0.9.0 adds the `notifications` permission, and Firefox holds an update that adds a permission until you approve it: open the notice on the application menu (≡) or Add-ons and themes and allow "Display notifications to you". A `.xpi` opened by hand asks in its install dialog instead. |
+| No badge or banner although GitHub has a newer release | The server finds releases, once a day: the line at the bottom of the popup's *Anki, clips and server* drawer says what it found and when, or why its check failed (offline, or GitHub's limit of sixty unauthenticated requests an hour per address, shared with everything else on your connection that asks GitHub's API; it tries again after 15 minutes, an hour, then every six hours). An empty line means the server reported no check: it was started with `--update-check off` or `SHISUKO_NO_UPDATE_CHECK=1`, it is older than 0.24.0, or it started a moment ago. A release published since the server's last check shows up within a day; restarting the server does not hurry it, since the day's answer is kept in `~/.shisu-ko/update-check.json`. The notification comes only from Firefox's start, and only when the server is already running then, started by `run.cmd` / `run.sh` and able to update itself; with the usual order, Firefox first and the server later, there is none, but the badge and the banner are. **Not now** hides the banner until Firefox restarts, and the toolbar badge stays either way. |
+| Firefox keeps the old extension after an update, or its menu button shows a notice that Shisu-ko requires new permissions | Firefox holds an update that adds a permission until you approve it: open the notice on the application menu (≡) or Add-ons and themes and allow it. 0.9.0 added "Display notifications to you"; 0.24.0 brings back "Download files and read and modify the browser's download history", which 0.22.0 and 0.23.0 lacked, for the no-Anki fallback. A `.xpi` opened by hand asks in its install dialog instead. |
 | Server says "Another server is already starting or running on port 8790 (it holds ~/.shisu-ko/server-8790.lock). Stop it first." and stops (exit code 2) | A second server was started while one is loading or running: `run.cmd` double-clicked twice, or a start by hand while a server the popup launched is still in its update check (the **Start server** button itself looks at the lock first and reports a loading server as already starting). Close the window and let the first one finish; it holds the lock until it exits, and the file needs no cleaning up. If no server is running and the message persists, a stale `server.py` process still holds it; end that process (Task Manager, `pkill -f server.py`). |
 | First start sits at "Loading Whisper model" for a long time | A model that setup did not download (large-v3 is 3 GB) is fetched at your connection speed, without a progress bar in the server window; `setup.cmd` / `setup.sh` and `server.py --download-model NAME` show one. Hugging Face's xet transfer mode is disabled because it stalled on Windows; set `HF_HUB_DISABLE_XET=0` to try it. |
 | "Loading model X…" stays on the video for a long time | A model picked in the popup is downloaded first, at your connection speed (large-v3 is 3 GB, small about 500 MB); the current model keeps subtitling meanwhile, and the transcript starts over once the new one is in. The popup's status line follows along. |
@@ -1132,8 +1139,9 @@ Planned: a distilled, smaller Japanese model that could eventually run in the br
 ```
 addon/                Firefox extension (Manifest V3, plain JS, no build step)
   content.js          overlay, sync loop, hover-pause, transcript, live clock, mine requests in /sync
-  background.js       server proxy, settings, server start, release check (GitHub), badge and
-                      notification, the server's update, the word colours' rows from /sync
+  background.js       server proxy, settings, server start, the server's release check (from
+                      /health), badge and notification, the server's update, the no-Anki
+                      fallback's downloads, the word colours' rows from /sync
   settings.js         the one place settings and their defaults are declared
   words.js            the word colours' matcher (finding words in a line), for content.js and the
                       phone portal; its note reading has a twin in server.py, held equal by the
@@ -1236,7 +1244,7 @@ the two no-update switches, the 409s, the answer followed by the exit with code 
 `main()`, the origin rule that admits the extension and no page, and the launchers' `:update`
 label, variable and code-4 lines. The extension
 suite runs `background.js` and the helpers of `content.js` in a Node `vm` sandbox that stands in
-for the WebExtension APIs: settings storage, the server, AnkiConnect and Downloads proxying,
+for the WebExtension APIs: settings storage, the server proxy, the no-Anki fallback's downloads,
 sentence mining, the live clock and the master switch. `content.test.js` also covers the model
 name sent with every sync, the restart on a new session token, the model status and error
 messages and the font stack; `popup-copies.test.js` keeps the popup's copies of the font and
@@ -1244,11 +1252,14 @@ model-name rules equal to those in `content.js` and `server.py`. `background.tes
 the `startServer` message: the native host's answers, the timeout, the mapping of the browser's
 errors to hints, and the launch record that outlives the event page; `popup.test.js` runs the
 popup's start flow against a fake document, from the button to the 90 s deadline and its hints.
-The update check is covered on both sides too: `background.test.js` feeds a fake GitHub answer
-to `checkForUpdate`, the version helpers and `decideUpdate`, the badge and the one notification
-per session, the `/update` request with its record, and the `/health` polls that end it;
-`popup.test.js` walks the banner through every verdict, Update to "Updated to 0.9.0", the old
-version coming back, the 120 s deadline, Not now and Check for updates. The word colours are
+The update check is covered on both sides too: `server/tests/test_update_check.py` holds the
+server's request (two headers, no token or cookie), the day's cache, the backoff, the off switch
+and `/health`'s `latest`; `background.test.js` feeds `/health` answers carrying `latest` to the
+version helpers, `decideUpdate` and the badge, the `/update` request with its record, and the
+`/health` polls that end it; `popup.test.js` walks the banner through every verdict, Update to
+"Updated to 0.9.0", the old version coming back, the 120 s deadline and Not now;
+the notification at start and its click; `settings.test.js` holds that `addon/` makes no request
+beyond the server and that only `saveMine()` saves files. The word colours are
 covered in `words.test.js` (reading a note's fields and pitch accent, the card states, the
 conjugation matcher with its boundaries and the words it must not colour), `background.test.js`
 (the rows a /sync brings, a delta, a deck change, the server's verdicts, the deck list, and a grep

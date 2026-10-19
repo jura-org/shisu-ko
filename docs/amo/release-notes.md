@@ -1,8 +1,7 @@
 0.7.0 was the last version on this listing; 0.8.0 to 0.14.0 came out on GitHub only (https://github.com/Multysquid/shisu-ko/releases has every release's full notes). What changed since 0.7.0:
 
-- 0.23.0: the server reads your Anki deck for the word colours; the extension never contacts AnkiConnect. The phone portal colours words too.
-- 0.22.0: the server, not the extension, gives a new Yomitan card its line's audio and a picture of the video, and takes Alt+Shift+M; no downloads permission, no Downloads fallback.
-- 0.21.1: the server syncs Anki after mining (--anki-sync off stops it); no alarms permission.
+- 0.24.0: the server, not the extension, looks for a newer release, once a day; the extension makes no request beyond your computer. With Anki not running, a mine saves the line's audio and picture to Downloads again.
+- 0.21.1 to 0.23.0: the server syncs Anki after mining, gives a Yomitan card its line's audio and picture (Alt+Shift+M too) and reads your deck for the word colours; no alarms permission.
 - 0.21.0: a Japanese video with subtitles its creator uploaded shows their text, timed by Whisper.
 - 0.19.1, 0.19.2: subtitles for speech the voice detector misses (shouting, a quiet mix) and songs running past a window; a sentence's first words stay with it; no boxes with a hex code.
 - 0.19.0: a phone portal (server/portal.cmd, .sh): subtitles, lookups, mining on a phone.

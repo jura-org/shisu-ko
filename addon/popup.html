@@ -33,8 +33,8 @@
       <button id="grant-permission" type="button">Allow on YouTube</button>
     </div>
 
-    <!-- A newer release than the server runs (or than this extension is): the background checks
-         GitHub once a day and popup.js writes the text for the case at hand (renderUpdate).
+    <!-- A newer release than the server runs (or than this extension is): the server checks
+         GitHub once a day, /health reports it, and popup.js writes the text for the case at hand (renderUpdate).
          "Update" asks the server to update itself and restart; "Not now" hides the banner for this
          browser session; the release page link is for the extension, whose signed .xpi every
          release carries (the addons.mozilla.org listing gets only some releases, later), and is
@@ -318,10 +318,9 @@
           <span class="lead">Shisu-ko server URL</span>
           <input type="text" id="serverUrl" spellcheck="false">
         </label>
-        <!-- The daily check, on demand; the line under it is the last result (renderUpdateResult
-             in popup.js): the newest release and when it was checked, or why the check failed. -->
+        <!-- The server's daily check (renderUpdateResult in popup.js): the newest release and
+             when the server checked, or why its check failed. -->
         <div class="updates">
-          <button type="button" id="check-updates" class="linkbtn">Check for updates</button>
           <p class="hint" id="update-result"></p>
         </div>
       </div>

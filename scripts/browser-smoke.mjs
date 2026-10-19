@@ -59,7 +59,11 @@ function deckAnswer(asked) {
   return { token, status: "ok", deck: "Smoke::Mining", automatic: !asked.name, full: false, notes: [...ids].map((id) => deck.rows.get(id)), removed: [] };
 }
 // The fixture server's mining log, as server.py's /sync answers it: one entry per mine asked for.
-const mining = { bodies: [], log: [] };
+// `noAnki` plays a server whose AnkiConnect does not answer: the mine comes back `unreachable`.
+const mining = { bodies: [], log: [], noAnki: false, clips: [] };
+// What the fixture /health says about the server itself; the end of the run makes it an old one
+// started by its launcher, for the update notification.
+const serverSelf = {};
 async function requestBody(req) {
   let body = "";
   for await (const chunk of req) body += chunk;
@@ -77,6 +81,9 @@ async function poll(read, expected, timeout = 5000) {
 }
 let syncCount = 0;
 let healthCount = 0;
+// The server's update check as /health reports it (UpdateChecker in server.py): a release far
+// ahead of any real one, so the extension, whatever its version, is behind it.
+const LATEST = { version: "99.0.0", url: "https://github.com/Multysquid/shisu-ko/releases/tag/v99.0.0", xpi: null, published: null, checked: Date.now(), error: null };
 const syncSeen = new Map(); // video id -> how many /sync requests actually reached the server
 let languagePaused = false; // fixture switch for the wrong-language answer
 const api = await listen(async (req, res) => {
@@ -85,7 +92,7 @@ const api = await listen(async (req, res) => {
     healthCount++;
     // The popup's deck list comes from the server too (/health?decks=1).
     const decks = url.searchParams.get("decks") === "1" ? { anki_decks: { ok: true, decks: ["Default", "Smoke::Mining"], seen: "Smoke::Mining" } } : {};
-    return json(res, { model: "smoke", device: "cpu", compute_type: "test", ...decks });
+    return json(res, { model: "smoke", device: "cpu", compute_type: "test", latest: LATEST, ...serverSelf, ...decks });
   }
   if (url.pathname === "/sync") {
     syncCount++;
@@ -97,8 +104,11 @@ const api = await listen(async (req, res) => {
     if (body.deck) deck.bodies.push(body.deck);
     // A mine is answered once per nonce, the way the server dedupes the resends.
     if (body.mine && !mining.log.some((entry) => entry.nonce === body.mine.nonce)) {
-      mining.log.push({ seq: mining.log.length, nonce: body.mine.nonce, ok: true, status: "attached", note: 404,
-        message: "Added Picture + SentenceAudio to the newest Anki card" });
+      mining.log.push(mining.noAnki
+        ? { seq: mining.log.length, nonce: body.mine.nonce, ok: false, status: "unreachable", note: null,
+          message: "Anki is not running or AnkiConnect is not installed" }
+        : { seq: mining.log.length, nonce: body.mine.nonce, ok: true, status: "attached", note: 404,
+          message: "Added Picture + SentenceAudio to the newest Anki card" });
     }
     const since = typeof body.mined_since === "number" ? body.mined_since : null;
     const minedLog = { mined: since === null ? [] : mining.log.filter((entry) => entry.seq >= since), mined_next: mining.log.length };
@@ -116,6 +126,11 @@ const api = await listen(async (req, res) => {
     ];
     const cues = body.since ? [] : id === regressionVideoId ? regressionCues : [{ id: 1, start: 0, end: 3600, text: "これはテスト字幕です", seg: 1 }];
     return json(res, { ...head, cues });
+  }
+  if (url.pathname === "/clip") {
+    mining.clips.push(Object.fromEntries(url.searchParams));
+    res.writeHead(200, { "content-type": "audio/wav", "access-control-allow-origin": "*" });
+    return res.end(mediaBytes);
   }
   if (url.pathname === "/anki") {
     const request = req.method === "POST" ? await requestBody(req) : {};
@@ -141,6 +156,10 @@ try {
   if (process.env.CHROMIUM_PATH) launchOptions.executablePath = process.env.CHROMIUM_PATH;
   else launchOptions.channel = "chromium";
   context = await chromium.launchPersistentContext("", launchOptions);
+  // Every request the browser makes, the service worker's included (Playwright reports a worker's
+  // fetches here in Chromium): the extension must make none beyond this machine.
+  const requests = [];
+  context.on("request", (request) => requests.push(request.url()));
   const worker = context.serviceWorkers()[0] || await context.waitForEvent("serviceworker");
   const extensionId = new URL(worker.url()).host;
   const commands = await worker.evaluate(() => new Promise((resolve) => chrome.commands.getAll(resolve)));
@@ -151,21 +170,17 @@ try {
     assert.ok(command?.shortcut === shortcut || command?.shortcut === mac,
       `Chrome command ${name} should register ${shortcut}, got ${command?.shortcut}`);
   }
-  // A fresh update check with no release keeps every popup this test opens off api.github.com:
-  // the popup's first question asks for the day's check, and the background answers it from a
-  // stored one that is under a day old (background.js, startupCheck).
-  const updateCheck = { checkedAt: Date.now(), latest: null, error: null };
   // ankiAutoSync is what 0.20.0 and 0.21.0 stored for their Anki sync: left in a viewer's storage,
   // it must change nothing (no AnkiConnect `sync`, asserted at the end of the run).
   await worker.evaluate((stored) => new Promise((resolve) => chrome.storage.local.set(stored, resolve)),
-    { settings: { serverUrl: closedHealthUrl, ankiAutoSync: true, ankiUrl: `http://127.0.0.1:${api.port}/anki` }, updateCheck });
+    { settings: { serverUrl: closedHealthUrl, ankiAutoSync: true, ankiUrl: `http://127.0.0.1:${api.port}/anki` } });
   const popup = await context.newPage();
   await popup.goto(`chrome-extension://${extensionId}/popup.html`);
   await poll(() => popup.locator("#server-status").textContent(), (value) => value === "Server offline");
   assert.equal(await popup.locator("#serverUrl").inputValue(), closedHealthUrl);
   await popup.locator("details").last().locator("summary").click();
-  // The seeded check answers the result line; a live one would name a release or a failure.
-  await poll(() => popup.locator("#update-result").textContent(), (value) => value === "No release found, checked just now");
+  // No server has answered this profile: nothing is known about releases, and nothing is asked.
+  assert.equal(await popup.locator("#update-result").textContent(), "");
   assert.equal(await popup.locator("#update-banner").isHidden(), true, "no banner without a release");
   await popup.locator("#serverUrl").fill(`http://127.0.0.1:${api.port}`);
   await popup.locator("#pauseOnHover").check();
@@ -177,6 +192,12 @@ try {
   await poll(() => popup.locator("#server-status").textContent(), (value) => value === "Server online");
   assert.ok(healthCount > 0, "popup health check must reach the fixture server");
   await poll(() => popup.locator("#deck-hint").textContent(), (value) => value === "Looking at Smoke::Mining", 5000);
+  // The release comes from the server's /health: the banner names it (this is an unpacked build,
+  // which nothing updates), the result line says the server checked, and the toolbar shows the badge.
+  await poll(() => popup.locator("#update-text").textContent(), (value) => value === "A newer extension (99.0.0) is on the release page; an unpacked build does not update itself");
+  assert.equal(await popup.locator("#update-banner").isHidden(), false);
+  assert.equal(await popup.locator("#update-result").textContent(), "Newest release: 99.0.0, the server checked just now");
+  assert.equal(await worker.evaluate(() => chrome.action.getBadgeText({})), "1");
   assert.deepEqual(await popup.locator("#cardStatusDeck option").evaluateAll((options) => options.map((o) => o.value)), ["", "Default", "Smoke::Mining"]);
   await popup.close();
 
@@ -289,6 +310,20 @@ try {
   const resent = mining.bodies.filter((entry) => entry.mine && entry.mine.nonce === nonce).length;
   await page.waitForTimeout(2500);
   assert.equal(mining.bodies.filter((entry) => entry.mine && entry.mine.nonce === nonce).length, resent, "an answered mine is not sent again");
+
+  // No Anki to mine into: the server answers `unreachable`, and the line goes to Downloads, the
+  // frame the tab drew at the mine plus the server's /clip.
+  mining.noAnki = true;
+  await page.locator(".shisuko-line-mine").first().click({ force: true });
+  await poll(() => page.locator(".shisuko-toast").textContent(), (value) => value === "No Anki to mine into: saved the picture and the audio to Downloads/shisu-ko-mining", 10000);
+  assert.deepEqual(mining.clips.map((clip) => [clip.video_id, clip.format]), [[videoId, "mp3"]]);
+  const saved = await poll(() => worker.evaluate(() => new Promise((resolve) => chrome.downloads.search({}, resolve))),
+    (items) => items.length === 2 && items.every((item) => item.state === "complete"), 10000);
+  // Playwright keeps a download under a name of its own, so the file names are background.test.js's
+  // to hold; here the types and the bytes.
+  assert.deepEqual(saved.map((item) => item.mime).sort(), ["audio/wav", "image/jpeg"]);
+  assert.ok(saved.every((item) => item.fileSize > 0), "both files have bytes");
+  mining.noAnki = false;
 
   // The popup's Anki settings reach the server inside /sync; the extension itself writes nothing.
   const cdp = await context.newCDPSession(page);
@@ -422,8 +457,23 @@ try {
   await regression.close();
   await regressionPopup.close();
 
+  // The update notification, fed from the server's check: an old server its launcher started,
+  // and the browser starting, which the worker's own start-up check plays.
+  Object.assign(serverSelf, { version: "0.1.0", launcher: true });
+  const lastWorker = context.serviceWorkers().find((candidate) => candidate.url().startsWith(`chrome-extension://${extensionId}/`));
+  await lastWorker.evaluate(() => startupCheck());
+  const shown = await poll(() => lastWorker.evaluate(() => new Promise((resolve) => chrome.notifications.getAll(resolve))), (all) => "shisuko-update" in all, 5000);
+  assert.ok(shown["shisuko-update"]);
+
   assert.deepEqual(anki.actions, [], `the extension called AnkiConnect: ${anki.actions.join(", ")}`);
-  console.log(`browser smoke passed (syncs=${syncCount}, AnkiConnect calls=${anki.actions.length}, deck asks=${deck.bodies.length}, mines=${mining.log.length}, ` +
+  // The log sees the worker: every /health went out from it.
+  assert.ok(requests.some((url) => url.startsWith(`http://127.0.0.1:${api.port}/health`)), "the request log must see the service worker's fetches");
+  // The fixture's YouTube pages are answered by page.route() inside the browser; no other host is
+  // reached, GitHub least of all.
+  const local = /^(chrome-extension:|data:|blob:|http:\/\/127\.0\.0\.1:\d+\/|https:\/\/www\.youtube\.com\/watch\?v=)/;
+  const remote = requests.filter((url) => !local.test(url));
+  assert.deepEqual(remote, [], `the extension reached beyond this machine: ${remote.join(", ")}`);
+  console.log(`browser smoke passed (syncs=${syncCount}, requests=${requests.length}, remote=0, AnkiConnect calls=${anki.actions.length}, deck asks=${deck.bodies.length}, mines=${mining.log.length}, ` +
     `${[...syncSeen].map(([id, count]) => `${id}=${count}`).join(" ")})`);
 } finally {
   await context?.close();

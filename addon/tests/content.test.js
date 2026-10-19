@@ -3452,6 +3452,53 @@ test("a mine rides /sync until the log answers it, and the answer is toasted", a
   assert.equal(api.state.toastEl.textContent, "No card was added today.");
 });
 
+test("with no Anki to mine into, the line goes to Downloads with the frame taken at the mine", async () => {
+  const { api, sandbox } = loadContent();
+  await settled();
+  api.state.toastEl = sandbox.document.createElement("div");
+  const sent = [];
+  sandbox.browser.runtime.sendMessage = async (msg) => {
+    sent.push(msg);
+    return msg.type === "saveMine" ? { ok: true, message: "No Anki to mine into: saved the picture and the audio to Downloads/shisu-ko-mining" } : { ok: true };
+  };
+  api.mergeCues([{ id: 0, start: 4, end: 7, text: "これはテスト字幕です" }]);
+  api.state.videoId = "abcdef1234";
+  api.state.video = { currentTime: 5, paused: true, videoWidth: 1920, videoHeight: 1080 };
+  api.state.activeCueId = 0;
+  api.state.syncInFlight = true; // the answer is handed in below
+  for (const status of ["unreachable", "off"]) {
+    sent.length = 0;
+    api.mineCurrent();
+    const { nonce } = api.state.mining;
+    assert.equal(api.state.mining.frame, "data:image/jpeg;base64,RlJBTUU=", "drawn while the video shows the line");
+    api.takeMined({ mined: [{ seq: 0, nonce, ok: false, status, message: "Anki is not running or AnkiConnect is not installed", note: null }], mined_next: 1 });
+    assert.equal(api.state.mining, null);
+    await settled();
+    assert.deepEqual(plain(sent.filter((m) => m.type === "saveMine")), [{ type: "saveMine", videoId: "abcdef1234", cue: { start: 4, end: 7 }, frame: "data:image/jpeg;base64,RlJBTUU=" }], status);
+    assert.equal(api.state.toastEl.textContent, "No Anki to mine into: saved the picture and the audio to Downloads/shisu-ko-mining");
+  }
+  // Anki there but the mine refused (no card today, an AnkiConnect error): nothing is saved.
+  sent.length = 0;
+  for (const status of ["no_note", "error"]) {
+    api.mineCurrent();
+    api.takeMined({ mined: [{ seq: 1, nonce: api.state.mining.nonce, ok: false, status, message: "why", note: null }], mined_next: 2 });
+  }
+  await settled();
+  assert.equal(sent.filter((m) => m.type === "saveMine").length, 0);
+  // The switch turned off while the answer was on its way: the answer ends the mine, nothing is saved.
+  api.mineCurrent();
+  api.state.settings.enabled = false;
+  api.takeMined({ mined: [{ seq: 2, nonce: api.state.mining.nonce, ok: false, status: "unreachable", message: "why", note: null }], mined_next: 3 });
+  assert.equal(api.state.mining, null);
+  await settled();
+  assert.equal(sent.filter((m) => m.type === "saveMine").length, 0);
+  api.state.settings.enabled = true;
+  // A video that cannot be drawn (DRM, or no frame yet) still saves the audio: the frame is null.
+  api.state.video = { currentTime: 5, paused: true, videoWidth: 0, videoHeight: 0 };
+  api.mineCurrent();
+  assert.equal(api.state.mining.frame, null);
+});
+
 test("a mine is given up when the cues change, the server is gone or it never answers", async () => {
   const { api, sandbox } = loadContent();
   await settled();

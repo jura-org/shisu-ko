@@ -129,6 +129,7 @@ function stubElement(tag) {
   if (tag === "canvas") {
     el.getContext = () => ({ drawImage: () => {} });
     el.toBlob = (cb) => cb(null);
+    el.toDataURL = (type) => `data:${type};base64,RlJBTUU=`; // "FRAME"
   }
   return el;
 }

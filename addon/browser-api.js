@@ -88,6 +88,11 @@
     for (const name of ["create", "clear"]) browser.notifications[name] = promiseMethod(chromeApi.notifications, name);
     browser.notifications.onClicked = chromeApi.notifications.onClicked;
   }
+  // The no-Anki fallback's save (saveMine in background.js).
+  if (chromeApi.downloads) {
+    browser.downloads = Object.create(chromeApi.downloads);
+    browser.downloads.download = promiseMethod(chromeApi.downloads, "download");
+  }
   if (chromeApi.permissions) {
     browser.permissions = Object.create(chromeApi.permissions);
     for (const name of ["contains", "request"]) browser.permissions[name] = promiseMethod(chromeApi.permissions, name);

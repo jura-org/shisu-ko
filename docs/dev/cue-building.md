@@ -526,7 +526,9 @@ The runtime-data invariant in full:
   it), plus what the Start
   button brought: `server-<port>.lock` (`hold_instance_lock()` /
   `try_lock()`, held from before the model load until the server exits), `server.log` (the POSIX
-  `launch()` appends the launched server's output there) and, on Windows only, the host
+  `launch()` appends the launched server's output there), `update-check.json` (`UpdateChecker`:
+  the day's release check, `{checked, error, failures, latest}`; `docs/dev/updates-and-release.md`)
+  and, on Windows only, the host
   manifests `native-messaging/shisuko.json` (Firefox) and `native-messaging/shisuko-chrome.json`
   (Chrome) (`manifest_path()`; Linux and macOS keep them under the browsers' own directories);
   and the experimental AMD engine's data: `config.json`'s `"engine"` (`"rocm"`, written only by a

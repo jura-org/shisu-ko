@@ -152,9 +152,8 @@ function stillOldHint(version) {
 }
 
 let updateInfo = null; // the background's last updateStatus answer
-let updateKey = null; // the server the answer was about (version and launcher flag), or "offline"
+let updateKey = null; // the server the answer was about (version, launcher flag, its check), or "offline"
 let updateAsked = 0; // questions asked so far: an answer overtaken by a later question is dropped
-let checkingUpdates = false; // the "Check for updates" click, until its result is in
 
 function readField(el) {
   if (el.type === "checkbox") return el.checked;
@@ -641,10 +640,9 @@ async function checkServer(first) {
   }
   if (updateFlow.state === "updating") judgeUpdate();
   renderStatus();
-  // The banner follows behind: the background's answer may wait on a check of GitHub, and the
-  // status line must not. Most ticks ask nothing (the server's answer is the same), and paint
-  // nothing more.
-  refreshUpdate(false).then((answered) => {
+  // The banner follows behind. Most ticks ask nothing (the server's answer is the same), and
+  // paint nothing more.
+  refreshUpdate().then((answered) => {
     if (answered) renderStatus();
   });
 }
@@ -776,27 +774,19 @@ function latestVersion() {
 }
 
 // Ask the background what the newest release means for the server this popup sees. The /health
-// answer travels with the question, so the server is not asked twice; and the question is only
-// asked when that answer changed (version, launcher flag, online or not) or after something this
-// popup did, since the verdict changes with nothing else. The first question of a popup document
-// also asks for the day's check of GitHub (the background decides whether one is due). The
-// background's record of an update under way is picked up here: a reopened popup resumes it.
-// Answers can cross: the first question may wait ten seconds on GitHub while the server comes
-// online and a second one, answered from the store at once, has already put the banner up; the
-// first answer then lands with "offline" and would take it down, so only the latest question's
-// answer counts, and the questions are numbered for that. The dropped first answer carried the
-// day's check, though, which the second one was answered without (the background reads the store
-// for a question without `check`, and a check under way is not in the store yet), so the popup
-// asks once more when it lands: nothing else would, while the server's answer stays the same.
-// Resolves to whether a new answer was taken, which is when the banner needs painting again.
-async function refreshUpdate(force) {
-  const key = health ? `${health.version}|${health.launcher}` : "offline";
-  const first = updateKey === null;
-  if (!force && key === updateKey) return false;
+// answer travels with the question, so the server is not asked twice, and carries the server's
+// update check (`latest`); the question is only asked when that answer changed (version, launcher
+// flag, the check, online or not), since the verdict changes with nothing else. The background's
+// record of an update under way is picked up here: a reopened popup resumes it. Answers can cross, so only the latest question's answer counts, and
+// the questions are numbered for that. Resolves to whether a new answer was taken, which is when
+// the banner needs painting again.
+async function refreshUpdate() {
+  const key = health ? JSON.stringify([health.version, health.launcher, health.latest]) : "offline";
+  if (key === updateKey) return false;
   updateKey = key;
   const asked = ++updateAsked;
-  const status = await browser.runtime.sendMessage({ type: "updateStatus", health, check: first }).catch(() => null);
-  if (asked !== updateAsked) return first ? refreshUpdate(true) : false;
+  const status = await browser.runtime.sendMessage({ type: "updateStatus", health }).catch(() => null);
+  if (asked !== updateAsked) return false;
   if (!status || typeof status !== "object" || !status.decision || typeof status.decision !== "object") return false;
   updateInfo = status;
   if (status.updating && typeof status.updating === "object" && updateFlow.state === "idle") watchUpdate(status.updating);
@@ -873,14 +863,11 @@ function renderUpdate() {
 
 function renderUpdateResult() {
   const line = document.getElementById("update-result");
-  const button = document.getElementById("check-updates");
-  if (button.disabled !== checkingUpdates) button.disabled = checkingUpdates;
   const info = updateInfo;
-  if (checkingUpdates) setHint(line, "Checking…", "");
-  else if (!info || typeof info.checkedAt !== "number") setHint(line, "", "");
-  else if (info.error) setHint(line, `Update check failed: ${info.error}` + (latestVersion() ? ` (last seen: ${latestVersion()})` : ""), "warn");
-  else if (latestVersion()) setHint(line, `Newest release: ${latestVersion()}, checked ${relativeTime(info.checkedAt)}`, "");
-  else setHint(line, `No release found, checked ${relativeTime(info.checkedAt)}`, "");
+  if (!info || typeof info.checkedAt !== "number") setHint(line, "", "");
+  else if (info.error) setHint(line, `The server's update check failed: ${info.error}` + (latestVersion() ? ` (last seen: ${latestVersion()})` : ""), "warn");
+  else if (latestVersion()) setHint(line, `Newest release: ${latestVersion()}, the server checked ${relativeTime(info.checkedAt)}`, "");
+  else setHint(line, `No release found, the server checked ${relativeTime(info.checkedAt)}`, "");
 }
 
 // The click on "Update": the background posts /update; the server answers and exits, its launcher
@@ -932,20 +919,6 @@ async function snoozeUpdateFromPopup() {
   updateInfo.snoozed = latest; // at once; the background's answer would say the same
   renderStatus();
   await browser.runtime.sendMessage({ type: "snoozeUpdate", version: latest }).catch(() => {});
-}
-
-// "Check for updates": a check now, whatever the age of the stored one, then the verdict again.
-async function checkForUpdatesFromPopup() {
-  if (checkingUpdates) return;
-  checkingUpdates = true;
-  renderUpdateResult();
-  try {
-    await browser.runtime.sendMessage({ type: "checkForUpdate", force: true }).catch(() => null);
-    await refreshUpdate(true);
-  } finally {
-    checkingUpdates = false;
-  }
-  renderStatus();
 }
 
 // The release page: every release's signed .xpi (and the Chrome zip, for an unpacked build; a
@@ -1024,7 +997,6 @@ async function init() {
   document.getElementById("update-now").addEventListener("click", updateServerFromPopup);
   document.getElementById("update-later").addEventListener("click", snoozeUpdateFromPopup);
   document.getElementById("update-release").addEventListener("click", openReleasePage);
-  document.getElementById("check-updates").addEventListener("click", checkForUpdatesFromPopup);
   browser.storage.onChanged.addListener(onStorageChanged);
   // The popup closes with a click outside it, and the document goes with it (see flushSave).
   window.addEventListener("pagehide", flushSave);

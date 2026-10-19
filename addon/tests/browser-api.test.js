@@ -195,20 +195,23 @@ test("sendNativeMessage granted after load reaches the bridge, on the old runtim
   assert.equal(browser.runtime.getURL(""), "chrome-extension://test/", "the rest of runtime still comes through");
 });
 
-// The update nudges: badge, notifications and the release page tab. Chrome's action and
-// notifications namespaces answer callbacks like the rest; the events pass through untouched.
-test("Chrome action and notifications are bridged to promises, with the events passed through", async () => {
+// The update nudges (badge, notifications), the no-Anki fallback's download and the release
+// page tab. Chrome's namespaces answer callbacks like the rest; the events pass through untouched.
+test("Chrome action, notifications and downloads are bridged to promises, with the events passed through", async () => {
   const { chrome } = loadChrome();
   const calls = [];
   const onClicked = { addListener() {} };
-  chrome.action = {
-    setBadgeText(details, callback) { calls.push(["setBadgeText", details]); callback(); },
-    setBadgeBackgroundColor(details, callback) { calls.push(["setBadgeBackgroundColor", details]); callback(); },
-  };
   chrome.notifications = {
     create(id, options, callback) { calls.push(["create", id, options]); callback(id); },
     clear(id, callback) { calls.push(["clear", id]); callback(true); },
     onClicked,
+  };
+  chrome.downloads = {
+    download(options, callback) { calls.push(["download", options]); callback(7); },
+  };
+  chrome.action = {
+    setBadgeText(details, callback) { calls.push(["setBadgeText", details]); callback(); },
+    setBadgeBackgroundColor(details, callback) { calls.push(["setBadgeBackgroundColor", details]); callback(); },
   };
   chrome.tabs.create = (options, callback) => { calls.push(["tabs.create", options]); callback({ id: 9 }); };
   const sandbox = { chrome, console, Promise, globalThis: null };
@@ -221,12 +224,14 @@ test("Chrome action and notifications are bridged to promises, with the events p
   assert.equal(await browser.notifications.create("shisuko-update", { type: "basic", title: "t", message: "m" }), "shisuko-update");
   assert.equal(await browser.notifications.clear("shisuko-update"), true);
   assert.equal(browser.notifications.onClicked, onClicked);
+  assert.equal(await browser.downloads.download({ url: "data:audio/mpeg;base64,AA==", filename: "shisu-ko-mining/a.mp3" }), 7);
   assert.deepEqual(await browser.tabs.create({ url: "https://example.com/" }), { id: 9 });
   assert.deepEqual(calls, [
     ["setBadgeText", { text: "1" }],
     ["setBadgeBackgroundColor", { color: "#5b6fb8" }],
     ["create", "shisuko-update", { type: "basic", title: "t", message: "m" }],
     ["clear", "shisuko-update"],
+    ["download", { url: "data:audio/mpeg;base64,AA==", filename: "shisu-ko-mining/a.mp3" }],
     ["tabs.create", { url: "https://example.com/" }],
   ]);
   // runtime.onStartup and onInstalled are Chrome's own, reachable through the prototype.
@@ -234,16 +239,14 @@ test("Chrome action and notifications are bridged to promises, with the events p
   assert.equal(browser.runtime.onStartup, chrome.runtime.onStartup);
 });
 
-test("a Chrome without action or notifications (a content script) gets neither wrapper", () => {
+test("a Chrome without action (a content script) gets no wrapper", () => {
   const { chrome } = loadChrome();
   delete chrome.action;
-  delete chrome.notifications;
   const sandbox = { chrome, console, Promise, globalThis: null };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   assert.doesNotThrow(() => new vm.Script(source).runInContext(sandbox));
   assert.equal(sandbox.browser.action, undefined);
-  assert.equal(sandbox.browser.notifications, undefined);
 });
 
 test("Chrome storage.local.remove is bridged too", async () => {

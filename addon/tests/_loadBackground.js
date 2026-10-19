@@ -69,10 +69,14 @@ function loadBackground(overrides = {}) {
   // null for `action` or `notifications` to play a browser (or a service worker) without the API.
   const badge = [];
   const notifications = [];
+  // The no-Anki fallback's saves: {url, filename, ...}, with the object URLs made and revoked.
+  const downloads = [];
+  const objectUrls = { made: [], revoked: [] };
   const action = overrides.action === null ? undefined : {
     setBadgeText: async (details) => badge.push(["text", details.text]),
     setBadgeBackgroundColor: async (details) => badge.push(["color", details.color]),
   };
+
   const notificationsApi = overrides.notifications === null ? undefined : {
     create: async (id, options) => {
       notifications.push({ id, ...options });
@@ -84,12 +88,32 @@ function loadBackground(overrides = {}) {
     },
     onClicked: { addListener: (fn) => listeners.onNotificationClicked.push(fn) },
   };
+  const downloadsApi = {
+    download: overrides.download || (async (options) => {
+      downloads.push(options);
+      return downloads.length;
+    }),
+  };
+  // Firefox's event page has URL.createObjectURL; Chrome's service worker has none, which a test
+  // plays with `objectUrl: false`.
+  const urlApi = overrides.objectUrl === false ? undefined : {
+    createObjectURL: (blob) => {
+      const url = `blob:test/${objectUrls.made.length}`;
+      objectUrls.made.push({ url, blob });
+      return url;
+    },
+    revokeObjectURL: (url) => objectUrls.revoked.push(url),
+  };
 
   const sandbox = {
     console,
     setTimeout: overrides.setTimeout || setTimeout,
     clearTimeout,
     AbortController,
+    Blob,
+    atob,
+    btoa,
+    URL: urlApi,
     fetch: overrides.fetch || (async () => {
       throw new Error("fetch() was not mocked for this test");
     }),
@@ -125,6 +149,7 @@ function loadBackground(overrides = {}) {
       },
       action,
       notifications: notificationsApi,
+      downloads: downloadsApi,
     },
   };
   sandbox.globalThis = sandbox;
@@ -134,7 +159,7 @@ function loadBackground(overrides = {}) {
   // manifest loads it before background.js in Firefox.
   new vm.Script(fs.readFileSync(SETTINGS_PATH, "utf8"), { filename: SETTINGS_PATH }).runInContext(sandbox);
   new vm.Script(source, { filename: SOURCE_PATH }).runInContext(sandbox);
-  // Top-level `const`/`let` (DEFAULT_SETTINGS, REQUEST_TIMEOUT_MS, sleep) live in the global
+  // Top-level `const`/`let` (DEFAULT_SETTINGS, REQUEST_TIMEOUT_MS, START_WINDOW_MS) live in the global
   // *lexical* environment, not as globalThis properties, but that environment is shared across
   // scripts run against the same context — so a second script can still see them by name and
   // copy them onto globalThis for the test harness to read.
@@ -142,7 +167,6 @@ function loadBackground(overrides = {}) {
     "globalThis.DEFAULT_SETTINGS = DEFAULT_SETTINGS; globalThis.REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_MS;" +
       " globalThis.NATIVE_TIMEOUT_MS = NATIVE_TIMEOUT_MS; globalThis.LAUNCHER_HINT = LAUNCHER_HINT;" +
       " globalThis.START_WINDOW_MS = START_WINDOW_MS;" +
-      " globalThis.GITHUB_LATEST_URL = GITHUB_LATEST_URL; globalThis.UPDATE_CHECK_MAX_AGE_MS = UPDATE_CHECK_MAX_AGE_MS;" +
       " globalThis.UPDATE_WINDOW_MS = UPDATE_WINDOW_MS; globalThis.UPDATE_POLL_MS = UPDATE_POLL_MS;" +
       " globalThis.SERVER_TOO_OLD_TEXT = SERVER_TOO_OLD_TEXT; globalThis.deckState = () => deckState;" +
       " globalThis.HOLD_TIMEOUT_MS = HOLD_TIMEOUT_MS; globalThis.FOCUS_STALE_MS = FOCUS_STALE_MS;" +
@@ -190,7 +214,7 @@ function loadBackground(overrides = {}) {
     return Promise.all(listeners.onWindowFocusChanged.slice().map((fn) => fn(windowId)));
   }
 
-  return { sandbox, storage, session, listeners, dispatch, closeTab, badge, notifications, startup, clickNotification, setNow,
+  return { sandbox, storage, session, listeners, dispatch, closeTab, badge, notifications, downloads, objectUrls, startup, clickNotification, setNow,
     activateTab, focusWindow };
 }
 

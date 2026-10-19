@@ -107,22 +107,53 @@ test("nativeMessaging is an optional permission, never a required one", () => {
 });
 
 // The update check tells the viewer about a release with a system notification, which needs the
-// permission at install: the popup cannot ask for it at browser start, when the check runs. The
-// extension never installs itself, so the manifest names no update_url, neither Firefox's nor
-// Chrome's: its updates come from addons.mozilla.org and, for a Chrome Web Store install, from the
-// store. It carries no key either: the store keeps the item's own and needs none, and it refuses
-// any key on a new item and one that is not the item's own on an update.
+// permission at install: the popup cannot ask for it at browser start, when the notification
+// goes out. The extension never installs itself, so the manifest names no update_url, neither
+// Firefox's nor Chrome's: its updates come from addons.mozilla.org and, for a Chrome Web Store
+// install, from the store. It carries no key: the store keeps the item's own and needs none, and
+// it refuses any key on a new item and one that is not the item's own on an update.
 test("notifications is a required permission, and the manifest names no update_url", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ADDON, "manifest.json"), "utf8"));
   assert.ok(manifest.permissions.includes("notifications"));
+  // By its full name, so a reviewer who searches the package for the API finds the call.
+  assert.match(fs.readFileSync(path.join(ADDON, "background.js"), "utf8"), /browser\.notifications\.create\(/, "the permission has its use");
   assert.equal(manifest.browser_specific_settings.gecko.update_url, undefined);
   assert.equal(manifest.update_url, undefined);
   assert.equal(manifest.key, undefined);
   const html = fs.readFileSync(path.join(ADDON, "popup.html"), "utf8");
   assert.match(html, /<div id="update-banner" class="banner notice hidden">/);
-  for (const id of ["update-text", "update-now", "update-later", "update-release", "check-updates", "update-result"]) {
+  for (const id of ["update-text", "update-now", "update-later", "update-release", "update-result"]) {
     assert.ok(html.includes(`id="${id}"`), `popup.html has no element with id="${id}"`);
   }
+  // The server checks for releases; the popup has no button that would make the extension check.
+  assert.ok(!html.includes('id="check-updates"'));
+});
+
+// The extension makes no request beyond the viewer's machine: the server asks GitHub for the
+// newest release (UpdateChecker in server.py) and the extension reads it from /health. The two
+// fetch() calls, apiRequest()'s and fetchClip()'s, go to the server's address (127.0.0.1 by
+// default), and the one https address in the code is the release page the popup opens in a tab
+// when the viewer clicks.
+test("no request leaves the machine: fetches go to the server, and no remote address but a link", () => {
+  const files = fs.readdirSync(ADDON).filter((name) => /\.(js|html)$/.test(name));
+  const fetches = [];
+  const remote = [];
+  for (const name of files) {
+    const text = fs.readFileSync(path.join(ADDON, name), "utf8");
+    for (const match of text.matchAll(/\bfetch\s*\(([^)]*)\)/g)) fetches.push(`${name}: ${match[1]}`);
+    for (const word of ["XMLHttpRequest", "sendBeacon", "WebSocket", "EventSource"]) {
+      assert.ok(!text.includes(word), `${name} uses ${word}`);
+    }
+    for (const match of text.matchAll(/https?:\/\/[^\s"'`)]+/g)) {
+      if (!/^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(match[0])) remote.push(`${name}: ${match[0]}`);
+    }
+  }
+  // apiRequest()'s and fetchClip()'s, both to the server's address.
+  assert.deepEqual(fetches, ["background.js: base + path, init", "background.js: base + path, { signal: controller.signal }"]);
+  assert.deepEqual(remote, ["popup.js: https://github.com/Multysquid/shisu-ko/releases/latest"]);
+  const popup = fs.readFileSync(path.join(ADDON, "popup.js"), "utf8");
+  assert.match(popup, /browser\.tabs\.create\(\{ url \}\)/, "the release page is opened in a tab, never fetched");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(ADDON, "settings.js"), "utf8").match(/serverUrl: ("[^"]+")/)[1]), "http://127.0.0.1:8790");
 });
 
 // The Anki sync after mining is the server's job (AnkiWatcher in server/server.py): the extension
@@ -141,17 +172,21 @@ test("the extension never calls AnkiConnect's sync, holds no alarms and no ankiA
 
 // Mining is the server's (Miner in server/server.py): it attaches the audio and the picture to the
 // note Yomitan made, and takes the viewer's own mine through /sync. The extension never writes to
-// Anki, keeps no Downloads fallback (0.21.1 and before saved the files there; `downloads` left the
-// manifest with it) and no matcher of its own. 0.21.1 stored `mineTarget` and
+// Anki and has no matcher of its own. Its one file save is the no-Anki fallback, saveMine() in
+// background.js, the only user of `downloads`. 0.21.1 stored `mineTarget` and
 // `mineFallbackDownload`; nothing reads them now.
-test("the extension never writes to Anki and saves no files", () => {
+test("the extension never writes to Anki, and only saveMine() saves files", () => {
   const files = fs.readdirSync(ADDON).filter((name) => /\.(js|html|json)$/.test(name));
   for (const name of files) {
     const text = fs.readFileSync(path.join(ADDON, name), "utf8");
     for (const action of ["updateNoteFields", "storeMediaFile", "addNote", "updateNote", "addNotes"]) {
       assert.doesNotMatch(text, new RegExp(`["'\`]${action}["'\`]`), `${name} calls AnkiConnect's ${action}`);
     }
-    assert.doesNotMatch(text, /\.downloads\b|"downloads"/, `${name} uses browser.downloads`);
+    if (name === "background.js") {
+      assert.equal(text.match(/browser\.downloads\.download\(/g).length, 2, "downloadBytes() alone saves, on either path");
+    } else if (name !== "browser-api.js" && name !== "manifest.json") {
+      assert.doesNotMatch(text, /\.downloads\b|"downloads"/, `${name} uses browser.downloads`);
+    }
     assert.doesNotMatch(text, /mineTarget|mineFallbackDownload|SHISUKO_MATCH|premine/, `${name} still knows the extension's own mining`);
   }
   assert.ok(!fs.existsSync(path.join(ADDON, "match.js")), "match.js moved to the server (best_cue in server.py)");

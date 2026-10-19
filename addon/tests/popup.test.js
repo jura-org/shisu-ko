@@ -169,7 +169,7 @@ function loadPopup(answer, runtimeURL = "moz-extension://test/", opts = {}) {
   const api = new vm.Script(
     "({ startFlow, resumeStart, checkServer, startServerFromPopup, startNotUpHint, START_NOT_UP_HINT, START_ELSEWHERE_HINT, OFFLINE_HINT," +
       " START_AVAILABLE, ON_FIREFOX, CHROME_STORE_ID, START_PERMISSION_HINT," +
-      " updateFlow, refreshUpdate, updateServerFromPopup, snoozeUpdateFromPopup, checkForUpdatesFromPopup, openReleasePage, relativeTime, renderStatus," +
+      " updateFlow, refreshUpdate, updateServerFromPopup, snoozeUpdateFromPopup, openReleasePage, relativeTime, renderStatus," +
       " UPDATE_LOST_HINT, stillOldHint, init, resetStyle, onChange, renderDeckOptions, refreshDecks, DECK_NONE_HINT, HEALTH_REFRESH_MS, DECKS_RETRY_MS })"
   ).runInContext(sandbox);
   // What the background's storage.local write of the settings looks like from the popup.
@@ -439,9 +439,6 @@ function updateBackground(state) {
           extensionVersion: "0.9.0",
         };
       }
-      case "checkForUpdate":
-        if (state.onCheck) state.onCheck();
-        return { latest: state.latest === undefined ? LATEST : state.latest, checkedAt: Date.now(), error: state.error || null };
       case "updateServer":
         return typeof state.update === "function" ? state.update() : state.update;
       case "snoozeUpdate":
@@ -475,16 +472,15 @@ test("a newer release than the server runs is offered in the banner", async () =
   assert.equal(popup.el("update-now").textContent, "Update");
   assert.equal(popup.el("update-later").hidden, false);
   assert.equal(popup.el("update-release").hidden, true);
-  // The first question of the popup asks for the day's check; the poll asks again only when the
-  // server's answer changes.
+  // The poll asks again only when the server's answer changes; no question asks for a check.
   const asked = bg.sent.filter((m) => m.type === "updateStatus");
   assert.equal(asked.length, 1);
-  assert.equal(asked[0].check, true);
+  assert.equal(asked[0].check, undefined);
   assert.deepEqual(asked[0].health, healthOf("0.8.0", true).data);
   await popup.checkServer(false);
   await settle();
   assert.equal(bg.sent.filter((m) => m.type === "updateStatus").length, 1);
-  assert.equal(popup.el("update-result").textContent, "Newest release: 0.9.0, checked 3 min ago");
+  assert.equal(popup.el("update-result").textContent, "Newest release: 0.9.0, the server checked 3 min ago");
 });
 
 test("a server not started by the launcher gets the explanation and no Update button", async () => {
@@ -572,7 +568,7 @@ test("no banner while the server is offline, and none for a server that says no 
   const { popup } = await open({ health: offline });
   assert.equal(popup.el("server-status").textContent, "Server offline");
   assert.equal(popup.el("update-banner").hidden, true);
-  assert.equal(popup.el("update-result").textContent, "Newest release: 0.9.0, checked 3 min ago");
+  assert.equal(popup.el("update-result").textContent, "Newest release: 0.9.0, the server checked 3 min ago");
   // The smoke fixture: {model, device, compute_type} and nothing else.
   const fixture = await open({ health: online });
   assert.equal(fixture.popup.el("server-status").textContent, "Server online");
@@ -583,19 +579,14 @@ test("no banner while the server is offline, and none for a server that says no 
   assert.equal(current.popup.el("update-banner").hidden, true);
   const none = await open({ health: healthOf("0.9.0", true), latest: null });
   assert.equal(none.popup.el("update-banner").hidden, true);
-  assert.equal(none.popup.el("update-result").textContent, "No release found, checked 3 min ago");
+  assert.equal(none.popup.el("update-result").textContent, "No release found, the server checked 3 min ago");
 });
 
-test("an answer overtaken by a later question is dropped, and the day's check it carried is asked for again", async () => {
-  // The popup opens while the server is offline and the day's check is due, with GitHub slow;
-  // the server comes online before GitHub answers, and the second question, answered from the
-  // store at once, puts the banner up. The first answer, "offline", then lands and must not undo
-  // it. But it is the only one that waited for the check, and the check found a newer release
-  // than the store held: without a third question, answered from the store now that the check
-  // is in it, the popup would show the old release and its stale date for as long as it lives,
-  // since no further question is asked while the server's answer stays the same.
-  const NEWER = { version: "0.9.1", tag: "v0.9.1", url: "https://github.com/Multysquid/shisu-ko/releases/tag/v0.9.1", xpi: null };
-  const state = { health: offline, latest: LATEST, checkedAt: Date.now() - 2 * 86400000 };
+test("an answer overtaken by a later question is dropped", async () => {
+  // The popup opens while the server is offline and its first question is slow to come back; the
+  // server comes online and the second question puts the banner up. The first answer, "offline",
+  // then lands and must not take it down.
+  const state = { health: offline, latest: LATEST };
   const bg = updateBackground(state);
   let releaseFirst;
   const held = new Promise((resolve) => {
@@ -603,14 +594,11 @@ test("an answer overtaken by a later question is dropped, and the day's check it
   });
   const questions = []; // the updateStatus questions in the order they were asked
   const popup = loadPopup(async (msg) => {
-    if (msg.type === "updateStatus") questions.push(msg);
-    if (msg.type === "updateStatus" && msg.check) {
-      await held;
-      // runCheck() in background.js writes the store before the answer goes out.
-      state.latest = NEWER;
-      state.checkedAt = Date.now();
-    }
-    return bg.answer(msg);
+    if (msg.type !== "updateStatus") return bg.answer(msg);
+    questions.push(msg);
+    const answer = bg.answer(msg);
+    if (questions.length === 1) await held;
+    return answer;
   });
   await popup.resumeStart();
   await popup.checkServer(true);
@@ -621,22 +609,37 @@ test("an answer overtaken by a later question is dropped, and the day's check it
   await settle();
   assert.equal(popup.el("update-banner").hidden, false);
   assert.equal(popup.el("update-text").textContent, "Shisu-ko 0.9.0 is available — the server runs 0.8.0.");
-  assert.equal(popup.el("update-result").textContent, "Newest release: 0.9.0, checked 2 days ago");
   releaseFirst();
-  await settle();
-  await settle();
   await settle();
   assert.equal(popup.el("update-banner").hidden, false, "the late answer is dropped");
   assert.equal(popup.el("update-now").hidden, false);
-  assert.deepEqual(questions.map((m) => m.check), [true, false, false], "the check's answer is asked for again, from the store");
-  assert.deepEqual(JSON.parse(JSON.stringify(questions[2].health)), healthOf("0.8.0", true).data);
-  assert.equal(popup.el("update-text").textContent, "Shisu-ko 0.9.1 is available — the server runs 0.8.0.");
-  assert.equal(popup.el("update-result").textContent, "Newest release: 0.9.1, checked just now");
+  assert.equal(questions.length, 2, "nothing is asked again");
   // The same server again asks nothing more, and the banner is still up.
   await popup.checkServer(false);
   await settle();
-  assert.equal(questions.length, 3);
+  assert.equal(questions.length, 2);
   assert.equal(popup.el("update-banner").hidden, false);
+});
+
+test("a new check in the server's /health is a new question, and the banner follows it", async () => {
+  // The server's daily check found 0.9.1 while the popup was open: the version and the launcher
+  // flag are the same, `latest` is not.
+  const NEWER = { version: "0.9.1", tag: "v0.9.1", url: "https://github.com/Multysquid/shisu-ko/releases/tag/v0.9.1", xpi: null };
+  const withCheck = (version, checked) => ({ ok: true, data: { ...healthOf("0.8.0", true).data, latest: { version, url: null, xpi: null, published: null, checked, error: null } } });
+  const state = { health: withCheck("0.9.0", 1), latest: LATEST };
+  const { popup, bg } = await open(state);
+  assert.equal(popup.el("update-text").textContent, "Shisu-ko 0.9.0 is available — the server runs 0.8.0.");
+  await popup.checkServer(false);
+  await settle();
+  assert.equal(bg.sent.filter((m) => m.type === "updateStatus").length, 1, "the same check asks nothing");
+  state.health = withCheck("0.9.1", 2);
+  state.latest = NEWER;
+  await popup.checkServer(false);
+  await settle();
+  const asked = bg.sent.filter((m) => m.type === "updateStatus");
+  assert.equal(asked.length, 2);
+  assert.equal(asked[1].health.latest.version, "0.9.1", "the question carries the server's check");
+  assert.equal(popup.el("update-text").textContent, "Shisu-ko 0.9.1 is available — the server runs 0.8.0.");
 });
 
 test("Not now hides the banner for the session and tells the background", async () => {
@@ -816,22 +819,16 @@ test("a start under way disables Update, and an update hides Start", async () =>
   assert.equal(bg.types().includes("updateServer"), false, "no update while a start is under way");
 });
 
-test("Check for updates asks for a check now and shows the result, or the failure", async () => {
-  let checks = 0;
-  const state = { health: healthOf("0.9.0", true), onCheck: () => checks++ };
-  const { popup, bg } = await open(state);
-  const before = bg.sent.length;
-  await popup.checkForUpdatesFromPopup();
-  assert.equal(checks, 1);
-  assert.deepEqual(bg.sent.slice(before).map((m) => m.type), ["checkForUpdate", "updateStatus"]);
-  assert.equal(bg.sent[before].force, true);
-  assert.equal(bg.sent[before + 1].check, false);
-  assert.equal(popup.el("check-updates").disabled, false);
-  assert.equal(popup.el("update-result").textContent, "Newest release: 0.9.0, checked 3 min ago");
+test("the result line shows the server's check, or its failure", async () => {
+  const state = { health: healthOf("0.9.0", true) };
+  const { popup } = await open(state);
+  assert.equal(popup.el("update-result").textContent, "Newest release: 0.9.0, the server checked 3 min ago");
   assert.equal(popup.el("update-result").className, "hint");
   state.error = "could not reach GitHub";
-  await popup.checkForUpdatesFromPopup();
-  assert.equal(popup.el("update-result").textContent, "Update check failed: could not reach GitHub (last seen: 0.9.0)");
+  state.health = healthOf("0.9.0", false); // a changed answer: the popup asks again
+  await popup.checkServer(false);
+  await settle();
+  assert.equal(popup.el("update-result").textContent, "The server's update check failed: could not reach GitHub (last seen: 0.9.0)");
   assert.equal(popup.el("update-result").className, "hint warn");
 });
 
