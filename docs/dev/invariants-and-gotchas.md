@@ -59,7 +59,9 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   A stored `ankiAutoSync` (0.20.0, 0.21.0) is inert, and a leftover `auto_sync` in `portal.json`
   is accepted with one warning (`RETIRED_KEYS`), where any other unknown key stops the portal.
 - The server attaches; the extension never writes to Anki. `Miner` in `server.py` fills a new
-  Yomitan note's empty picture and audio fields and never overwrites a filled one; the viewer's
+  Yomitan note's empty picture and audio fields and never overwrites a filled one but the
+  sentence: `grow_sentence()` replaces a fragment of the matched cue (Yomitan cuts at 。！？) with
+  the cue's row, Yomitan's `<b>` kept, and leaves any other text alone (see `mining.md`); the viewer's
   own mine reaches it as `/sync`'s `mine`, so mining added no endpoint. `addon/tests/settings.test.js`
   holds that no file in `addon/` names `updateNoteFields`, `storeMediaFile`, `addNote` or
   `browser.downloads`; the extension reads Anki for the word colours alone (see `mining.md`).
@@ -327,8 +329,9 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   `applySettings()` sets or clears it from the settings. Chrome's orphans keep running with a
   dead runtime and tear themselves down (`runtimeAlive()`, `shutdown()`).
 - A mined card's picture comes from YouTube's stream through yt-dlp (`FrameGrabber`), not from the
-  browser: a DRM-protected video, or one yt-dlp cannot resolve, gets the audio alone, and the
-  failure is kept for the stream's 4 hours, so it costs one resolve.
+  browser: a DRM-protected video, or one yt-dlp cannot resolve, gets the audio alone. A DRM,
+  live or no-stream verdict is kept for the stream's 4 hours; any other failed resolve for
+  `FRAME_RETRY` (10 min).
 - The native server and the container both use port 8790; run one at a time.
 - Firefox runs a `.cmd` native host through `cmd.exe /s /c "<host> <manifest path> <extension id>"`,
   Chrome through `cmd.exe` too, with the extension's origin and, on Windows,

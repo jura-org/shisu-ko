@@ -82,20 +82,24 @@ baseline the watcher takes at start is never handed over.
   a sync from another device: `notes_added()` queues none of them.
 - A sentence. A card whose sentence field (the setting, else `Sentence`) is empty names no line;
   the word alone is in every video, so such a card is left alone.
-- Something to fill. `targets()` is the picture and audio fields that exist and are empty (the
-  picture only with `--mine-picture on`); a card with none is left alone.
 - A match. `best_cue()` against each candidate's cues; the best of all wins (below). No match,
   nothing written; the debug log names the videos it tried.
+- Something to do. `targets()` is the picture and audio fields that exist and are empty (the
+  picture only with `--mine-picture on`); `sentence_update()` is the sentence grown to the cue
+  (below). A card with neither is left alone.
 
 `Miner.attach()` then cuts the clip (`Miner.clip()`: `App.clip()` with the client's `pad_ms` and
 `format`, waiting up to `ATTACH_CLIP_WAIT` for audio still being fetched, since the cues can be
 cached and the audio not), takes the picture (`Miner.picture()`, below), stores both with
 `storeMediaFile` under `shisuko_<video>_<start ms>.mp3` / `.jpg`, and writes the field
 names Anki reported back (it may lowercase a name or add a suffix). Right before
-`updateNoteFields` it reads the note again and drops every field that is no longer empty:
-Yomitan, the viewer or another tool may have filled one while the clip and the frame were made,
-and a filled field is never overwritten. A card that gets the audio and no picture says so in
-its message ("no picture").
+`updateNoteFields` it reads the note again and drops every field that no longer holds what it
+held at the first read: Yomitan, the viewer or another tool may have changed one while the clip
+and the frame were made, and that change is never overwritten. A card that gets the audio and no
+picture says so in its message ("no picture"), and one whose sentence grew says "sentence
+extended to the whole line". A manual mine that fails inside AnkiConnect is answered as an
+`error` against its nonce, never left to the tab's timeout; a picture that fails, at the resolve
+or mid-decode, costs the picture alone.
 
 Every field the settings name is looked up through `field_key(fields, name)` (words.js's
 `fieldKey`, ported): the name itself, trimmed, else the one field whose name differs from it in
@@ -106,8 +110,8 @@ case alone leave an inexact name unmatched rather than guessed. A card with neit
 names, the media-looking ones (`MEDIA_FIELD_NAME`) first, the first `MISSING_FIELDS_SHOWN` (8).
 
 Whatever the server writes into an HTML field goes through `escape_html()`: the stored file
-names inside `<img src="...">` and `[sound:...]`, and the sentence a manual mine puts into an
-empty sentence field. The newline `seam_for()` puts between two merged utterances becomes
+names inside `<img src="...">` and `[sound:...]`, the sentence a manual mine puts into an empty
+sentence field, and every text part `grow_sentence()` puts around its own `<b>`. The newline `seam_for()` puts between two merged utterances becomes
 `<br>`, since HTML would otherwise collapse it into a space.
 
 ### What the client sends, and what it hears (`/sync`)
@@ -128,7 +132,8 @@ sends it with every `/sync` until the log answers its nonce; the server queues a
 (`App.queue_mine()`, `Session.mine_nonces`), so a lost answer costs a resend, never a second
 write. `Miner.mine_now()` takes the cue by id, refuses one whose `session` token is no longer the
 session's (the cue ids restarted), and writes it into the newest note of `findNotes("added:1")`,
-filling empty fields the same way, plus an empty sentence field the settings name. It marks the
+filling empty fields and growing the sentence the same way, plus an empty sentence field the
+settings name. It marks the
 note handled, so the automatic attach leaves it alone. A tab gives a mine up when its cues are
 dropped, when the server is unreachable, and after `MINE_TIMEOUT_MS` (90 s; a server older than
 0.22.0 never answers).
@@ -161,8 +166,20 @@ second signal to fall back on. Whisper punctuates a fluent narrator barely at al
 and a clause that was never displayed. The VAD is a worse witness, not a better one: Silero cuts
 at 300 ms of silence, a breath, and that narrator ran 14.26 s across three cues between breaths.
 
-Until 0.21.1 the extension also grew Yomitan's sentence field to the whole cue when Yomitan had
-cut inside it. That overwrote a filled field, which the server never does, so it is gone.
+Yomitan's sentence grows to the cue, never past it (`grow_sentence()`, the port of 0.21.1's
+`extendSentenceField()`; `test_mining.py` holds its old cases). Yomitan cuts the sentence it puts
+on a card out of the line on screen at 。！？, so a cue holding two sentences gives the card one
+of them. When the card's sentence, normalised as the matcher does, is a strict piece of the cue,
+the field gets the cue's text, escaped, with Yomitan's `<b>` around the same word (plain when the
+word cannot be found in the raw text). Anything else, the whole cue already or text the viewer
+wrote, is left alone. It is the one write into a filled field, and it is safe for the same
+reason: only text that the cue itself contains is ever replaced, and only by that cue.
+
+A merged cue can hold two utterances either side of the newline `seam_for()` put between them,
+and Yomitan ends its sentence at that newline, so the grow stops at the row the fragment came
+from. `match_normalize()` strips whitespace, so the seam is invisible to the comparison and
+`grow_sentence()` splits on it itself; without that it put the other speaker's line on the card,
+which is the one thing the seam exists to prevent.
 
 ### Matching a card to its subtitle (`best_cue()` in `server.py`)
 
@@ -205,8 +222,9 @@ asks yt-dlp, with `Fetcher.ytdlp_options()` (the cookies and JavaScript runtime 
 uses) and `FRAME_FORMAT` (H.264 up to 720p, else the best up to 720p), for one stream URL;
 `frame_jpeg()` opens it with PyAV, seeks to the time and encodes the first frame at or after it
 with PyAV's own MJPEG encoder (`encode_jpeg()`, the portal's code). A URL is kept per video for
-`FRAME_STREAM_TTL` (4 h); a failed resolve is kept as long, so a DRM-protected video (`has_drm`)
-or one YouTube refuses costs one resolve, not one per card. A kept URL that no longer opens and
+`FRAME_STREAM_TTL` (4 h). A verdict (`FrameUnavailable`: DRM via `has_drm`, a live stream, no
+stream up to 720p) is kept as long, so it costs one resolve, not one per card; any other failure
+(YouTube's bot check, the network) is kept for `FRAME_RETRY` (10 min) and then tried again. A kept URL that no longer opens and
 is older than `FRAME_FRESH` (120 s) has expired: one fresh resolve, and that answer stands. A
 live stream gets no picture: its past frames are not there to seek to. `--mine-picture off`
 builds the miner without a grabber, and nothing is resolved.

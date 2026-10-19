@@ -319,8 +319,10 @@ sentence and word against the transcript of the video you are watching, so a car
 lines later, or while the video kept playing, still gets the right audio and picture.
 
 The server only touches a card made in the last three minutes, while a video was syncing, whose
-sentence matches one of that video's lines. It fills only empty fields and never overwrites one,
-reads the card again right before writing, and judges each card once. Several cards appearing at
+sentence matches one of that video's lines. It fills only empty fields, with one exception: when
+Yomitan cut the card's sentence short at a 。 or ！ inside the line, the server writes the whole
+line in its place, keeping Yomitan's bold word. It reads the card again right before writing,
+leaves a field you changed meanwhile alone, and judges each card once. Several cards appearing at
 once (an import, a sync from another device) are left alone, and so is a card without a sentence.
 A card that matches no line is left alone too; the server log says why. Turn the watching off
 with **Auto-attach to new Yomitan cards** in the popup; the shortcut and the pickaxe keep working
@@ -338,16 +340,17 @@ type lacks the fields). Field names default to `Picture` and `SentenceAudio`, as
 Japanese mining note types, and match whatever case your note type writes them in (`picture` and
 `sentenceAudio` in Eminent); change them in the popup when yours are named differently. The popup
 sends them to the server with every `/sync`. An optional sentence field is filled with the
-subtitle text by a mine by hand, and only when it is empty, so it never overwrites what Yomitan
-wrote. Yomitan's sentence is no longer grown to the whole line: that would overwrite a filled
-field. An optional word field names the field holding the expression, used to tell two similar
+subtitle text by a mine by hand, and only when it is empty. A sentence Yomitan cut short grows to
+the whole line, by hand or automatically, but only when it is a piece of that line: text of your
+own is never touched. An optional word field names the field holding the expression, used to tell two similar
 lines apart and, by the [word colours](#word-colours), to read each card's word; left empty, the
 note's first field is read.
 
 **The picture.** The server takes it from YouTube's own stream, not from the browser: it resolves
 an H.264 stream of 720p at most through yt-dlp, with the same cookies as the audio download, once
 per video, and keeps it 4 hours; PyAV decodes the frame. A DRM-protected video, or one yt-dlp
-cannot resolve, gets the audio alone. Before 0.22.0 the browser drew the frame, which failed on
+cannot resolve, gets the audio alone; a resolve that failed for any reason but DRM is tried again
+after 10 minutes. Before 0.22.0 the browser drew the frame, which failed on
 DRM videos as well; now a video the browser could draw but yt-dlp cannot resolve gets no picture
 either. `--mine-picture off` attaches the audio alone, and `--mine off` stops the server writing
 to Anki at all (see [Server options](#server-options)). A live stream's card gets its audio and no

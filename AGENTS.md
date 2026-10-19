@@ -161,8 +161,11 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   `anki_sync: {state, last, error}`. The extension's `enabled` has no say in it. Detail:
   `docs/dev/server-runtime.md`, "How the Anki sync after mining works".
 - The server attaches; the extension never writes to Anki. `Miner` in `server.py` gives a note
-  Yomitan made its line's audio and picture, in empty fields only, never overwriting one; the
-  viewer's own mine reaches it as `/sync`'s `mine`. The extension reads Anki for the word colours
+  Yomitan made its line's audio and picture, in empty fields only. The one write into a filled
+  field is `grow_sentence()`: a sentence that is a fragment of the matched cue (Yomitan cuts at
+  。！？) becomes the cue's row, escaped, with Yomitan's `<b>` kept and never past the newline
+  seam; any other text stays. A field that changed between the first read and the write is never
+  written. The viewer's own mine reaches it as `/sync`'s `mine`. The extension reads Anki for the word colours
   alone; `addon/tests/settings.test.js` holds that no file in `addon/` names `updateNoteFields`,
   `storeMediaFile`, `addNote` or `browser.downloads`. `--mine auto|off` decides it, off by default
   in the container unless `--anki-url` is given. Detail: `docs/dev/mining.md`.
@@ -286,7 +289,8 @@ and `entry_point()`, `run_probe_gpu()`, `server/amd_setup.py`. Launcher rules th
 (`best_cue()`, the port of 0.21.1's `match.js`, `MIN_SIMILARITY` 0.6) and `Miner.attach()` writes
 its empty fields; `Miner.mine_now()` takes `/sync`'s `mine`; `FrameGrabber` takes the picture from
 YouTube's stream. A mined card gets exactly the cue: `Miner.clip()` cuts that cue's start to end,
-and cues are never rejoined by `seg`. In `content.js`, `ankiForSync()` builds `/sync`'s `anki`,
+`grow_sentence()` grows Yomitan's fragment to that cue and no further, and cues are never
+rejoined by `seg`. In `content.js`, `ankiForSync()` builds `/sync`'s `anki`,
 `mineCue()` / `pendingMine()` send a mine until `takeMined()` reads its answer, and `minedNote`
 tells the background a note's deck.
 
@@ -465,8 +469,9 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
   `.shisuko-outside` first. Chrome's
   orphans keep running and shut themselves down (`runtimeAlive()`).
 - A mined card's picture comes from YouTube's stream through yt-dlp (`FrameGrabber`), not from
-  the browser: a DRM-protected video, or one yt-dlp cannot resolve, gets the audio alone, and the
-  failure is kept for the stream's 4 hours, so it costs one resolve.
+  the browser: a DRM-protected video, or one yt-dlp cannot resolve, gets the audio alone. A DRM,
+  live or no-stream verdict is kept for the stream's 4 hours; any other failed resolve for
+  `FRAME_RETRY` (10 min), so a bot check or a network blip does not cost the afternoon's pictures.
 - The native server and the container both use port 8790; run one at a time.
 - Firefox and Chrome run a `.cmd` native host through `cmd.exe`: the wrapper must print nothing
   (`@echo off` first), the host must accept the browsers' arguments (Firefox's two, Chrome's origin
