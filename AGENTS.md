@@ -95,7 +95,7 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   `retry_in` to an errored session's answer only. Detail: `docs/dev/server-runtime.md`.
 - The add-on never installs itself: no `update_url`, no `.xpi` download or install
   (`addon/tests/settings.test.js`); its updates come from addons.mozilla.org. The extension makes
-  no remote request: its one `fetch()` goes to the server (`apiRequest()`), and the release page
+  no remote request: its `fetch()` calls go to the server (`apiRequest()`, `fetchClip()`), and the release page
   is a link the popup opens on a click (`settings.test.js`, and `scripts/browser-smoke.mjs`'s
   request log). The server's daily anonymous `GET` of GitHub's `releases/latest` (`UpdateChecker`,
   reported as `/health`'s `latest`; `--update-check off`, `SHISUKO_NO_UPDATE_CHECK`) is the only

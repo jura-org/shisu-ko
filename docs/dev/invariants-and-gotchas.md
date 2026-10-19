@@ -84,8 +84,8 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   the same set.
 - The add-on never installs itself: no `update_url` in the manifest, no `.xpi` download or
   install (`addon/tests/settings.test.js` enforces the manifest); its updates come from
-  addons.mozilla.org. The extension makes no remote request: its one `fetch()` is
-  `apiRequest()`'s, to the server's address (127.0.0.1 by default), and the release page is a
+  addons.mozilla.org. The extension makes no remote request: its two `fetch()` calls,
+  `apiRequest()`'s and `fetchClip()`'s, go to the server's address (127.0.0.1 by default), and the release page is a
   link it opens in a tab when the viewer clicks (`addon/tests/settings.test.js` holds both, and
   `scripts/browser-smoke.mjs` logs every request the browser makes). The update check is the
   server's: `UpdateChecker`'s anonymous `GET` of
