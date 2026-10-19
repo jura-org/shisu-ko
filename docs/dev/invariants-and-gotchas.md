@@ -47,6 +47,22 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   without `SHISUKO_NO_UPDATE` (`App.update_blocker()`); otherwise it answers
   `{ok: true, restarting: true, version}` and the process exits with `EXIT_UPDATE` (4). The
   server never spawns `update.py` and never downloads a release itself; the launcher does.
+- Anki sync after mining is the server's job; no client calls AnkiConnect `sync`. The extension is
+  a thin client of the server, and 0.20.0's sync in the extension needed the `alarms` permission
+  (a timer dies with a stopped event page), which held 0.21.0 at the Chrome Web Store's review;
+  the portal had a second copy of the same schedule. `AnkiWatcher` in `server.py` sees every new
+  note, whoever made it, and syncs on one thread, so two syncs never overlap. Its query is
+  `added:2`, not `added:1`: Anki's day boundary empties `added:1`, and a note made seconds before
+  it would leave the query before the next look found it. Its first answer is the baseline, never
+  synced for. `addon/tests/settings.test.js` holds that `addon/` names no `sync` action, no
+  `alarms` and no `ankiAutoSync`; `portal/tests/test_portal.py` that the portal names no `sync`.
+  A stored `ankiAutoSync` (0.20.0, 0.21.0) is inert, and a leftover `auto_sync` in `portal.json`
+  is accepted with one warning (`RETIRED_KEYS`), where any other unknown key stops the portal.
+- The extension's permissions are pinned to the 0.19.1 lists by `ALLOWED_PERMISSIONS` in
+  `scripts/tests/build.test.mjs`, for both built manifests, host permissions and content-script
+  matches included. A new permission or host permission sends a release to the Chrome Web Store's
+  manual review; the owner's rule is to add none and to remove one that falls out of use. A change
+  to the list is a deliberate edit, with the `docs/amo/` texts changed to match.
 - The add-on never installs itself: no `update_url` in the manifest, no `.xpi` download or
   install (`addon/tests/settings.test.js` enforces the manifest); its updates come from
   addons.mozilla.org. Its one remote request is the anonymous `GET` of
@@ -118,9 +134,7 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   still find one), no known word marked (Alt+Shift+K, `markKnown()`, would find one in them too and
   write the setting), no status badge switched (Alt+Shift+H), no `cardStatus` asks for the word
   colours' deck index (`wordColoursOn()` in `content.js` includes `enabled`, and the poll runs
-  from `syncTick()`), so no request reaches Anki from a YouTube tab, and no Anki sync
-  (`ankiSyncOn()` in `background.js` includes `enabled`; switching it off clears a planned sync and
-  its alarm). Only the toggle command
+  from `syncTick()`), so no request reaches Anki from a YouTube tab. Only the toggle command
   itself keeps working: the command listener in `content.js` returns for every other command
   while `enabled` is false.
 - The overlay lives in the page's DOM, where any script on youtube.com can dispatch events on

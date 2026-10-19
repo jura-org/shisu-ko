@@ -1,6 +1,6 @@
-# Server runtime: live streams, models, the Apple GPU, the Start button, the update step
+# Server runtime: live streams, models, the Apple GPU, the Start button, the update step, the Anki sync
 
-The parts of the server that are not cue building. Read the matching section before changing `LiveFollower`, `switch_model_if_wanted()`, the Kitsune engine (`server/kitsune_engine.py`, `load_kitsune_model()`, `server/kitsune_setup.py`), `server/native_host.py`, `server/update.py`, `POST /update`, the launchers, the experimental AMD engine (`rocm_engine()`, `server/amd_setup.py`) or any way out of the server process (`hard_exit()`, `finish()`).
+The parts of the server that are not cue building. Read the matching section before changing `LiveFollower`, `switch_model_if_wanted()`, the Kitsune engine (`server/kitsune_engine.py`, `load_kitsune_model()`, `server/kitsune_setup.py`), `server/native_host.py`, `server/update.py`, `POST /update`, the launchers, `AnkiWatcher`, the experimental AMD engine (`rocm_engine()`, `server/amd_setup.py`) or any way out of the server process (`hard_exit()`, `finish()`).
 
 ## How live streams work
 
@@ -595,6 +595,60 @@ Tests: `server/tests/test_update.py` drives the real git against a bare reposito
 `update.py` never touches the AMD engine's side folder (below), and no launcher runs
 `amd_setup.py`: an engine installed from older pins keeps running until setup, or
 `amd_setup.py` run by hand, offers to update it.
+
+## How the Anki sync after mining works
+
+A card reaches AnkiWeb, and so Anki on the phone, without anyone pressing Sync, whatever made it:
+Yomitan with the extension, the phone portal, Anki itself. The server does it alone
+(`AnkiWatcher`); no client tells it anything and no client calls AnkiConnect's `sync`. 0.20.0 and
+0.21.0 ran the same schedule twice, in the extension (which needed the `alarms` permission, and
+that held 0.21.0 at the Chrome Web Store) and in the portal.
+
+The watcher is one daemon thread, started by `main()` once the HTTP socket is bound
+(`start_anki_watcher()`). Each turn (`step()`) looks at Anki when the look is due and syncs when
+the sync is due, then sleeps until the next of the two:
+
+- A look (`poll()`) is `findNotes` with `added:2` every `ANKI_POLL` (15 s). The first answer is the
+  baseline (`seen`): notes from before the start are never synced for. After that, ids not in
+  `seen` are new; `seen` becomes the answer, so it stays two days long. Two days, not one: Anki's
+  day boundary empties `added:1`, and a note made seconds before it would leave the query before
+  the next look; a note that leaves `added:2` was seen long ago. The boundary itself never counts
+  as new notes, since only ids that appear count.
+- The schedule (`note_added()`) is the clients' old one: the first new note after a quiet spell
+  syncs `ANKI_SYNC_FIRST` (60 s) later, and notes found in that minute ride along; a note found
+  after a sync began goes with the next one, `ANKI_SYNC_REPEAT` (30 s) after that start, so steady
+  mining syncs every 30 s; once a sync's 30 s pass without a new note, the round is over. A sync
+  runs on the watcher's own thread, so two never overlap. A look right before a sync counts the
+  notes it carries, for the log; a look right after one finds the notes made while it ran, which
+  go with the next sync at once when its 30 s have passed (`during_sync`).
+- A failed sync (`anki_sync_failure()`) keeps its notes owed and is tried again after
+  `ANKI_SYNC_BACKOFF` (1, 2, then 5 minutes, the last step repeating). AnkiConnect's "sync: auth
+  not configured" (Anki not signed in to AnkiWeb) and "Sync status ... not one of" (Anki wants a
+  one-way full sync confirmed) only the user can mend: the watcher halts until the next new note.
+- Anki closed: a look that gets no answer doubles the wait between looks up to `ANKI_POLL_MAX`
+  (60 s) and logs one line when the state changes, never one per look. A sync due then fails as
+  "Anki is not running" and backs off like any other failure.
+
+The log says what happened: "anki sync: watching http://127.0.0.1:8765 (12 note(s) from today and
+yesterday taken as synced)", "anki sync: 2 new note(s), syncing", "anki sync: done in 0.4 s",
+"anki sync failed: not signed in to AnkiWeb; not retried until the next new note". `/health`
+carries `anki_sync: {state, last, error}` (`status()`): `state` is `off`, `starting`, `watching`,
+`pending`, `syncing`, `halted` or `unreachable`; `last` is the wall time in ms of the last sync
+that went through; `error` why the last sync, or the last look, failed. The portal shows it in
+Settings > Anki.
+
+Requests (`anki_connect()`) use `http.client`, not urllib, which adds a `Content-Type` to every
+POST; AnkiConnect requests go without one. The server sends no `Origin`, and AnkiConnect treats a
+request without one as a local program's: it answers it without asking, so the server never calls
+`requestPermission`, which only browser origins need. An AnkiConnect with an `apiKey` set refuses
+the server, which sends no key; that shows as the look's error.
+
+`--anki-sync auto|off` (auto) and `--anki-url` (`http://127.0.0.1:8765`) decide it
+(`resolve_anki_sync()`). Inside the Docker image (`in_container()`) the default is off unless
+`--anki-url` names an Anki, because 127.0.0.1 there is the container. The extension's master
+switch has no say: it governs what the extension does on YouTube pages, and the server learns
+nothing from it. Tests: `server/tests/test_anki_sync.py`, on a fake clock and a fake AnkiConnect,
+and the request's headers against a local fake server; they never reach a real Anki.
 
 ## How the AMD engine works (experimental)
 

@@ -352,15 +352,18 @@ mining by hand saves the files to Downloads instead (can be turned off).
 **Downloads.** With **Send screenshot and audio to** set to Downloads, the files land in
 `Downloads/shisu-ko-mining/`, ready to drag into any card.
 
-**Sync with AnkiWeb.** A minute after Shisu-ko fills a card, it asks Anki to sync (AnkiConnect's
-`sync`), so the card is on your phone without pressing Sync. Cards made in that minute go with it;
-while you keep mining, the next sync follows 30 s after the one before began, and once 30 s pass
-without a new card it stops. Anki must be signed in to AnkiWeb. A failed sync is tried again after
-1, 2 and then every 5 minutes while cards are waiting; "not signed in" and a full sync Anki wants
-you to confirm wait for your next card instead. The popup's Mining section says when the last sync
-went through, or why it did not; nothing else ever interrupts you. Turn it off with **Sync Anki
-after mining**; the master switch off cancels a planned sync too. The phone portal syncs the same
-way on its own; when both mine at once each may sync, and Anki runs the two one after the other.
+**Sync with AnkiWeb.** The server watches Anki and asks it to sync (AnkiConnect's `sync`) a
+minute after a new card appears, so the card is on your phone without pressing Sync. It does not
+matter what made the card: Yomitan with the extension, the phone portal, or Anki itself. Every 15 s
+the server asks AnkiConnect for the notes added today and yesterday; cards that were there when it
+started never count. Cards made in that minute go with the sync; while you keep mining, the next
+sync follows 30 s after the one before began, and once 30 s pass without a new card it stops. Anki
+must be signed in to AnkiWeb. A failed sync is tried again after 1, 2 and then every 5 minutes
+while cards are waiting; "not signed in" and a full sync Anki wants you to confirm wait for your
+next card instead. With Anki closed the server looks once a minute and logs one line. Nothing ever
+interrupts you; the server log says what happened, and the portal's Settings > Anki shows the last
+sync. `--anki-sync off` turns it off (see [Server options](#server-options)). The extension itself
+never syncs and has no switch for it.
 
 DRM-protected videos block screenshots; the audio clip still works. The Shisu-ko server uses
 port 8790 precisely so that AnkiConnect can keep its default 8765.
@@ -533,12 +536,10 @@ computer; the subtitles below it centre the line being said and light up its wor
 spoken. Drag the bar above the buttons to move through the video; the list shows the line you will land
 on. Tap a word for its dictionary entry, tap a definition to pick it, and Mine adds the card
 with that sentence, its audio and a picture of the video. The first Mine asks which deck and note
-type to use, and guesses what each field gets from its name; Settings > Anki changes it. A minute
-after a card is added, the portal asks Anki to sync with AnkiWeb, on the extension's rule (see
-[Sentence mining](#sentence-mining)); **Sync Anki after mining** in Settings > Anki turns it off,
-and the line under it says how the last sync went (`"auto_sync": false` in
-`~/.shisu-ko/portal.json` fixes the switch off). The list
-of videos remembers how far you got, on every device. How it works, and its security model:
+type to use, and guesses what each field gets from its name; Settings > Anki changes it. The
+server syncs Anki with AnkiWeb a minute after the card appears (see
+[Sentence mining](#sentence-mining)), and Settings > Anki shows when it last did, or why it could
+not. The list of videos remembers how far you got, on every device. How it works, and its security model:
 [docs/dev/portal.md](docs/dev/portal.md).
 
 ## Settings
@@ -546,7 +547,7 @@ of videos remembers how far you got, on every device. How it works, and its secu
 ![Popup, dark theme](docs/images/popup-dark.png)
 
 The switch in the header is the master switch. Off means nothing happens on YouTube pages: no
-overlay, no requests to the server, no Anki watching or syncing, no word colours and no key handling, until
+overlay, no requests to the server, no Anki watching, no word colours and no key handling, until
 it is switched on again (Alt+Shift+S flips it too). The status line beside the switch says whether the server
 answers, and with which model and device; while it does not answer, a **Start server** button
 on that line launches it with the server's default options (Firefox and the Chrome Web Store
@@ -576,7 +577,6 @@ age of the daily check, and the line under it keeps the result ("Newest release:
 | Left/Right jump between subtitles | Arrow keys move between cues instead of seeking five seconds |
 | Transcript panel | List of all cues so far, with jump and mine buttons |
 | Auto-attach to new Yomitan cards | Watches AnkiConnect and fills the new card by itself; off means Alt+Shift+M or the pickaxe |
-| Sync Anki after mining | A minute after a card is filled, asks Anki to sync with AnkiWeb, every 30 s while mining goes on; the line under it says how the last sync went. Needs Anki signed in to AnkiWeb, see [Sentence mining](#sentence-mining) |
 | Colour words by their Anki card | Colours each word of a line by the state of its card in the deck below: green learned, yellow learning, orange suspended, red new; green for your known words and, as the three switches under More word colour options say, green for particles and katakana words and blue for names and Latin text; other words keep the text colour. Needs Anki with AnkiConnect, see [Word colours](#word-colours) |
 | Deck | The deck whose cards are looked at. Automatic means the deck your last mined card went to; nothing is looked up before a card was mined or a deck chosen. The hint under it names the deck, or says what stands in the way |
 | Particles, katakana, names, known words | Under More word colour options, closed by default |
@@ -646,10 +646,10 @@ Firefox (addon/)                                 Local server (server/), http://
 |  - screenshot via <canvas>       |  GET /clip  |    windows at the playhead, then ahead of it   |
 +----------------------------------+ ----------> | 4. /clip cuts sentence audio from the source   |
         |                                        +------------------------------------------------+
-        | AnkiConnect (http://127.0.0.1:8765): storeMediaFile + updateNoteFields on the newest card,
-        | sync a minute later; findNotes + notesInfo on one deck for the word colours
+        | AnkiConnect (http://127.0.0.1:8765): storeMediaFile + updateNoteFields on the newest card;
+        | findNotes + notesInfo on one deck for the word colours
         v
-      Anki
+      Anki  <-- the server: findNotes every 15 s, sync a minute after new notes (--anki-sync)
 ```
 
 Why a local server instead of running the model in the browser: Whisper large-v3 has 1.5
@@ -763,6 +763,8 @@ sends the YouTube cookies of the browser chosen there (see [YouTube sign-in](#yo
 | `--lyrics off` | Transcribe a window in which the speech detector hears under a second of speech with the detector as before (blank when it heard nothing). The default `auto` transcribes such a window without the detector when its audio is not silent (sung lyrics, speech over music) and Whisper hears the target language in it, under stricter gates |
 | `--human-subtitles off` | Build every cue from Whisper alone and ask YouTube for no subtitle track. The default `auto` uses a Japanese track the video's creator uploaded: a line Whisper heard the same way takes the creator's text and line breaks with Whisper's timing, any other stretch stays Whisper's. Cues already cached stay as they are |
 | `--sentence-ends off` | Cut and merge lines on Whisper's own punctuation alone. The default `auto` writes the sentence mark Whisper left out where a word ending in a sentence-final expression (よね, です, ます, か, or a plain form) is followed by a pause, so a run-on line breaks where the speaker ended the sentence and a mined card gets that sentence and no more |
+| `--anki-sync off` | Never sync Anki. The default `auto` watches Anki through AnkiConnect and syncs it with AnkiWeb a minute after new notes appear, then every 30 s while they keep coming (see [Sentence mining](#sentence-mining)); `/health` reports how the last sync went. Off by default inside the Docker image, where 127.0.0.1 is the container, unless `--anki-url` is given |
+| `--anki-url http://127.0.0.1:8765` | AnkiConnect's address for that sync (the default shown) |
 | `--idle-minutes 30` | Release the decoded audio of a video nobody has synced for this long |
 | `--retry-after 30` | The longest wait between two attempts at a failed audio fetch (the waits start at 2 s and double; a private or removed video is not retried), and the wait before a model name that failed to download or load is tried again |
 | `--js-runtime deno` | JavaScript runtime for yt-dlp: auto, node, deno, bun, or name:path |
@@ -1037,6 +1039,15 @@ Windows:
   open while you watch, and close it (or run `down.cmd`) when you are done.
 
 The extension does not change between native and Docker; both listen on `127.0.0.1:8790`.
+
+The server's Anki sync after mining is off in the container: 127.0.0.1 there is the container
+itself, not the computer running Anki. To turn it on, add `--anki-url` with an address the
+container reaches Anki at to the `command:` line, for example
+`http://host.docker.internal:8765` (Docker Desktop; on Linux add
+`extra_hosts: ["host.docker.internal:host-gateway"]` to the service), and set AnkiConnect's
+`webBindAddress` to an address that answers there (`0.0.0.0` answers every network; keep it on a
+machine you trust, since AnkiConnect has no password unless you give it an `apiKey`, which the
+server does not send).
 
 ## Troubleshooting
 

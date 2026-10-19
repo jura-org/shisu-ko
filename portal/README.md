@@ -19,8 +19,7 @@ Options (`portal.py --help`):
 | `--config PATH` | `~/.shisu-ko/portal.json` | card settings that override the page's (optional) |
 | `--server`, `--yomitan`, `--anki` | `127.0.0.1:8790`, `:19633`, `:8765` | where the services are |
 
-A `portal.json` that fixes the card setup, for example (add `"auto_sync": false` to fix the sync
-after mining off):
+A `portal.json` that fixes the card setup, for example:
 
 ```json
 {
@@ -29,3 +28,7 @@ after mining off):
   "fields": { "Front": "{expression}", "Back": "{glossary}" }
 }
 ```
+
+The Shisu-ko server, not the portal, syncs Anki with AnkiWeb after mining; Settings > Anki shows
+how its last sync went. An `"auto_sync"` key left from 0.20.0 or 0.21.0 is ignored, with a warning
+at start.
