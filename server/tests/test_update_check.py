@@ -1,7 +1,7 @@
 """The update check: the server asks GitHub for the newest release once a day and reports it in /health.
 
 No test reaches GitHub: fetch_latest_release() takes a stand-in for its opener, and UpdateChecker
-a stand-in for the whole fetch. The version rules are background.js's, ported with its cases.
+a stand-in for the whole fetch.
 """
 from __future__ import annotations
 
@@ -32,26 +32,6 @@ RELEASE = {
 }
 LATEST = {"version": "0.9.0", "url": RELEASE["html_url"], "xpi": RELEASE["assets"][1]["browser_download_url"],
           "published": "2026-10-01T12:00:00Z"}
-
-
-# ---- versions: background.js's parseVersion and compareVersions, case for case
-
-@pytest.mark.parametrize("text, expected", [
-    ("0.9.0", (0, 9, 0)), ("v0.9.0", (0, 9, 0)), ("V1.2.3", (1, 2, 3)), ("0.10.0", (0, 10, 0)), ("0.9", (0, 9, 0)),
-    ("2", (2, 0, 0)), ("", (0, 0, 0)), (None, (0, 0, 0)), ("garbage", (0, 0, 0)), ("0.9.0-rc1", (0, 9, 0)),
-    ("a.b.c", (0, 0, 0)), (" 1.2.3 ", (1, 2, 3)), ("1.2.3.4", (1, 2, 3)), ("-1.2.3", (0, 2, 3)),
-])
-def test_parse_version_matches_the_extension(text, expected):
-    assert server.parse_version(text) == expected
-
-
-@pytest.mark.parametrize("a, b, expected", [
-    ("0.9.0", "0.8.0", 1), ("0.8.0", "0.9.0", -1), ("0.9.0", "v0.9.0", 0), ("0.10.0", "0.9.0", 1),
-    ("1.0.0", "0.99.99", 1), ("0.9", "0.9.0", 0), ("0.9.1", "0.9", 1), ("garbage", "0.0.1", -1), ("", "", 0),
-    ("0.9.0.1", "0.9.0", 0),
-])
-def test_compare_versions_matches_the_extension(a, b, expected):
-    assert server.compare_versions(a, b) == expected
 
 
 # ---- GitHub's answer

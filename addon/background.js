@@ -413,7 +413,6 @@ async function sessionSet(key, value) {
 
 // "0.9.0" or "v0.9.0" as three numbers; a missing or unreadable part counts as 0, so a tag with
 // a suffix still compares by what is in front of it and garbage sorts below every release.
-// server.py's parse_version() is a port (server/tests/test_update_check.py holds the same cases).
 function parseVersion(text) {
   const parts = String(text || "").trim().replace(/^v/i, "").split(".");
   return [0, 1, 2].map((i) => {

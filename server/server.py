@@ -5974,21 +5974,9 @@ def update_check_headers() -> dict:
     return {"Accept": "application/vnd.github+json", "User-Agent": f"Shisu-ko/{VERSION}"}
 
 
-def parse_version(text) -> tuple:
-    """background.js's parseVersion: "0.9.0" or "v0.9.0" as three numbers; a missing or unreadable part is 0."""
-    parts = re.sub(r"^v", "", str(text or "").strip(), flags=re.I).split(".")
-    numbers = []
-    for i in range(3):
-        match = re.match(r"\s*([+-]?\d+)", parts[i]) if i < len(parts) else None  # parseInt's reading
-        n = int(match.group(1)) if match else 0
-        numbers.append(max(n, 0))
-    return tuple(numbers)
-
-
-def compare_versions(a, b) -> int:
-    """-1, 0 or 1, as background.js's compareVersions orders the same two strings."""
-    va, vb = parse_version(a), parse_version(b)
-    return (va > vb) - (va < vb)
+def backoff_wait(failures: int) -> float:
+    """The wait after `failures` (one or more) failed checks in a row."""
+    return UPDATE_CHECK_BACKOFF[min(failures, len(UPDATE_CHECK_BACKOFF)) - 1]
 
 
 def release_from_api(data) -> Optional[dict]:
@@ -6108,7 +6096,7 @@ class UpdateChecker:
         last = checked / 1000
         if last > self.clock() + 60:
             return 0.0  # the clock went back past the last check: the record cannot say what is due
-        return last + (UPDATE_CHECK_BACKOFF[min(failures, len(UPDATE_CHECK_BACKOFF)) - 1] if failures else UPDATE_CHECK_EVERY)
+        return last + (backoff_wait(failures) if failures else UPDATE_CHECK_EVERY)
 
     def check(self) -> dict:
         verdict = self.fetch()
@@ -6121,8 +6109,7 @@ class UpdateChecker:
             self.record = record
         self.save(record)
         if record["error"]:
-            wait = UPDATE_CHECK_BACKOFF[min(record["failures"], len(UPDATE_CHECK_BACKOFF)) - 1]
-            log.info("update check failed: %s; trying again in %d min", record["error"], wait // 60)
+            log.info("update check failed: %s; trying again in %d min", record["error"], backoff_wait(record["failures"]) // 60)
         else:
             log.info("update check: asked GitHub; %s", self.describe(record))
         return record
@@ -6132,10 +6119,7 @@ class UpdateChecker:
         latest = record["latest"]
         if not latest:
             return "no release published"
-        newest = latest["version"]
-        if compare_versions(newest, VERSION) > 0:
-            return f"Shisu-ko {newest} is out (this server runs {VERSION}): {latest.get('url') or LATEST_RELEASE_URL}"
-        return f"the newest release is {newest}, this server runs {VERSION}"
+        return f"the newest release is {latest['version']}, this server runs {VERSION}"
 
     def step(self) -> float:
         """Check when that is due; the seconds until the thread looks again."""

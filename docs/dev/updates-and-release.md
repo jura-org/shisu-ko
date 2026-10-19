@@ -67,9 +67,8 @@ no `.xpi` handling; every GitHub release carries an `.xpi` AMO signed for self-d
   `extension`: `newer` when latest > `browser.runtime.getManifest().version`, else `current`.
   `serverInfo(health)` reads `version` and `launcher` from `/health`, null when missing.
   `popup.js` keeps copies of `parseVersion`, `compareVersions`, `UPDATE_SHUTDOWN_MS` and
-  `UPDATE_WINDOW_MS`; `addon/tests/popup-copies.test.js` keeps them equal. `server.py`'s
-  `parse_version()` / `compare_versions()` are ports, held to the same cases in
-  `server/tests/test_update_check.py`; the server uses them for its log line alone.
+  `UPDATE_WINDOW_MS`; `addon/tests/popup-copies.test.js` keeps them equal. The server compares
+  no versions: its log line names both and leaves the verdict to the extension.
 - Ask. `applyBadge()` sets the toolbar badge (`action.setBadgeText` "1", `BADGE_COLOR`
   `#5b6fb8`, never the alert red; no permission needed) for `newer`, `cannot`, `behind` or a
   newer extension and clears it otherwise; `setBadge()` skips a call that would change nothing
@@ -141,10 +140,10 @@ no `.xpi` handling; every GitHub release carries an `.xpi` AMO signed for self-d
 
 Messages: `updateStatus {health?}` -> `{latest, checkedAt, error, server: {version, launcher} |
 null, decision, snoozed, updating, extensionVersion}`; `updateServer` -> as above;
-`snoozeUpdate {version}` -> `{ok}`. There is no `checkForUpdate` any more.
+`snoozeUpdate {version}` -> `{ok}`.
 
 Tests: `server/tests/test_update_check.py` (the request's headers, the day's cache, the backoff,
-the off switch, `/health`'s shape, the version ports), `addon/tests/background.test.js`,
+the off switch, `/health`'s shape), `addon/tests/background.test.js`,
 `addon/tests/popup.test.js`, `addon/tests/browser-api.test.js`, `addon/tests/settings.test.js`
 (`notifications` required and used; every `fetch()` to the server, and no remote address but
 the release page link), `addon/tests/popup-copies.test.js`, and `scripts/browser-smoke.mjs`,
@@ -188,7 +187,7 @@ next patch version. `.github/workflows/amo-xpi.yml` (every three hours for the n
 or by hand with a tag) puts the signed `.xpi` on a release that has none, checked against the
 release's own Firefox zip the same way, and then deletes the unsigned stand-in (0.14.1's only
 file is its listed one). It tells the two apart by name: AMO names its file
-`shisu_ko-<version>.xpi`, and `releaseFromApi()` in `background.js` skips a name ending in
+`shisu_ko-<version>.xpi`, and `release_from_api()` in `server.py` skips a name ending in
 `-unsigned.xpi` too, so the popup's `latest.xpi` is always a file regular Firefox installs.
 `fetch` exits 3 while AMO has not signed the version and 4 (`NO_FILE_EXIT`) when AMO has no file
 for it; `amo-xpi.yml` asks `status` which: `missing` is a warning, `disabled` fails the run.
