@@ -4171,16 +4171,12 @@ class AnkiWatcher:
     thread that calls it. Only that thread changes the state; status() is read by /health.
     """
 
-    def __init__(self, call, url: str = ANKI_DEFAULT_URL, clock=time.monotonic, wall=time.time,
-                 poll: float = ANKI_POLL, poll_max: float = ANKI_POLL_MAX, first: float = ANKI_SYNC_FIRST,
-                 repeat: float = ANKI_SYNC_REPEAT, backoff=ANKI_SYNC_BACKOFF):
+    def __init__(self, call, url: str = ANKI_DEFAULT_URL, clock=time.monotonic, wall=time.time):
         self.call, self.url, self.clock, self.wall = call, url, clock, wall
-        self.poll_every, self.poll_max = poll, poll_max
-        self.first, self.repeat, self.backoff = first, repeat, tuple(backoff)
         self.lock = threading.Lock()
         self.seen: Optional[set] = None  # note ids already counted; None until the first answer (the baseline)
         self.next_poll = clock()
-        self.poll_wait = poll  # grows while Anki does not answer
+        self.poll_wait = ANKI_POLL  # grows while Anki does not answer
         self.reachable: Optional[bool] = None  # None: not asked yet
         self.poll_error: Optional[str] = None  # why the last look failed
         self.due: Optional[float] = None  # clock time of the next sync; None: none planned
@@ -4203,7 +4199,7 @@ class AnkiWatcher:
             if not isinstance(ids, list):
                 raise RuntimeError("findNotes did not answer a list")
         except Exception as exc:  # noqa: BLE001 - Anki closed or busy: look again later, quietly
-            self.poll_wait = min(self.poll_max, self.poll_wait * 2)
+            self.poll_wait = min(ANKI_POLL_MAX, self.poll_wait * 2)
             self.next_poll = now + self.poll_wait
             text = "AnkiConnect is not answering" if isinstance(exc, AnkiUnreachable) else f"AnkiConnect: {str(exc)[:160]}"
             if self.reachable is not False or text != self.poll_error:
@@ -4211,8 +4207,8 @@ class AnkiWatcher:
             with self.lock:
                 self.reachable, self.poll_error = False, text
             return 0
-        self.poll_wait = self.poll_every
-        self.next_poll = now + self.poll_every
+        self.poll_wait = ANKI_POLL
+        self.next_poll = now + ANKI_POLL
         current = set(ids)
         with self.lock:
             back = self.reachable is False
@@ -4240,11 +4236,11 @@ class AnkiWatcher:
             self.halted = False
             if self.due is not None:
                 return
-            repeat = None if self.started is None else self.started + self.repeat
+            repeat = None if self.started is None else self.started + ANKI_SYNC_REPEAT
             if during_sync and repeat is not None:
                 self.due = max(now, repeat)  # made while a sync ran: the next one, 30 s after that start
             else:
-                self.due = repeat if repeat is not None and now < repeat else now + self.first
+                self.due = repeat if repeat is not None and now < repeat else now + ANKI_SYNC_FIRST
 
     # ---- syncing
 
@@ -4276,7 +4272,7 @@ class AnkiWatcher:
                 if halt:
                     log.info("anki sync failed: %s; not retried until the next new note", text)
                 else:
-                    wait = self.backoff[min(self.failures, len(self.backoff)) - 1]
+                    wait = ANKI_SYNC_BACKOFF[min(self.failures, len(ANKI_SYNC_BACKOFF)) - 1]
                     self.due = now + wait
                     log.info("anki sync failed: %s; trying again in %d s", text, wait)
         # Notes made while it ran are found by a look right after it.
@@ -4302,7 +4298,7 @@ class AnkiWatcher:
                 wait = self.step()
             except Exception:  # noqa: BLE001 - the watcher never takes the server down
                 log.exception("anki sync: unexpected error")
-                wait = self.poll_max
+                wait = ANKI_POLL_MAX
             time.sleep(wait)
 
     def status(self) -> dict:
