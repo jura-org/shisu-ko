@@ -246,3 +246,24 @@ test("a Chrome without action or notifications (a content script) gets neither w
   assert.equal(sandbox.browser.action, undefined);
   assert.equal(sandbox.browser.notifications, undefined);
 });
+
+// The Anki sync's wake-up call: an alarm outlives a stopped service worker, a timer does not.
+test("Chrome alarms are bridged to promises, with onAlarm passed through, and only where they exist", async () => {
+  const { browser, chrome, calls } = loadChrome();
+  assert.equal(browser.alarms, undefined, "no alarms namespace, no wrapper");
+  const onAlarm = { addListener() {} };
+  chrome.alarms = {
+    create(name, info, callback) { calls.push(["alarms.create", name, info]); callback(); },
+    clear(name, callback) { calls.push(["alarms.clear", name]); callback(true); },
+    onAlarm,
+  };
+  const sandbox = { chrome, console, Promise, globalThis: null };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  new vm.Script(source).runInContext(sandbox);
+  const bridged = sandbox.browser;
+  await bridged.alarms.create("sync", { when: 5 });
+  assert.equal(await bridged.alarms.clear("sync"), true);
+  assert.equal(bridged.alarms.onAlarm, onAlarm);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.slice(-2))), [["alarms.create", "sync", { when: 5 }], ["alarms.clear", "sync"]]);
+});

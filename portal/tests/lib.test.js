@@ -298,3 +298,14 @@ test("closing the dictionary sheet never does anything else", () => {
   assert.equal(L.dismissAction({ ...closed, wordCue: null, sinceCloseMs: 350 }), "swallow");
   assert.equal(L.dismissAction({ ...closed, wordCue: 8, sinceCloseMs: 600 }), "pass"); // later: an ordinary tap
 });
+
+test("ankiSyncText says when the last sync went through, or why not, and nothing otherwise", () => {
+  const clock = () => "12:04";
+  assert.equal(L.ankiSyncText(null, clock), "");
+  assert.equal(L.ankiSyncText({ auto_sync: false, last: { at: 1, ok: true } }, clock), "");
+  assert.equal(L.ankiSyncText({ auto_sync: true, last: null }, clock), "");
+  assert.equal(L.ankiSyncText({ auto_sync: true, running: true, last: null }, clock), "Anki sync: syncing…");
+  assert.equal(L.ankiSyncText({ auto_sync: true, last: { at: 1, ok: true } }, clock), "Anki sync: last 12:04");
+  assert.equal(L.ankiSyncText({ auto_sync: true, last: { at: 1, ok: false, error: "not signed in to AnkiWeb" } }, clock),
+    "Anki sync failed: not signed in to AnkiWeb");
+});

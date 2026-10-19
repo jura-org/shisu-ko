@@ -1,5 +1,6 @@
 0.7.0 was the last version on this listing; 0.8.0 to 0.14.0 came out on GitHub only (https://github.com/Multysquid/shisu-ko/releases has every release's full notes). What changed since 0.7.0:
 
+- 0.20.0: Anki syncs with AnkiWeb a minute after you mine a card (a switch turns it off).
 - 0.19.2: no more boxes with a hex code in a subtitle, in cached ones too.
 - 0.19.1: subtitles for speech the voice detector misses (shouting, a quietly mixed video) and songs running past a window; a sentence's first words stay with it; videos watched before are checked again while the server is idle.
 - 0.19.0: a phone portal (server/portal.cmd, .sh): subtitles, lookups, mining on a phone.
@@ -10,7 +11,6 @@
 - 0.15.0: Whisper can run on an AMD graphics card (experimental): a Radeon RX 7000/9000 or Ryzen AI GPU (RX 6800/6900 on Linux too; 0.17.1: others at own risk, --ignore-old-graphics). Setup remembers the browser whose YouTube cookies every server start sends, for "Sign in to confirm you're not a bot".
 - 0.14.6: mining finds the fields in any case, and a card without them names its own. "Particles count as known" also covers the copula and everyday grammar words.
 - 0.14.5: word colours show only what your Anki deck says. Particles (は, です), names and Latin text are coloured without a card only by switches, off by default, in a new "More word colour options" drawer.
-- 0.14.4: speech Whisper skipped at the start of a stretch of audio is transcribed and filled in; videos watched before are transcribed again.
-- 0.14.0: your own list of known words (Alt+Shift+K adds the word under the pointer); particles, katakana words, names and Latin text can be coloured; a card for a noun also colours its する forms; the pitch overbar reads Yomitan's pitch graph; 0.14.3: Alt+Shift+H hides the status badge.
+- 0.14.0: your own list of known words (Alt+Shift+K adds the word under the pointer); particles, katakana words, names and Latin text can be coloured; a card for a noun also colours its する forms; the pitch overbar reads Yomitan's pitch graph; 0.14.3: Alt+Shift+H hides the status badge; 0.14.4: speech Whisper skipped is filled in.
 - 0.10 to 0.13: word colours by each word's Anki card state and a pitch accent overbar, both off by default; setup asks which Whisper model to download; only the tab you are watching is transcribed; subtitles pause while the speech is not Japanese; sung lyrics get subtitles; lines are whole sentences, never cut inside a word; a mined card gets the line on screen; Left steps back a line; the popup offers to update the server, and tells you when a newer release is out.
 - Also: live streams; a master switch (Alt+Shift+S); the Whisper model picked in the popup; any installed font for the subtitles; a new card matched to its subtitle by sentence and word, with the screenshot and audio prepared while the line plays; Chrome support.
