@@ -17,11 +17,14 @@ player, so cues line up whatever latency the viewer is watching at.
 
 Endpoints
   GET  /health   -> {ok, version, model, default_model, model_loading, model_error, models, device, compute_type,
-                     engine, language, launcher, anki_sync: {state, last, error}}
+                     engine, language, launcher, anki_sync: {state, last, error}}; ?decks=1 adds
+                     anki_decks: {ok, decks, seen, error}, Anki's deck names for the popup
   POST /sync     -> {ok, session, status, error, duration, title, live, covered, speech, cues, next, busy,
                      model, model_loading, model_error, heard, language_paused}; a body carrying the
                      extension's `anki` settings (or `mined_since`) also gets {mined, mined_next, anki_error}
-                     and may carry `mine`: {cue_id, nonce, session}, the viewer's own mine (Miner)
+                     and may carry `mine`: {cue_id, nonce, session}, the viewer's own mine (Miner); a body
+                     carrying `deck`: {name, word, pitch, since} also gets `deck` when its token moved
+                     (the word colours' rows, DeckIndexes)
   GET  /clip?video_id=..&start=..&end=..&format=mp3|wav -> audio clip of a sentence (the portal's mining)
   GET  /sessions -> the videos the server holds, for diagnostics
   POST /update   -> {ok, restarting, version}: the server exits with EXIT_UPDATE so that run.cmd / run.sh
@@ -5966,7 +5969,8 @@ class App:
         self.transcriber = Transcriber(self)
         self.transcriber.start()
 
-    def health(self) -> dict:
+    def health(self, decks: bool = False) -> dict:
+        """GET /health; `decks` (?decks=1, the popup's deck list) adds `anki_decks`, Anki's deck names."""
         with self.lock:
             error = self.model_error
             state = {
@@ -5981,9 +5985,13 @@ class App:
                 "engine": "kitsune" if getattr(self.model, "family", None) else "whisper",
             }
         watcher = self.anki_watcher
-        return {"ok": True, "version": VERSION, **state, "language": self.args.language,
-                "launcher": self.update_blocker() is None,
-                "anki_sync": watcher.status() if watcher else dict(ANKI_SYNC_OFF)}
+        out = {"ok": True, "version": VERSION, **state, "language": self.args.language,
+               "launcher": self.update_blocker() is None,
+               "anki_sync": watcher.status() if watcher else dict(ANKI_SYNC_OFF)}
+        if decks:
+            out["anki_decks"] = (self.decks.deck_names() if self.decks is not None
+                                 else {"ok": False, "error": DECK_OFF_TEXT, "seen": None, "offline": False})
+        return out
 
     def update_blocker(self) -> Optional[str]:
         """Why POST /update would achieve nothing, or None when run.cmd / run.sh would act on the exit.
@@ -6326,7 +6334,7 @@ class App:
         return {"retrying": True, "retry_in": round(max(0.0, due - now), 1)}
 
     def sync(self, video_id: str, url: str, t: float, since: int, model=None, words: bool = False,
-             anki=None, mine: Optional[dict] = None, mined_since: Optional[int] = None) -> dict:
+             anki=None, mine: Optional[dict] = None, mined_since: Optional[int] = None, deck=None) -> dict:
         """The /sync answer. `words` asks for each cue's word timings; without it no cue carries
         any, so a client that never asks sees exactly what it saw before the field existed.
 
@@ -6334,7 +6342,10 @@ class App:
         (mine_request()), `mined_since` its cursor into the session's mining log. A body with
         `anki` or `mined_since` is answered `mined` (the log's entries from the cursor on; none for
         a cursor of None, which asks only where the log stands), `mined_next` and, for settings
-        that did not validate, `anki_error`; every other answer is what it was before."""
+        that did not validate, `anki_error`; every other answer is what it was before.
+
+        `deck` asks for the word colours' deck (deck_request()): the answer carries `deck` only
+        when the client's `since` token is not the deck's (DeckIndexes.ask())."""
         self.request_model(model)
         settings, anki_error = None, None
         if anki is not None:
@@ -6379,9 +6390,23 @@ class App:
         # `mined_next`, so the next answer carries it, whatever cursor this request had.
         if mine is not None:
             self.queue_mine(s, mine)
+        if deck is not None:
+            answer = self.deck_answer(deck)
+            if answer is not None:
+                resp["deck"] = answer
         resp.update(self.model_state(model))
         self.maybe_evict()
         return resp
+
+    def deck_answer(self, value) -> Optional[dict]:
+        """/sync's `deck`: the deck index's answer, or why there is none."""
+        try:
+            request = deck_request(value)
+        except ValueError as exc:
+            return {"token": "invalid", "status": "error", "error": f"invalid deck: {exc}"}
+        if self.decks is None:
+            return None if request["since"] == "off" else {"token": "off", "status": "off", "error": DECK_OFF_TEXT}
+        return self.decks.ask(request)
 
     def queue_mine(self, s: Session, mine: dict) -> None:
         """Hand a mine to the miner, once per nonce: the client sends it again with every /sync
@@ -6751,7 +6776,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = self.path.split("?", 1)[0]
         if path == "/health":
-            self._json(200, self.app.health())
+            # Only the popup's deck list asks for Anki's decks; every other /health is as before.
+            decks = parse_qs(urlsplit(self.path).query).get("decks") == ["1"]
+            self._json(200, self.app.health(decks=True) if decks else self.app.health())
         elif path == "/sessions":
             self._json(200, self.app.sessions_summary())
         elif path == "/clip":
@@ -6844,7 +6871,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"ok": False, "error": f"invalid mine: {exc}"})
             return
         # Only what the body carries: every other body reaches App.sync() exactly as before.
-        extra = {key: value for key, value in (("anki", body.get("anki")), ("mine", mine), ("mined_since", mined_since))
+        extra = {key: value for key, value in (("anki", body.get("anki")), ("mine", mine), ("mined_since", mined_since),
+                                               ("deck", body.get("deck")))
                  if value is not None}
         try:
             self._json(200, self.app.sync(video_id, str(body.get("url") or ""), t, since, model, words, **extra))
