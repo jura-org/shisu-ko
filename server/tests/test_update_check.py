@@ -119,7 +119,7 @@ def test_the_default_opener_carries_no_cookie_jar():
     (b"<html>not json</html>", {"error": "GitHub returned a non-JSON response"}),
     (json.dumps({"message": "Moved Permanently"}).encode(), {"error": "GitHub's answer names no release"}),
     (b" " * (server.UPDATE_CHECK_MAX_BYTES + 1), {"error": "GitHub's answer is too large"}),
-])
+], ids=["404", "403", "429", "500", "offline", "timeout", "not-json", "no-tag", "too-large"])  # never the 1 MiB body as an id
 def test_a_failed_fetch_is_an_error_never_a_raise(answer, expected):
     assert server.fetch_latest_release(Opener(answer)) == expected
 
