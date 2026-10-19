@@ -94,10 +94,14 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   the language refusal stays a `ready` session, never an error. `/sync` adds `retrying` and
   `retry_in` to an errored session's answer only. Detail: `docs/dev/server-runtime.md`.
 - The add-on never installs itself: no `update_url`, no `.xpi` download or install
-  (`addon/tests/settings.test.js`); its updates come from addons.mozilla.org. Its one remote
-  request is the anonymous `GET` of GitHub's `releases/latest` in `fetchLatestRelease()`, never with
-  a token, cookie or identifier. `notifications` stays a required permission. `docs/amo/` states
-  exactly this, so a change here changes them too. On Chrome, the package carries no `key` or
+  (`addon/tests/settings.test.js`); its updates come from addons.mozilla.org. The extension makes
+  no remote request: its one `fetch()` goes to the server (`apiRequest()`), and the release page
+  is a link the popup opens on a click (`settings.test.js`, and `scripts/browser-smoke.mjs`'s
+  request log). The server's daily anonymous `GET` of GitHub's `releases/latest` (`UpdateChecker`,
+  reported as `/health`'s `latest`; `--update-check off`, `SHISUKO_NO_UPDATE_CHECK`) is the only
+  update check, never with a token, cookie or identifier, and it downloads nothing. The extension
+  holds no `notifications` permission: a newer release is the toolbar badge and the popup's
+  banner. `docs/amo/` states exactly this, so a change here changes them too. On Chrome, the package carries no `key` or
   `update_url` (`scripts/tests/build.test.mjs`), a Web Store install is updated by the store
   (`CHROME_STORE_ID` in `popup.js`) and an unpacked build (the release's zip, `dist/chrome`) only
   by the viewer loading a newer one; this has no counterpart in `docs/amo/`, which is the AMO
@@ -183,8 +187,8 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   `addon/` for AnkiConnect's port and actions. Detail: `docs/dev/word-colours.md`.
 - The extension's permissions are pinned: `ALLOWED_PERMISSIONS` in `scripts/tests/build.test.mjs`
   holds both built manifests to the 0.19.1 lists less `downloads`, which went in 0.22.0 with the
-  Downloads fallback (`storage`, `tabs`, `notifications`; optional `nativeMessaging`; the YouTube
-  and loopback hosts). Never add a
+  Downloads fallback, and less `notifications`, which went in 0.24.0 with the update check
+  (`storage`, `tabs`; optional `nativeMessaging`; the YouTube and loopback hosts). Never add a
   permission or host permission: a new one sends a release to the Chrome Web Store's manual review
   (`alarms` held 0.21.0 there). Remove one that falls out of use, and edit the list on purpose.
 - Overlay handlers (`onMineClick`, `onTranscriptClick`, `onSubtitleEnter`, `onSubtitleLeave`, the
@@ -199,7 +203,7 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   cookies every download sends; the Docker image never takes the latter, `in_container()` is
   `SHISUKO_CONTAINER` only, since toolbox and distrobox share the home folder's Firefox; and
   `engine`, whose `"rocm"` only a passed `server.py --probe-gpu` writes), `server-<port>.lock`,
-  `server.log`, the AMD engine's `rocm/` (with its marker `shisuko-rocm.json`), `rocm-starts` and
+  `server.log`, `update-check.json` (`UpdateChecker`), the AMD engine's `rocm/` (with its marker `shisuko-rocm.json`), `rocm-starts` and
   `next-model`, `anki-deck.json` (the word colours' automatic deck, `DeckIndexes.save_seen()`),
   the portal's `portal-state.json` (positions, the card setup, paired devices'
   token hashes), `portal.json` (an optional card override) and `portal-thumbs/`, and, on Windows,
@@ -317,8 +321,9 @@ them, and the portal's `takeDeck()` / `fillCue()` do the same in the lyrics view
 before it: 領域まで reads `[領域]まで`. That is the owner's ruling; never re-add the rule that
 coloured particles with the word before them.
 
-**Updates and release** (`docs/dev/updates-and-release.md`). `checkForUpdate()`, `decideUpdate()`
-and `requestUpdate()` in `background.js`; `renderUpdate()` in `popup.js`; the workflows under
+**Updates and release** (`docs/dev/updates-and-release.md`). `UpdateChecker`,
+`fetch_latest_release()` and `start_update_check()` in `server.py`; `checkFromHealth()`,
+`noteHealth()`, `decideUpdate()` and `requestUpdate()` in `background.js`; `renderUpdate()` in `popup.js`; the workflows under
 `.github/workflows/`, the Chrome Web Store's `cws-listing.yml` and `cws-schedule.yml` among them,
 and `scripts/cws.mjs`.
 
@@ -477,9 +482,10 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
   `anki_connect()`: then AnkiConnect asks no `requestPermission`), find the newest card with
   `findNotes("added:1")`.
 - `data_collection_permissions` in the manifest requires `strict_min_version` 140 or later.
-- `notifications` is required, not optional: the start-up check has no popup to ask for a grant.
-  GitHub allows sixty unauthenticated API requests an hour per address, hence one check a day.
-  Never add a token.
+- GitHub allows sixty unauthenticated API requests an hour per address, hence the server's one
+  check a day, kept in `~/.shisu-ko/update-check.json` so a restart asks nothing, with a backoff
+  after a failure. Never add a token. The extension asks GitHub nothing and needs no
+  `notifications` permission: the badge, which needs none, took the notification's place.
 - Regular Firefox only keeps signed add-ons; unsigned builds are temporary installs only.
 - Firefox kills an updated or reloaded extension's content script without running its code; its
   overlay stays in the page, so `ensureOverlay()` removes every `.shisuko-root` and

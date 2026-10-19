@@ -596,6 +596,12 @@ Tests: `server/tests/test_update.py` drives the real git against a bare reposito
 `amd_setup.py`: an engine installed from older pins keeps running until setup, or
 `amd_setup.py` run by hand, offers to update it.
 
+The daily look for a newer release is a different thing from the update step: `UpdateChecker`
+asks GitHub's `releases/latest` once a day for the popup's badge and banner, reports it in
+`/health`'s `latest`, and downloads nothing; `update.py` is still the only code that does. Its
+cache, backoff and off switch are in `docs/dev/updates-and-release.md`, "How the update check
+works".
+
 ## How the Anki sync after mining works
 
 A card reaches AnkiWeb, and so Anki on the phone, without anyone pressing Sync, whatever made it:

@@ -22,8 +22,9 @@ sends each card's word, state and pitch accent back with the cues. The text stay
 inside inline spans that carry only two data attributes.
 
 Nothing is sent to us or to any third party. The extension only ever contacts youtube.com (as a
-content script), the local server and, for its update check, GitHub's
-public API (one anonymous GET, see PERMISSIONS). It contains no remote code, no
+content script) and the local server; it makes no remote request at all. The update check is
+the server's (one anonymous GET of GitHub's public API a day, see PERMISSIONS), reported to the
+extension in /health. It contains no remote code, no
 minified or generated code, no third-party libraries and no build step: the uploaded zip is the
 source, identical to the addon/ folder of https://github.com/Multysquid/shisu-ko (tag v<version>)
 but for the version line below.
@@ -102,9 +103,9 @@ The demo recording in the README shows the expected behaviour: https://github.co
    for example to "base", without restarting. Declining the permission only puts a hint on the
    status line.
 
-9. Optional, the update check: expand "Anki, clips and server" in the popup and click "Check for
-   updates". The line under it reads "Newest release: <release>, checked just now" (or why the
-   check failed, offline). With a server older than that release the popup shows a banner
+9. Optional, the update check: expand "Anki, clips and server" in the popup. The line at its
+   bottom reads "Newest release: <release>, the server checked <when>" (or why the server's
+   check failed, offline); the server checks soon after it starts. With a server older than that release the popup shows a banner
    "Shisu-ko <release> is available — the server runs <server's version>." with "Update" and
    "Not now", and the toolbar icon gets a badge. "Update" sends POST /update to the server;
    the server exits, run.sh runs the project's own update.py (git fast-forward) and starts it
@@ -143,8 +144,8 @@ The demo recording in the README shows the expected behaviour: https://github.co
 
 PERMISSIONS
 
-- storage: the settings (browser.storage.local, the known-words list among them) and the result
-  of the update check (below); browser.storage.session holds a few records for the browser
+- storage: the settings (browser.storage.local, the known-words list among them) and the last
+  update check the server reported (below); browser.storage.session holds a few records for the browser
   session (the launch and update records below). The "ankiDeckSeen" record 0.22.0 kept (the
   automatic deck's name) goes to the server once, in the first /sync that asks for the deck, and
   is then removed: the server keeps the automatic deck now.
@@ -157,34 +158,19 @@ PERMISSIONS
   script that draws the subtitles.
 - host permissions http://127.0.0.1/* and http://localhost/*: the companion server (port 8790),
   whose URL is a setting with this default.
-- notifications: three notifications, all created in background.js (ids shisuko-update,
-  shisuko-updated and shisuko-update-failed). "Shisu-ko <release> is available" / "The server
-  runs <server's version>. Click to update it now." when a newer release of the server is out
-  and the running server can update itself, at most once per release and browser session, and
-  only from the check at browser start (runtime.onStartup / onInstalled); a check from the
-  popup sets the badge and the banner and never notifies. "Shisu-ko updated to <version>" once
-  the server answers with the new version after an update, whether the popup's Update button
-  or the first notification asked for it. "Shisu-ko could not update the server" / the error,
-  only when the request set off by a click on the first notification fails (refused, or the
-  server offline), since no popup is open to say so. Clicking the first one runs the same
-  update as the popup's Update button; a click on the other two, and dismissing any of them,
-  does nothing. It is a required permission because the first notification comes from the
-  check at browser start, where no popup is open to ask for a grant. A failed check never
-  notifies.
-- The update check itself needs no permission: background.js fetches
-  https://api.github.com/repos/Multysquid/shisu-ko/releases/latest (GET, header Accept:
-  application/vnd.github+json, no cookies, no token, no account, nothing about the user or
-  the browser beyond what any HTTPS request carries), which GitHub answers with
-  Access-Control-Allow-Origin: *. It runs when the browser starts, when the extension is
-  installed or updated (runtime.onStartup / onInstalled) or when the popup opens, if the
-  stored result is more than a day old or the last check failed (checkIsFresh(): a failure,
-  offline or rate-limited, is tried again at the next of those occasions, one quick failure
-  each), so at most once a day by itself while the checks succeed, and on every click
-  of "Check for updates" in the popup; a profile that has never opened the popup makes no
-  request at all. The answer (release version, tag, page URL, .xpi URL, time of the check) is
-  kept in browser.storage.local under "updateCheck". The extension never downloads or installs
-  the .xpi: it links to the release page, and the manifest has no update_url, so updates of the
-  extension come from addons.mozilla.org.
+- No notifications permission (0.9.0 to 0.23.0 held one): a newer release is shown by the
+  toolbar badge (browser.action.setBadgeText "1", which needs no permission) and the popup's
+  banner.
+- The update check is the server's, not the extension's: server/server.py (UpdateChecker) sends
+  GET https://api.github.com/repos/Multysquid/shisu-ko/releases/latest (headers Accept:
+  application/vnd.github+json and User-Agent: Shisu-ko/<version>; no cookies, no token, no
+  account) soon after it starts and once a day after that, keeps the answer in
+  ~/.shisu-ko/update-check.json and reports it in /health as "latest" ({version, url, xpi,
+  published, checked, error}); --update-check off stops it. The extension reads that field from
+  the /health answers it already asks for and keeps the last one in browser.storage.local under
+  "serverLatest", for while the server is offline. Its one fetch() is apiRequest()'s, to the
+  local server. Nothing downloads or installs the .xpi: the popup links to the release page, and
+  the manifest has no update_url, so updates of the extension come from addons.mozilla.org.
 - nativeMessaging (optional_permissions; requested with browser.permissions.request from the
   click on the popup's "Start server" button, which is shown only while the companion server
   does not answer): background.js sends the one message {cmd: "start"} to the native-messaging
@@ -207,12 +193,10 @@ CODE THAT MAY NEED A WORD
   mine: {cue_id, nonce, session} until the server answers it (anki is the popup's field names,
   padding and clip format; the answer's mined lists what the server wrote, which the content
   script toasts; see docs/dev/mining.md), GET /health
-  (the popup's status line, every 2 s while it is open; once at browser start and at install
-  or update of the extension, from startupCheck(), for the badge and the start-up
-  notification; and, after a click on the update notification, every 3 s for up to 120 s
-  from watchUpdate(), with no popup open, to see the new version come up) and POST /update
-  with an empty body
-  (only from the popup's Update button or a click on the update notification; the server
+  (the popup's status line, every 2 s while it is open; and once at browser start and at install
+  or update of the extension, from startupCheck(), for the badge, once some server has answered
+  the profile) and POST /update with an empty body
+  (only from the popup's Update button; the server
   answers {ok, restarting, version} and exits so that its own launcher runs the project's
   update.py and starts it again, or 409 {ok: false, error} when it cannot). For the word
   colours (only while one of the two options is on; the "word colours" section of
@@ -228,13 +212,12 @@ CODE THAT MAY NEED A WORD
   popup does not start a second server while the first is still loading its model; the record
   is ignored past its deadline, cleared by a /health answer, replaced by the next launch, and
   gone with the browser session.
-- background.js, checkForUpdate()/updateServer(): the update check (above) and the update
-  request. Pure helpers compare versions (parseVersion, compareVersions, decideUpdate) and
-  the badge (browser.action.setBadgeText "1") follows the comparison; the notification is
-  created only by the check at browser start, and only when the server reports it was started
-  by its launcher ("launcher" in /health). browser.storage.session holds three small records for the browser session:
-  the version the notification was shown for, the version "Not now" was clicked for, and an
-  update under way ({requestedAt, from, to, deadline, down}, ignored 120 s after the
+- background.js, checkFromHealth()/updateServer(): the server's update check (above) and the
+  update request. Pure helpers compare versions (parseVersion, compareVersions, decideUpdate)
+  and the badge (browser.action.setBadgeText "1") follows the comparison; the Update button is
+  offered only when the server reports it was started by its launcher ("launcher" in /health).
+  browser.storage.session holds two small records for the browser session: the version "Not
+  now" was clicked for, and an update under way ({requestedAt, from, to, deadline, down}, ignored 120 s after the
   request), so a reopened popup follows the restart instead of asking for a second one;
   none of it is written to disk.
 - The content script never uses innerHTML or similar: youtube.com enforces Trusted Types, so
@@ -251,7 +234,8 @@ programs on the same computer that the user installed for this purpose (the comp
 and Anki), and what they receive (the id and playback position of the video being watched, and
 the Anki field names and clip settings the server mines with; the extension sends Anki nothing)
 is the add-on's stated primary function; what the server sends back for the word colours (one
-deck's words, card states and pitch accents) stays on the device, in memory. The one remote request, the anonymous release check against GitHub's public API
+deck's words, card states and pitch accents) stays on the device, in memory. The extension
+makes no remote request; the server's anonymous release check against GitHub's public API,
 described under PERMISSIONS, carries no data about the user, the browser or the videos
 watched. The privacy policy on the listing describes this in full.
 

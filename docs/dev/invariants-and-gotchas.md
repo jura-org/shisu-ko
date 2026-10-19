@@ -79,12 +79,17 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   to the list is a deliberate edit, with the `docs/amo/` texts changed to match.
 - The add-on never installs itself: no `update_url` in the manifest, no `.xpi` download or
   install (`addon/tests/settings.test.js` enforces the manifest); its updates come from
-  addons.mozilla.org. Its one remote request is the anonymous `GET` of
-  `https://api.github.com/repos/Multysquid/shisu-ko/releases/latest` in `fetchLatestRelease()`,
-  never with a token, cookie or identifier, and there is no second remote endpoint;
-  `notifications` stays a required permission (the start-up check notifies with no popup open
-  to ask for a grant). The privacy policy, description and reviewer notes in `docs/amo/` state
-  exactly this, so a change here changes them too. On Chrome, the package carries no
+  addons.mozilla.org. The extension makes no remote request: its one `fetch()` is
+  `apiRequest()`'s, to the server's address (127.0.0.1 by default), and the release page is a
+  link it opens in a tab when the viewer clicks (`addon/tests/settings.test.js` holds both, and
+  `scripts/browser-smoke.mjs` logs every request the browser makes). The update check is the
+  server's: `UpdateChecker`'s anonymous `GET` of
+  `https://api.github.com/repos/Multysquid/shisu-ko/releases/latest`, at most once a day, never
+  with a token, cookie or identifier, and nothing else; `/health` reports it as `latest`, and
+  the server never downloads or installs from it (the launcher's `update.py` does, through
+  `POST /update`). The extension holds no `notifications` permission: a newer release is the
+  toolbar badge and the popup's banner. The privacy policy, description and reviewer notes in
+  `docs/amo/` state exactly this, so a change here changes them too. On Chrome, the package carries no
   `update_url` and no `key`: the Chrome Web Store keeps the item's own key, and refuses a key on
   a new item and one that is not the item's own on an update (`scripts/tests/build.test.mjs`
   holds the built Chrome package the store receives, `addon/tests/settings.test.js` the source
@@ -323,12 +328,12 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   then takes the request as a local program's and asks no `requestPermission`, which only browser
   origins need (the server's `anki_connect()`). Find the newest card with `findNotes("added:1")`.
 - `data_collection_permissions` in the manifest requires `strict_min_version` 140 or later.
-- `notifications` is a required permission, not an optional one: the update notification is
-  created from the start-up check, where no popup is open to ask for a grant. The GitHub check
-  needs no host permission (`Access-Control-Allow-Origin: *`), but GitHub allows sixty
-  unauthenticated API requests an hour per address, shared with everything else on the
-  connection: hence one check a day, cached in `storage.local`, and the 403/429 text that asks
-  to try again in an hour. Never add a token.
+- GitHub allows sixty unauthenticated API requests an hour per address, shared with everything
+  else on the connection: hence the server's one check a day, cached in
+  `~/.shisu-ko/update-check.json` so restarts ask nothing, and a backoff after a failure (15 min,
+  1 h, 6 h). Never add a token. The extension asks GitHub nothing and needs no `notifications`
+  permission (0.9.0 to 0.23.0 held it for a start-up notification); the badge, which needs none,
+  took its place in 0.24.0.
 - Regular Firefox only keeps signed add-ons; unsigned builds are temporary installs only.
 - An update or reload kills Firefox's content script without running another line of it, then
   injects a fresh one into the open tabs. The dead instance's overlay stays in the player, frozen

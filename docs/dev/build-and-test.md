@@ -65,7 +65,11 @@ it, and toast the answer, and the popup's field names must reach the server in `
 `/health?decks=1`: the line must show the words in their card's colours and follow the delta, and
 the popup's deck list and hint must come from the server. The fixture AnkiConnect refuses every
 call, the stored settings name it under 0.22.0's `ankiUrl`, and the run fails on any request to
-it (the 0.22.0 extension fails there). The attach
+it (the 0.22.0 extension fails there). Since 0.24.0 the fixture `/health` carries `latest`, the
+server's update check, naming a release far ahead: the popup's banner and result line and the
+toolbar badge must show it. The run also logs every request the browser makes, the service
+worker's included (it must see a `/health`), and fails on any host but 127.0.0.1 and the routed
+YouTube page. The attach
 itself is the server's and is tested in `server/tests/test_mining.py` and `test_mining_sync.py`.
 
 ## Server tests
