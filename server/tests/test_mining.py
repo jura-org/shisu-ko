@@ -826,6 +826,42 @@ def test_frame_jpeg_decodes_the_frame_at_the_time(tmp_path):
         server.frame_jpeg(str(tmp_path / "missing.ts"), 1.0)
 
 
+def test_frame_jpeg_reads_a_stream_in_bounded_ranges(tmp_path):
+    """googlevideo trickles an open-ended range ("bytes=N-"); every request the decode makes names its end."""
+    av = pytest.importorskip("av")
+    if int(str(getattr(av, "ffmpeg_version_info", "0")).split(".")[0] or 0) < 8:
+        pytest.skip("FFmpeg before 8 has no request_size")
+    import http.server
+    import threading
+
+    path = tmp_path / "v.ts"
+    synthetic_video(path)
+    data, ranges = path.read_bytes(), []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            spec = self.headers.get("Range", "bytes=0-")
+            ranges.append(spec)
+            first, _, last = spec.removeprefix("bytes=").partition("-")
+            first, last = int(first), min(int(last) if last else len(data) - 1, len(data) - 1)
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {first}-{last}/{len(data)}")
+            self.send_header("Content-Length", str(last - first + 1))
+            self.end_headers()
+            self.wfile.write(data[first:last + 1])
+
+        def log_message(self, *args):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        assert server.frame_jpeg(f"http://127.0.0.1:{httpd.server_port}/v.ts", 1.0).startswith(b"\xff\xd8")
+    finally:
+        httpd.shutdown()
+    assert ranges and all(not spec.endswith("-") for spec in ranges), ranges
+
+
 def test_frame_time_is_a_little_into_the_line():
     assert server.frame_time(10.0, 12.0) == 10.75
     assert server.frame_time(10.0, 10.5) == 10.25

@@ -4722,6 +4722,11 @@ FRAME_FRESH = 120.0  # a stream URL this young is not re-resolved when it fails 
 # A resolve that raised (YouTube's bot check, the network) is tried again after this; a verdict
 # (DRM, live, no stream up to 720p) stands as long as a URL would.
 FRAME_RETRY = 600.0
+# FFmpeg's HTTP reader asks for "bytes=N-", and googlevideo trickles an open-ended range at about
+# 300 KB/s: one frame took 2.7-5 s, all of it waiting. Bounded ranges arrive at full speed (the
+# same frames in 0.2-0.6 s). 256 KB reads about 0.8 MB per frame, 1 MB about 2 MB, at the same
+# speed. FFmpeg 8 and later take this option; an older one ignores it.
+FRAME_REQUEST_SIZE = 256 * 1024
 
 
 class FrameUnavailable(Exception):
@@ -4756,7 +4761,7 @@ def frame_jpeg(source: str, t: float) -> bytes:
     except ImportError:
         raise FrameUnavailable("PyAV is not installed in this Python") from None
     try:
-        container = av.open(source, timeout=30)
+        container = av.open(source, timeout=30, options={"request_size": str(FRAME_REQUEST_SIZE)})
     except Exception as exc:  # noqa: BLE001 - av.error.* and OSError alike: the stream did not open
         raise FrameUnavailable(f"the video stream did not open ({exc})") from None
     with container:
