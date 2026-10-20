@@ -664,8 +664,8 @@ Firefox (addon/)                                 Local server (server/), http://
 +----------------------------------+   rows      | 5. the deck index: one deck's words and states |
                                                  +------------------------------------------------+
       Anki  <-- the server, through AnkiConnect (http://127.0.0.1:8765); the extension never calls it:
-                findNotes every 15 s (3 s while mining), storeMediaFile + updateNoteFields on a new
-                card's empty fields (--mine), sync a minute after new notes (--anki-sync), and
+                findNotes every 15 s (3 s while mining, 1 s paused), storeMediaFile + updateNoteFields
+                on a new card's empty fields (--mine), sync a minute after new notes (--anki-sync), and
                 findNotes + notesInfo on the word colours' deck every 30 s while a tab shows them
 ```
 
