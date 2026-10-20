@@ -4999,7 +4999,6 @@ class Premine:
         """{"clip": app.clip()'s (data, mime, ext) or None, "picture": JPEG bytes or None}. A part
         that fails is None, and the attach makes it on demand, with its own waits and messages."""
         media = {"clip": None, "picture": None}
-        started = time.monotonic()
         try:
             media["clip"] = self.app.clip(video_id, *clip_span(cue, settings["pad_ms"]), settings["format"])
         except Exception as exc:  # noqa: BLE001 - ClipNotReady (audio still coming) included
@@ -5010,8 +5009,6 @@ class Premine:
                 media["picture"] = self.frames.grab(video_id, frame_time(float(cue["start"]), float(cue["end"])))
             except Exception as exc:  # noqa: BLE001 - FrameUnavailable, PyAV's own errors
                 log.debug("[%s] anki premine: no picture for the line at %.2f s (%s)", video_id, float(cue["start"]), exc)
-        log.debug("[%s] anki premine: the line at %.2f s made in %.0f ms", video_id, float(cue["start"]),
-                  (time.monotonic() - started) * 1000)
         return media
 
     def take(self, s: Session, cue: dict, settings: dict, wait: float = PREMINE_WAIT) -> dict:
@@ -5264,7 +5261,6 @@ class Miner:
             return self.outcome(s, nonce, "filled", f"The {what} card already has its picture and audio; nothing changed", note_id)
         base = f"shisuko_{s.video_id}_{int(round(float(cue['start']) * 1000))}"
         update, notes = {}, []
-        started = time.monotonic()
         ready = self.premine.take(s, cue, settings)
         if audio_key:
             clip = ready["clip"] or self.clip(s, cue, settings)
@@ -5296,8 +5292,6 @@ class Miner:
             notes.insert(0, "sentence extended to the whole line")
         message = f"Added {' + '.join(update)} to the {what} Anki card" + (f" ({'; '.join(notes)})" if notes else "")
         log.info("[%s] anki mine: %s (note %d, line at %.2f s)", s.video_id, message, note_id, float(cue["start"]))
-        log.debug("[%s] anki mine: note %d took %.0f ms (clip %s, picture %s)", s.video_id, note_id,
-                  (time.monotonic() - started) * 1000, *("made ahead" if ready[k] else "made now" for k in ("clip", "picture")))
         return self.outcome(s, nonce, "attached", message, note_id)
 
     def store(self, filename: str, data: bytes) -> str:
