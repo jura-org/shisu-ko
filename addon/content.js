@@ -221,6 +221,7 @@
     videoListeners: null,
     lastSeekSync: 0,
     lastSyncAt: 0,
+    sentPaused: null, // the `paused` the last /sync carried
     lastHref: null,
     rediscover: true, // re-query the player and video on the next discover() tick
     // A live stream's cues sit on the stream's media clock, which the player exposes as
@@ -1112,6 +1113,7 @@
     state.hoverPaused = false;
     state.awaitingPlayerMove = false;
     state.lastSyncAt = 0;
+    state.sentPaused = null;
     state.live = false;
     state.liveOffset = 0;
     state.serverLive = false;
@@ -1146,10 +1148,12 @@
   // and cues are wanted. While it is paused, only while the server still has work around the
   // playhead, plus a slow heartbeat so a restart, an error or a late cue is still noticed — and so
   // the server does not drop the session for want of a client.
-  // A mine the viewer asked for goes out, and is answered, on the next tick.
-  // Pure: { mining, paused, t, status, covered, duration, lastSyncAt, standby } and a clock in, a decision out.
+  // A mine the viewer asked for goes out, and is answered, on the next tick, and so does a pause
+  // or a resume: the server looks at Anki every second while a viewer mining has paused.
+  // Pure: { mining, paused, sentPaused, t, status, covered, duration, lastSyncAt, standby } and a
+  // clock in, a decision out.
   function shouldSync(st, now) {
-    if (!st.paused || st.mining) return true;
+    if (!st.paused || st.mining || st.paused !== st.sentPaused) return true;
     if (now - (st.lastSyncAt || 0) >= SYNC_IDLE_INTERVAL_MS) return true;
     // Standing by, paused: the heartbeat above is the whole cadence. Its status was left wherever
     // the last real answer put it, so without this the rule below would make the tab ask every
@@ -1170,6 +1174,7 @@
     const decision = {
       mining: !!state.mining,
       paused: !!video.paused,
+      sentPaused: state.sentPaused,
       t: playhead(),
       status: state.serverStatus,
       covered: state.covered,
@@ -1196,8 +1201,10 @@
       state.contentPlayhead = playhead();
     }
     const mine = pendingMine();
+    const paused = !!state.video.paused;
     state.syncInFlight = true;
     state.lastSyncAt = Date.now();
+    state.sentPaused = paused;
     let result;
     try {
       result = await sendMessage({
@@ -1207,7 +1214,7 @@
           video_id: videoId,
           url: location.href,
           t: state.contentPlayhead,
-          paused: !!state.video.paused,
+          paused,
           since: state.since,
           model: modelForSync(s),
           anki: ankiForSync(s),

@@ -24,7 +24,7 @@ const NOW = 1_000_000;
 // A paused viewer on a video the server has fully transcribed around the playhead.
 function idle(patch) {
   return Object.assign(
-    { paused: true, t: 100, status: "ready", covered: [[0, 1200]], duration: 1200, lastSyncAt: NOW - 1000 },
+    { paused: true, sentPaused: true, t: 100, status: "ready", covered: [[0, 1200]], duration: 1200, lastSyncAt: NOW - 1000 },
     patch
   );
 }
@@ -47,6 +47,15 @@ test("shouldSync keeps asking while the server still has work around the playhea
   assert.equal(api.shouldSync(idle({ covered: [[0, 200]] }), NOW), true);
   // The playhead is not inside any covered range at all.
   assert.equal(api.shouldSync(idle({ t: 900, covered: [[0, 200]] }), NOW), true);
+});
+
+test("shouldSync tells the server at once that the video paused", () => {
+  const { api } = loadContent();
+  // The hover pause is when Yomitan makes the card: the server looks at Anki every second from then on.
+  assert.equal(api.shouldSync(idle({ sentPaused: false }), NOW), true);
+  assert.equal(api.shouldSync(idle({ sentPaused: null }), NOW), true);
+  assert.equal(api.shouldSync(idle({ sentPaused: true }), NOW), false);
+  assert.equal(api.shouldSync(idle({ sentPaused: true, standby: true, status: "pending" }), NOW), false);
 });
 
 test("shouldSync keeps asking while the server is not ready", () => {
@@ -2417,6 +2426,26 @@ test("sync takes the server's live flag for the status line, and a new video for
   assert.ok(!el.classes.has("shisuko-hidden"));
 });
 
+test("sync sends whether the video is paused and remembers what it sent", async () => {
+  const { api, sandbox } = loadContent();
+  await settled();
+  const bodies = serverAnswering(sandbox, [
+    { status: "ready", session: "a", cues: [], next: 0, covered: [[0, 30]], duration: 1200 },
+    { status: "ready", session: "a", cues: [], next: 0, covered: [[0, 30]], duration: 1200 },
+  ]);
+  api.state.videoId = "abcdef1234";
+  api.state.video = { currentTime: 10, paused: false };
+  await api.sync();
+  assert.equal(bodies[0].paused, false);
+  assert.equal(api.state.sentPaused, false);
+  api.state.video.paused = true; // the hover pause
+  const st = { paused: true, sentPaused: api.state.sentPaused, t: 10, status: "ready", covered: [[0, 1200]], duration: 1200, lastSyncAt: NOW };
+  assert.equal(api.shouldSync(st, NOW + 1000), true, "the pause goes out on the next tick");
+  await api.sync();
+  assert.equal(bodies[1].paused, true);
+  assert.equal(api.shouldSync(Object.assign(st, { sentPaused: api.state.sentPaused }), NOW + 1000), false);
+});
+
 // ------------------------------------------------------------------ standby
 
 test("a standby answer teaches the tab nothing about the server", async () => {
@@ -2456,7 +2485,7 @@ test("a standby answer teaches the tab nothing about the server", async () => {
   // A tab that may not sync must not fetch clips or poll Anki against a server it never reached.
   // Paused, it falls back to the idle heartbeat instead of asking every tick; playing, it keeps
   // asking, which is what makes taking the right back immediate.
-  const st = { paused: true, t: 10, status: api.state.serverStatus, covered: api.state.covered, duration: 1200, lastSyncAt: NOW, standby: true };
+  const st = { paused: true, sentPaused: true, t: 10, status: api.state.serverStatus, covered: api.state.covered, duration: 1200, lastSyncAt: NOW, standby: true };
   assert.equal(api.shouldSync(st, NOW + 1000), false);
   assert.equal(api.shouldSync(st, NOW + 5000), true);
   assert.equal(api.shouldSync(Object.assign({}, st, { paused: false }), NOW + 1000), true);

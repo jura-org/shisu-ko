@@ -686,19 +686,75 @@ def test_an_import_attaches_to_nothing(rig):
     assert rig.miner.jobs.qsize() == 1
 
 
-def test_the_watcher_hands_new_notes_over_and_looks_often_while_mining(rig):
+def test_the_watcher_hands_new_notes_over_and_looks_as_often_as_the_miner_asks(rig):
     clock = SimpleNamespace(t=0.0)
-    seen, fast = [], [False]
+    seen, cadence = [], [None]
     notes = {1, 2}
-    watcher = server.AnkiWatcher(lambda action, params, timeout: sorted(notes), clock=lambda: clock.t,
-                                 sync=False, on_new=seen.append, fast=lambda: fast[0])
-    watcher.poll()  # the baseline: never handed over
+    looks = []
+
+    def call(action, params, timeout):
+        looks.append(clock.t)
+        return sorted(notes)
+
+    watcher = server.AnkiWatcher(call, clock=lambda: clock.t, sync=False, on_new=seen.append, cadence=lambda: cadence[0])
+
+    def run(until):
+        """Step the watcher as its thread does, sleeping on the fake clock, up to `until`."""
+        while True:
+            wait = watcher.step()
+            if clock.t + wait > until:
+                return
+            clock.t += wait
+
+    run(0)  # the baseline: never handed over
     notes.add(3)
-    fast[0] = True
-    watcher.poll()
+    run(30)
     assert seen == [[3]]
-    assert watcher.next_poll == server.ANKI_POLL_MINING
+    assert looks == [0.0, 15.0, 30.0]  # nobody mining: ANKI_POLL
+    cadence[0] = server.ANKI_POLL_MINING  # a viewer mining plays a video
+    looks.clear()
+    run(39)
+    assert looks == [33.0, 36.0, 39.0]
+    cadence[0] = server.ANKI_POLL_ENGAGED  # ...and pauses on a line: the next look within a second
+    looks.clear()
+    run(42.5)
+    assert looks == [40.0, 41.0, 42.0]
     assert watcher.due is None and watcher.status() == {"state": "off", "last": None, "error": None}
+
+
+def test_the_watcher_without_a_miner_sleeps_until_its_next_look():
+    clock = SimpleNamespace(t=0.0)
+    watcher = server.AnkiWatcher(lambda action, params, timeout: [], clock=lambda: clock.t, sync=False)
+    assert watcher.step() == server.ANKI_POLL
+
+
+def test_the_look_is_quickest_while_a_viewer_mining_has_paused(rig):
+    assert rig.miner.poll_interval() is None  # nobody mines
+    s = rig.session()
+    assert rig.miner.poll_interval() == server.ANKI_POLL_MINING  # playing
+    with s.lock:
+        s.paused, s.paused_since = True, NOW - 5
+    assert rig.miner.poll_interval() == server.ANKI_POLL_ENGAGED
+    with s.lock:
+        s.paused_since = NOW - server.ANKI_ENGAGED_SECONDS - 1  # paused for minutes: reading, not mining
+    assert rig.miner.poll_interval() == server.ANKI_POLL_MINING
+    with s.lock:
+        s.paused_since, s.anki = NOW - 5, dict(s.anki, auto=False)
+    assert rig.miner.poll_interval() is None  # paused, but not mining
+
+
+def test_sync_records_when_the_video_was_paused(rig):
+    from test_mining_sync import body
+
+    s = rig.session()
+    b = body()
+    rig.app.sync(b["video_id"], b["url"], b["t"], b["since"], anki=b["anki"], paused=True)
+    first = s.paused_since
+    assert s.paused and first > 0
+    rig.app.sync(b["video_id"], b["url"], b["t"], b["since"], anki=b["anki"], paused=True)
+    assert s.paused_since == first  # since the pause began, not since the last heartbeat
+    rig.app.sync(b["video_id"], b["url"], b["t"], b["since"], anki=b["anki"])
+    assert not s.paused
 
 
 # ------------------------------------------------------------------ the picture
@@ -911,7 +967,7 @@ def test_start_anki_watcher_starts_the_miner_beside_the_sync(monkeypatch, tmp_pa
     app.miner = app.decks = None
     # The sync and the mining off: the watcher still runs, for the word colours alone.
     watcher = server.start_anki_watcher(args(anki_sync="off", mine="off"), app)
-    assert started == ["anki-deck", "anki-sync"] and app.miner is None and watcher.fast is None
+    assert started == ["anki-deck", "anki-sync"] and app.miner is None and watcher.cadence is None
     started.clear()
     app.decks = None
     monkeypatch.setenv("SHISUKO_CONTAINER", "1")

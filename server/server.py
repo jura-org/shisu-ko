@@ -25,7 +25,8 @@ Endpoints
                      extension's `anki` settings (or `mined_since`) also gets {mined, mined_next, anki_error}
                      and may carry `mine`: {cue_id, nonce, session}, the viewer's own mine (Miner); a body
                      carrying `deck`: {name, word, pitch, since} also gets `deck` when its token moved
-                     (the word colours' rows, DeckIndexes)
+                     (the word colours' rows, DeckIndexes); `paused: true` (the client's video is
+                     paused) makes Anki looked at every second while that client mines (Miner.poll_interval)
   GET  /clip?video_id=..&start=..&end=..&format=mp3|wav -> audio clip of a sentence (the portal's mining)
   GET  /sessions -> the videos the server holds, for diagnostics
   POST /update   -> {ok, restarting, version}: the server exits with EXIT_UPDATE so that run.cmd / run.sh
@@ -2544,6 +2545,10 @@ class Session:
     # the log of what was attached, which /sync answers as `mined` (seq counts every entry ever
     # made); and the nonces of the mines asked for, with when, so a resent one runs once.
     anki: Optional[dict] = None
+    # Whether the client's last /sync said its video was paused, and since when (time.time()):
+    # the watcher looks at Anki every second while a viewer mining has paused (Miner.poll_interval()).
+    paused: bool = False
+    paused_since: float = 0.0
     mined: list = field(default_factory=list)
     mine_seq: int = 0
     mine_nonces: dict = field(default_factory=dict)
@@ -4194,14 +4199,17 @@ class AnkiWatcher:
     """
 
     def __init__(self, call, url: str = ANKI_DEFAULT_URL, clock=time.monotonic, wall=time.time,
-                 sync: bool = True, on_new=None, fast=None):
+                 sync: bool = True, on_new=None, cadence=None):
         self.call, self.url, self.clock, self.wall = call, url, clock, wall
         # sync: whether new notes are synced for (--anki-sync); on_new(ids) hears of every new note
-        # (Miner.notes_added); fast() asks for a look every ANKI_POLL_MINING (Miner.watching).
-        self.sync_on, self.on_new, self.fast = sync, on_new, fast
+        # (Miner.notes_added); cadence() is the seconds between two looks a client mining asks
+        # for, None for ANKI_POLL (Miner.poll_interval). It is asked at every step, so a viewer who
+        # pauses to look a word up gets the quick look within a second, not after a slow one.
+        self.sync_on, self.on_new, self.cadence = sync, on_new, cadence
         self.lock = threading.Lock()
         self.seen: Optional[set] = None  # note ids already counted; None until the first answer (the baseline)
         self.next_poll = clock()
+        self.last_look: Optional[float] = None  # clock time of the last look Anki answered
         self.poll_wait = ANKI_POLL  # grows while Anki does not answer
         self.reachable: Optional[bool] = None  # None: not asked yet
         self.poll_error: Optional[str] = None  # why the last look failed
@@ -4234,7 +4242,8 @@ class AnkiWatcher:
                 self.reachable, self.poll_error = False, text
             return 0
         self.poll_wait = ANKI_POLL
-        self.next_poll = now + (ANKI_POLL_MINING if self.fast is not None and self.fast() else ANKI_POLL)
+        self.last_look = now
+        self.next_poll = now + self.interval()
         current = set(ids)
         with self.lock:
             back = self.reachable is False
@@ -4319,17 +4328,25 @@ class AnkiWatcher:
         self.after_sync, self.next_poll = True, self.clock()
         return True
 
+    def interval(self) -> float:
+        """The seconds between two looks while Anki answers."""
+        return (self.cadence() if self.cadence is not None else None) or ANKI_POLL
+
     # ---- the thread
 
     def step(self) -> float:
         """Look at Anki when that is due, sync when that is due; the seconds until the next thing to do."""
         now = self.clock()
         due = self.due
+        if self.cadence is not None and self.reachable and self.last_look is not None:
+            self.next_poll = min(self.next_poll, self.last_look + self.interval())
         if now >= self.next_poll or (due is not None and now >= due):
             self.poll()  # before a sync too: its log line counts the notes made since the last look
         self.sync()
         now = self.clock()
         wake = self.next_poll if self.due is None or self.reachable is False else min(self.next_poll, self.due)
+        if self.cadence is not None:
+            wake = min(wake, now + ANKI_POLL_ENGAGED)  # the cadence is asked again by then
         return max(0.0, wake - now)
 
     def run_forever(self) -> None:
@@ -4420,7 +4437,7 @@ def start_anki_watcher(args, app=None) -> Optional[AnkiWatcher]:
             listener(ids)
 
     watcher = AnkiWatcher(call, url=url, sync=on, on_new=on_new if listeners else None,
-                          fast=miner.watching if miner else None)
+                          cadence=miner.poll_interval if miner else None)
     if miner is not None:
         miner.anki_up = lambda: watcher.reachable is not False
     threading.Thread(target=watcher.run_forever, daemon=True, name="anki-sync").start()
@@ -5033,7 +5050,12 @@ ATTACH_NOTE_MAX_AGE = 180.0  # a note made longer ago than this when found is no
 ATTACH_MAX_BATCH = 5  # more new notes in one look: an import or a sync from another device
 ATTACH_CLIP_WAIT = 60.0  # how long an attach waits for audio still being fetched
 ATTACH_CLIP_RETRY = 2.0
-ANKI_POLL_MINING = 3.0  # the watcher's look while a client mines: a card gets its media in seconds
+ANKI_POLL_MINING = 3.0  # the watcher's look while a client mines and plays
+# While a viewer mining has paused, the look comes every second: the hover pause is when Yomitan's
+# card is made. A findNotes takes about 25 ms. A pause this long is reading, not mining, and goes
+# back to ANKI_POLL_MINING.
+ANKI_POLL_ENGAGED = 1.0
+ANKI_ENGAGED_SECONDS = 120.0
 MINE_LOG_KEEP = 20
 MINE_LOG_SECONDS = 120.0
 MINE_HANDLED_KEEP = 2000
@@ -5055,9 +5077,19 @@ class Miner:
 
     # ---- what the watcher and /sync hand over
 
-    def watching(self) -> bool:
-        """Whether a client mines right now: the watcher then looks every ANKI_POLL_MINING."""
-        return bool(self.candidates())
+    def poll_interval(self) -> Optional[float]:
+        """The watcher's seconds between two looks: ANKI_POLL_ENGAGED while a client mining has
+        paused (for at most ANKI_ENGAGED_SECONDS), ANKI_POLL_MINING while one plays, None when none
+        mines (the watcher's own ANKI_POLL)."""
+        candidates = self.candidates()
+        if not candidates:
+            return None
+        now = self.clock()
+        for s in candidates:
+            with s.lock:
+                if s.paused and now - s.paused_since <= ANKI_ENGAGED_SECONDS:
+                    return ANKI_POLL_ENGAGED
+        return ANKI_POLL_MINING
 
     def observe(self, s: Session) -> None:
         """Every /sync: the line at the playhead is made ahead (Premine), while Anki answers."""
@@ -6754,7 +6786,8 @@ class App:
         return {"retrying": True, "retry_in": round(max(0.0, due - now), 1)}
 
     def sync(self, video_id: str, url: str, t: float, since: int, model=None, words: bool = False,
-             anki=None, mine: Optional[dict] = None, mined_since: Optional[int] = None, deck=None) -> dict:
+             anki=None, mine: Optional[dict] = None, mined_since: Optional[int] = None, deck=None,
+             paused: bool = False) -> dict:
         """The /sync answer. `words` asks for each cue's word timings; without it no cue carries
         any, so a client that never asks sees exactly what it saw before the field existed.
 
@@ -6765,7 +6798,10 @@ class App:
         that did not validate, `anki_error`; every other answer is what it was before.
 
         `deck` asks for the word colours' deck (deck_request()): the answer carries `deck` only
-        when the client's `since` token is not the deck's (DeckIndexes.ask())."""
+        when the client's `since` token is not the deck's (DeckIndexes.ask()).
+
+        `paused` is whether the client's video is paused: it sets how often Anki is looked at
+        (Miner.poll_interval())."""
         self.request_model(model)
         settings, anki_error = None, None
         if anki is not None:
@@ -6777,6 +6813,9 @@ class App:
         with s.lock:
             s.want_t = max(0.0, float(t))
             s.last_sync = time.time()
+            if paused and not s.paused:
+                s.paused_since = s.last_sync
+            s.paused = paused
             if settings is not None:
                 s.anki = settings
             since = max(0, min(int(since), len(s.cues)))
@@ -7296,6 +7335,8 @@ class Handler(BaseHTTPRequestHandler):
         extra = {key: value for key, value in (("anki", body.get("anki")), ("mine", mine), ("mined_since", mined_since),
                                                ("deck", body.get("deck")))
                  if value is not None}
+        if body.get("paused") is True:  # a literal true, as `words`; anything else is playing
+            extra["paused"] = True
         try:
             self._json(200, self.app.sync(video_id, str(body.get("url") or ""), t, since, model, words, **extra))
         except Exception as exc:  # noqa: BLE001
