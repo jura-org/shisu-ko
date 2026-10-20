@@ -309,14 +309,16 @@ the seconds of that one subtitle, never the lines around it.
 1. Hover the subtitle; the video pauses.
 2. Scan the word with Yomitan and click its **+** (Yomitan fills word, reading, sentence and
    glossary from its own template).
-3. Within a few seconds the server notices the new card, uploads `shisuko_<video>_<time>.mp3` and
+3. Within about a second the server notices the new card, uploads `shisuko_<video>_<time>.mp3` and
    `.jpg` to Anki's media folder and writes `[sound:...]` and `<img src=...>` into the fields. A
    toast on the player confirms it. Playback is left alone so you can keep reading the popup.
 
-The server looks at Anki's newest notes every 3 s while a tab with auto-attach on is syncing, and
-every 15 s otherwise. The card is matched to the line it is about: the server compares the card's
-sentence and word against the transcript of the video you are watching, so a card made a few
-lines later, or while the video kept playing, still gets the right audio and picture.
+While a tab with auto-attach on is syncing, the server looks at Anki's newest notes every second
+while its video is paused (for up to two minutes) and every 3 s while it plays; every 15 s
+otherwise. While a line plays, the server already cuts its audio and takes its picture, so the
+card only has to receive them. The card is matched to the line it is about: the server compares
+the card's sentence and word against the transcript of the video you are watching, so a card
+made a few lines later, or while the video kept playing, still gets the right audio and picture.
 
 The server only touches a card made in the last three minutes, while a video was syncing, whose
 sentence matches one of that video's lines. It fills only empty fields, with one exception: when

@@ -63,10 +63,26 @@ message like "Transcribing…", not an error, and obeys `showStatus`;
 The server mines. `AnkiWatcher` (see "How the Anki sync after mining works" in
 `server-runtime.md`) looks at `findNotes("added:2")` and hands every note id it has not seen
 before to `Miner.notes_added()` (its `on_new` hook), which queues them for the miner's one
-worker thread (`run_forever()`). While a client mines (`Miner.watching()`: a session synced in
-the last `ATTACH_SYNC_WINDOW` with auto on and cues to match), the watcher looks every
-`ANKI_POLL_MINING` (3 s) instead of every `ANKI_POLL` (15 s), through its `fast` hook. The
-baseline the watcher takes at start is never handed over.
+worker thread (`run_forever()`). The baseline the watcher takes at start is never handed over.
+
+How often the watcher looks is the miner's call (`Miner.poll_interval()`, the watcher's
+`cadence` hook), by what the viewer is doing:
+
+- `ANKI_POLL_ENGAGED` (1 s) while a client mining has paused, for at most
+  `ANKI_ENGAGED_SECONDS` (120 s) from the pause. Yomitan's card is made on a paused video: the
+  hover pause. A longer pause is reading, not mining.
+- `ANKI_POLL_MINING` (3 s) while one plays. "Mining" is `candidates()`: a session synced in the
+  last `ATTACH_SYNC_WINDOW` with auto on and cues to match.
+- `ANKI_POLL` (15 s) otherwise.
+
+The pause comes from `/sync`'s `paused`, a literal `true` (anything else is playing, never a
+400); `App.sync()` keeps it in `Session.paused` and the time the pause began in
+`Session.paused_since`, which a heartbeat does not move. A paused tab syncs only every 5 s, so
+`shouldSync()` in `content.js` also sends when `paused` differs from what the last `/sync`
+carried (`state.sentPaused`): one request per pause or resume. The watcher asks the cadence at
+every step and wakes at least every `ANKI_POLL_ENGAGED`, so a pause counts within a second, not
+after the slow look already planned. One `findNotes("added:2")` took 25 ms (median of 50; 28 ms
+at most) on a collection of about 14,000 notes, most of it AnkiConnect's own turnaround.
 
 `Miner.attach_new(note_id)` decides, and these rules keep it from touching the wrong card:
 
@@ -88,9 +104,11 @@ baseline the watcher takes at start is never handed over.
   picture only with `--mine-picture on`); `sentence_update()` is the sentence grown to the cue
   (below). A card with neither is left alone.
 
-`Miner.attach()` then cuts the clip (`Miner.clip()`: `App.clip()` with the client's `pad_ms` and
-`format`, waiting up to `ATTACH_CLIP_WAIT` for audio still being fetched, since the cues can be
-cached and the audio not), takes the picture (`Miner.picture()`, below), stores both with
+`Miner.attach()` then takes the line's media made ahead (`Premine.take()`, below), or makes what
+is missing on demand: it cuts the clip (`Miner.clip()`: `App.clip()` over `clip_span()`, the
+client's `pad_ms`, in its `format`, waiting up to `ATTACH_CLIP_WAIT` for audio still being
+fetched, since the cues can be cached and the audio not), takes the picture (`Miner.picture()`,
+below), stores both with
 `storeMediaFile` under `shisuko_<video>_<start ms>.mp3` / `.jpg`, and writes the field
 names Anki reported back (it may lowercase a name or add a suffix). Right before
 `updateNoteFields` it reads the note again and drops every field that no longer holds what it
@@ -113,6 +131,38 @@ Whatever the server writes into an HTML field goes through `escape_html()`: the 
 names inside `<img src="...">` and `[sound:...]`, the sentence a manual mine puts into an empty
 sentence field, and every text part `grow_sentence()` puts around its own `<b>`. The newline `seam_for()` puts between two merged utterances becomes
 `<br>`, since HTML would otherwise collapse it into a space.
+
+### Media made ahead (`Premine`)
+
+A card used to wait for its media after Yomitan made it. Measured over three mines, 6.5 to 8.5 s
+went from the note's creation to its media: up to 3 s for the next look, then the clip (80 ms), a
+stream resolve (1.7 s, once per video) and a frame decode (2.7 to 5.0 s, below), then four
+AnkiConnect calls (about 150 ms). The viewer mines the line on screen, and every `/sync` says where
+the screen is, so the server makes that line's media while it plays.
+
+`Miner.observe(s)` runs inside every `/sync` of a session whose client mines with auto on, while
+AnkiConnect answers (`Miner.anki_up`, the watcher's last look), and does no I/O: `Premine.observe()`
+names the line at the playhead (`cue_at()`: the cue spanning `want_t` that started last; none in
+a gap). The one worker thread (`anki-premine`, `run_once()`) makes the newest line wanted, of the
+video synced last first: `App.clip()` over `clip_span()` and `FrameGrabber.grab()` at
+`frame_time()`, a live stream's line its clip alone. A part that fails (audio still coming, DRM,
+YouTube's refusal) is kept as None, and the attach makes that part on demand with its own waits
+and messages. `take()` hands the attach the line's media; a line wanted or being made is waited
+for up to `PREMINE_WAIT` (5 s), quicker than making it twice.
+
+Media is keyed by the session token, the cue's id, start and end, and the clip's `pad_ms` and
+`format`, so a restarted session, a revised cue or another padding never takes another line's
+media. The bounds: `PREMINE_LINES` (10) lines per video, made and wanted alike, the newest kept;
+`PREMINE_SESSIONS` (3) videos, the one synced longest ago dropped first; a video not synced for
+`PREMINE_IDLE` (60 s), or synced with auto off, loses all of it. A line is about 30-50 KB of
+MP3 and 55-160 KB of JPEG, so the whole store stays a few MB.
+
+The cost: only lines a viewer played while mining are made, one frame decode each. Measured on
+one video with Whisper idle: 0.29 CPU-seconds per line (0.2 to 0.5 s of wall time), about 8% of
+one core during playback, against 1% for the same playback with auto off; about 0.8 MB read
+from YouTube per frame. With the media ready an attach took 130-160 ms, and note creation to
+media attached took 0.9 to 1.2 s, most of it the wait for the next look. Tests:
+`server/tests/test_premine.py`; the cadence is in `test_mining.py`, on a fake clock.
 
 ### What the client sends, and what it hears (`/sync`)
 
@@ -219,19 +269,24 @@ holds every case `addon/tests/match.test.js` held.
 
 ### The picture (`FrameGrabber`)
 
-The frame comes from YouTube's stream, not from the browser. `FrameGrabber.resolve_stream()`
-asks yt-dlp, with `Fetcher.ytdlp_options()` (the cookies and JavaScript runtime the audio fetch
-uses) and `FRAME_FORMAT` (H.264 up to 720p, else the best up to 720p), for one stream URL;
-`frame_jpeg()` opens it with PyAV, seeks to the time and encodes the first frame at or after it
-with PyAV's own MJPEG encoder (`encode_jpeg()`, the portal's code). A URL is kept per video for
-`FRAME_STREAM_TTL` (4 h). A verdict (`FrameUnavailable`: DRM via `has_drm`, a live stream, no
-stream up to 720p) is kept as long, so it costs one resolve, not one per card; any other failure
-(YouTube's bot check, the network) is kept for `FRAME_RETRY` (10 min) and then tried again. A kept URL that no longer opens and
-is older than `FRAME_FRESH` (120 s) has expired: one fresh resolve, and that answer stands. A
-live stream gets no picture: its past frames are not there to seek to. `--mine-picture off`
-builds the miner without a grabber, and nothing is resolved.
+The frame comes from YouTube's stream, not from the browser. `FrameGrabber.resolve_stream()` asks
+yt-dlp, with `Fetcher.ytdlp_options()` (the cookies and JavaScript runtime the audio fetch uses) and
+`FRAME_FORMAT` (H.264 up to 720p, else the best up to 720p), for one stream URL; `frame_jpeg()`
+opens it with PyAV, seeks to the time and encodes the first frame at or after it with PyAV's own
+MJPEG encoder (`encode_jpeg()`, the portal's code). It opens the stream with FFmpeg's `request_size`
+(`FRAME_REQUEST_SIZE`, 256 KB): FFmpeg otherwise asks for an open-ended range (`bytes=N-`), and
+googlevideo trickles those at about 300 KB/s, which made one frame 2.7 to 5.0 s of waiting; bounded
+ranges arrive at full speed, 0.2 to 0.6 s a frame. 1 MB requests were as fast and read 2 MB a frame.
+FFmpeg before 8 ignores the option and is slow again. A URL is kept per video for `FRAME_STREAM_TTL`
+(4 h). A verdict (`FrameUnavailable`: DRM via `has_drm`, a live stream, no stream up to 720p) is
+kept as long, so it costs one resolve, not one per card; any other failure (YouTube's bot check, the
+network) is kept for `FRAME_RETRY` (10 min) and then tried again. A kept URL that no longer opens
+and is older than `FRAME_FRESH` (120 s) has expired: one fresh resolve, and that answer stands. A
+live stream gets no picture: its past frames are not there to seek to. `--mine-picture off` builds
+the miner without a grabber, and nothing is resolved.
 
-The extension's pre-mined frames and clips (the background's `premined`) are gone with it.
+The extension's pre-mined frames and clips (the background's `premined`) are gone with it; the
+server makes the same media ahead itself (`Premine`, above).
 
 ### The no-Anki fallback
 
