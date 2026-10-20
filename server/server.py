@@ -4330,7 +4330,7 @@ class AnkiWatcher:
 
     def interval(self) -> float:
         """The seconds between two looks while Anki answers."""
-        return (self.cadence() if self.cadence is not None else None) or ANKI_POLL
+        return (self.cadence and self.cadence()) or ANKI_POLL
 
     # ---- the thread
 
