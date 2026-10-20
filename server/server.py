@@ -4974,13 +4974,14 @@ class Premine:
                 return False
             key, (video_id, cue, settings, live) = job
             self.busy = video_id, key
+        media = None
         try:
             media = self.make(video_id, cue, settings, live)
         finally:
             with self.cond:
                 self.busy = None
                 entry = self.videos.get(video_id)
-                if entry is not None and entry["token"] == key[0]:
+                if media is not None and entry is not None and entry["token"] == key[0]:
                     entry["ready"][key] = media
                     while len(entry["ready"]) > PREMINE_LINES:
                         del entry["ready"][next(iter(entry["ready"]))]

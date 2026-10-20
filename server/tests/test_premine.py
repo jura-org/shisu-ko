@@ -230,3 +230,22 @@ def test_sync_names_the_line_to_the_premine(rig):
     assert key[1] == 1
     rig.app.miner = None
     sync(rig.app)  # mining off: no miner, nothing named
+
+
+def test_a_line_whose_making_raised_is_not_kept_and_can_be_wanted_again(rig):
+    clock = SimpleNamespace(t=NOW)
+    premine = premine_for(rig, clock)
+
+    def broken(*args):
+        raise RuntimeError("boom")
+
+    premine.make = broken
+    s = rig.session(t=14.0)
+    rig.miner.observe(s)
+    try:
+        premine.run_once(wait=0)
+    except RuntimeError:
+        pass
+    assert premine.busy is None and premine.videos[VIDEO]["ready"] == {}
+    rig.miner.observe(s)
+    assert premine.videos[VIDEO]["wanted"] is not None
