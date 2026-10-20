@@ -309,14 +309,16 @@ the seconds of that one subtitle, never the lines around it.
 1. Hover the subtitle; the video pauses.
 2. Scan the word with Yomitan and click its **+** (Yomitan fills word, reading, sentence and
    glossary from its own template).
-3. Within a few seconds the server notices the new card, uploads `shisuko_<video>_<time>.mp3` and
+3. Within about a second the server notices the new card, uploads `shisuko_<video>_<time>.mp3` and
    `.jpg` to Anki's media folder and writes `[sound:...]` and `<img src=...>` into the fields. A
    toast on the player confirms it. Playback is left alone so you can keep reading the popup.
 
-The server looks at Anki's newest notes every 3 s while a tab with auto-attach on is syncing, and
-every 15 s otherwise. The card is matched to the line it is about: the server compares the card's
-sentence and word against the transcript of the video you are watching, so a card made a few
-lines later, or while the video kept playing, still gets the right audio and picture.
+While a tab with auto-attach on is syncing, the server looks at Anki's newest notes every second
+while its video is paused (for up to two minutes) and every 3 s while it plays; every 15 s
+otherwise. While a line plays, the server already cuts its audio and takes its picture, so the
+card only has to receive them. The card is matched to the line it is about: the server compares
+the card's sentence and word against the transcript of the video you are watching, so a card
+made a few lines later, or while the video kept playing, still gets the right audio and picture.
 
 The server only touches a card made in the last three minutes, while a video was syncing, whose
 sentence matches one of that video's lines. It fills only empty fields, with one exception: when
@@ -662,8 +664,8 @@ Firefox (addon/)                                 Local server (server/), http://
 +----------------------------------+   rows      | 5. the deck index: one deck's words and states |
                                                  +------------------------------------------------+
       Anki  <-- the server, through AnkiConnect (http://127.0.0.1:8765); the extension never calls it:
-                findNotes every 15 s (3 s while mining), storeMediaFile + updateNoteFields on a new
-                card's empty fields (--mine), sync a minute after new notes (--anki-sync), and
+                findNotes every 15 s (3 s while mining, 1 s paused), storeMediaFile + updateNoteFields
+                on a new card's empty fields (--mine), sync a minute after new notes (--anki-sync), and
                 findNotes + notesInfo on the word colours' deck every 30 s while a tab shows them
 ```
 

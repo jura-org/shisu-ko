@@ -123,6 +123,22 @@ def test_the_sync_endpoint_validates_mine_and_mined_since(monkeypatch, tmp_path)
         served.close()
 
 
+def test_the_sync_endpoint_takes_paused_as_a_literal_true(monkeypatch, tmp_path):
+    app = make_app(monkeypatch, tmp_path)
+    served = Served(app)
+    try:
+        def paused_after(value):
+            served.request("POST", "/sync", json.dumps(body(paused=value)))
+            return app.sessions[VIDEO].paused
+
+        assert paused_after(True) is True
+        assert paused_after(False) is False
+        assert paused_after("yes") is False  # not a 400: the subtitles never depend on it
+        assert paused_after(1) is False
+    finally:
+        served.close()
+
+
 def test_an_outcome_recorded_at_once_is_not_skipped_by_a_fresh_cursor(rig):
     rig.app.miner = None
     s = rig.session()

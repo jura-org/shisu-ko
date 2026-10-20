@@ -662,20 +662,22 @@ Three hooks serve the miner (below) and the word colours' deck indexes: `sync` (
 `--anki-sync off` leaves the watcher running for the miner or the deck indexes alone; `status()`
 then answers `off`, and no new note schedules a sync), `on_new(ids)` (every id a look finds that
 is not in `seen`, the baseline never; `start_anki_watcher()` hands it to `Miner.notes_added()` and
-`DeckIndexes.notes_added()` alike, `word-colours.md`), and `fast()`
-(a client is mining: the next look comes after `ANKI_POLL_MINING`, 3 s, instead of `ANKI_POLL`).
+`DeckIndexes.notes_added()` alike, `word-colours.md`), and `cadence()` (`Miner.poll_interval()`:
+the seconds to the next look, 1 s while a viewer mining has paused, 3 s while one plays, None for
+`ANKI_POLL`; asked at every step, see "How automatic mining works" in `mining.md`).
 
 ## How mining works on the server
 
 The server, not the extension, gives a note Yomitan made its line's audio and picture.
-`start_anki_watcher(args, app)` builds a `Miner` when `resolve_mining()` says so (`--mine
-auto|off`, off in the container unless `--anki-url` is given) and runs it on its own daemon
-thread (`anki-mine`), fed by the watcher's `on_new` and by `/sync`'s `mine`. The miner cuts the
-clip through `App.clip()`, in-process, and takes the picture through `FrameGrabber` (yt-dlp
-resolves a 720p H.264 stream once per video, PyAV decodes a frame; `--mine-picture off` builds
-none). It talks to AnkiConnect through the same `anki_connect()`. The rules, the `/sync` fields
-and the matcher are in `mining.md`; tests are `server/tests/test_mining.py` and
-`test_mining_sync.py`.
+`start_anki_watcher(args, app)` builds a `Miner` when `resolve_mining()` says so (`--mine auto|off`,
+off in the container unless `--anki-url` is given) and runs it on its own daemon thread
+(`anki-mine`), fed by the watcher's `on_new` and by `/sync`'s `mine`, beside the premine's
+(`anki-premine`), which makes the media of the line at a mining client's playhead before its card
+exists (`Premine`, `mining.md`). The miner cuts the clip through `App.clip()`, in-process, and takes
+the picture through `FrameGrabber` (yt-dlp resolves a 720p H.264 stream once per video, PyAV decodes
+a frame; `--mine-picture off` builds none). It talks to AnkiConnect through the same
+`anki_connect()`. The rules, the `/sync` fields and the matcher are in `mining.md`; tests are
+`server/tests/test_mining.py`, `test_mining_sync.py` and `test_premine.py`.
 
 ## How the AMD engine works (experimental)
 

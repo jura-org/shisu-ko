@@ -305,14 +305,17 @@ and `entry_point()`, `run_probe_gpu()`, `server/amd_setup.py`. Launcher rules th
 
 **Mining** (`docs/dev/mining.md`). `electSyncTab()` in `background.js` picks the one tab whose
 `/sync` reaches the server; it never names a tab that did not ask. In `server.py`,
-`AnkiWatcher.poll()` hands new note ids to `Miner.notes_added()` (every 3 s while a client mines,
-`Miner.watching()`); `Miner.attach_new()` matches a fresh note to a watched session's cues
+`AnkiWatcher.poll()` hands new note ids to `Miner.notes_added()` (every second while a client mining
+has paused, every 3 s while one plays: `Miner.poll_interval()`); `Premine` makes the clip and
+picture of the line at a mining client's playhead before its card exists, and keeps the last 10
+lines of 3 videos; `Miner.attach_new()` matches a fresh note to a watched session's cues
 (`best_cue()`, the port of 0.21.1's `match.js`, `MIN_SIMILARITY` 0.6) and `Miner.attach()` writes
-its empty fields; `Miner.mine_now()` takes `/sync`'s `mine`; `FrameGrabber` takes the picture from
-YouTube's stream. A mined card gets exactly the cue: `Miner.clip()` cuts that cue's start to end,
-`grow_sentence()` grows Yomitan's fragment to that cue and no further, and cues are never
-rejoined by `seg`. In `content.js`, `ankiForSync()` builds `/sync`'s `anki`,
-`mineCue()` / `pendingMine()` send a mine until `takeMined()` reads its answer.
+its empty fields, with the media made ahead or, failing that, made then; `Miner.mine_now()` takes
+`/sync`'s `mine`; `FrameGrabber` takes the picture from YouTube's stream, in bounded ranges
+(`FRAME_REQUEST_SIZE`: googlevideo trickles an open-ended one). A mined card gets exactly the cue:
+`Miner.clip()` cuts that cue's start to end, `grow_sentence()` grows Yomitan's fragment to that cue
+and no further, and cues are never rejoined by `seg`. In `content.js`, `ankiForSync()` builds
+`/sync`'s `anki`, `mineCue()` / `pendingMine()` send a mine until `takeMined()` reads its answer.
 
 **Word colours** (`docs/dev/word-colours.md`). `DeckIndexes` / `DeckIndex` in `server.py` read
 the deck (`DECK_TTL` 30 s, `notes_added()` on a new note, `note_mined()` for the automatic deck)

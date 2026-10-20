@@ -25,7 +25,8 @@ Endpoints
                      extension's `anki` settings (or `mined_since`) also gets {mined, mined_next, anki_error}
                      and may carry `mine`: {cue_id, nonce, session}, the viewer's own mine (Miner); a body
                      carrying `deck`: {name, word, pitch, since} also gets `deck` when its token moved
-                     (the word colours' rows, DeckIndexes)
+                     (the word colours' rows, DeckIndexes); `paused: true` (the client's video is
+                     paused) makes Anki looked at every second while that client mines (Miner.poll_interval)
   GET  /clip?video_id=..&start=..&end=..&format=mp3|wav -> audio clip of a sentence (the portal's mining)
   GET  /sessions -> the videos the server holds, for diagnostics
   POST /update   -> {ok, restarting, version}: the server exits with EXIT_UPDATE so that run.cmd / run.sh
@@ -102,7 +103,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.24.0"
+VERSION = "0.25.0"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -2544,6 +2545,10 @@ class Session:
     # the log of what was attached, which /sync answers as `mined` (seq counts every entry ever
     # made); and the nonces of the mines asked for, with when, so a resent one runs once.
     anki: Optional[dict] = None
+    # Whether the client's last /sync said its video was paused, and since when (time.time()):
+    # the watcher looks at Anki every second while a viewer mining has paused (Miner.poll_interval()).
+    paused: bool = False
+    paused_since: float = 0.0
     mined: list = field(default_factory=list)
     mine_seq: int = 0
     mine_nonces: dict = field(default_factory=dict)
@@ -4194,14 +4199,17 @@ class AnkiWatcher:
     """
 
     def __init__(self, call, url: str = ANKI_DEFAULT_URL, clock=time.monotonic, wall=time.time,
-                 sync: bool = True, on_new=None, fast=None):
+                 sync: bool = True, on_new=None, cadence=None):
         self.call, self.url, self.clock, self.wall = call, url, clock, wall
         # sync: whether new notes are synced for (--anki-sync); on_new(ids) hears of every new note
-        # (Miner.notes_added); fast() asks for a look every ANKI_POLL_MINING (Miner.watching).
-        self.sync_on, self.on_new, self.fast = sync, on_new, fast
+        # (Miner.notes_added); cadence() is the seconds between two looks a client mining asks
+        # for, None for ANKI_POLL (Miner.poll_interval). It is asked at every step, so a viewer who
+        # pauses to look a word up gets the quick look within a second, not after a slow one.
+        self.sync_on, self.on_new, self.cadence = sync, on_new, cadence
         self.lock = threading.Lock()
         self.seen: Optional[set] = None  # note ids already counted; None until the first answer (the baseline)
         self.next_poll = clock()
+        self.last_look: Optional[float] = None  # clock time of the last look Anki answered
         self.poll_wait = ANKI_POLL  # grows while Anki does not answer
         self.reachable: Optional[bool] = None  # None: not asked yet
         self.poll_error: Optional[str] = None  # why the last look failed
@@ -4234,7 +4242,8 @@ class AnkiWatcher:
                 self.reachable, self.poll_error = False, text
             return 0
         self.poll_wait = ANKI_POLL
-        self.next_poll = now + (ANKI_POLL_MINING if self.fast is not None and self.fast() else ANKI_POLL)
+        self.last_look = now
+        self.next_poll = now + self.interval()
         current = set(ids)
         with self.lock:
             back = self.reachable is False
@@ -4319,17 +4328,25 @@ class AnkiWatcher:
         self.after_sync, self.next_poll = True, self.clock()
         return True
 
+    def interval(self) -> float:
+        """The seconds between two looks while Anki answers."""
+        return (self.cadence and self.cadence()) or ANKI_POLL
+
     # ---- the thread
 
     def step(self) -> float:
         """Look at Anki when that is due, sync when that is due; the seconds until the next thing to do."""
         now = self.clock()
         due = self.due
+        if self.cadence is not None and self.reachable and self.last_look is not None:
+            self.next_poll = min(self.next_poll, self.last_look + self.interval())
         if now >= self.next_poll or (due is not None and now >= due):
             self.poll()  # before a sync too: its log line counts the notes made since the last look
         self.sync()
         now = self.clock()
         wake = self.next_poll if self.due is None or self.reachable is False else min(self.next_poll, self.due)
+        if self.cadence is not None:
+            wake = min(wake, now + ANKI_POLL_ENGAGED)  # the cadence is asked again by then
         return max(0.0, wake - now)
 
     def run_forever(self) -> None:
@@ -4408,6 +4425,7 @@ def start_anki_watcher(args, app=None) -> Optional[AnkiWatcher]:
         app.miner = miner
         listeners.append(miner.notes_added)
         threading.Thread(target=miner.run_forever, daemon=True, name="anki-mine").start()
+        threading.Thread(target=miner.premine.run_forever, daemon=True, name="anki-premine").start()
         log.info("anki mine: new notes get their line's audio%s", " and picture" if picture else " (no picture: --mine-picture off)")
     if colours:
         app.decks = DeckIndexes(call)
@@ -4419,7 +4437,9 @@ def start_anki_watcher(args, app=None) -> Optional[AnkiWatcher]:
             listener(ids)
 
     watcher = AnkiWatcher(call, url=url, sync=on, on_new=on_new if listeners else None,
-                          fast=miner.watching if miner else None)
+                          cadence=miner.poll_interval if miner else None)
+    if miner is not None:
+        miner.anki_up = lambda: watcher.reachable is not False
     threading.Thread(target=watcher.run_forever, daemon=True, name="anki-sync").start()
     return watcher
 
@@ -4722,6 +4742,11 @@ FRAME_FRESH = 120.0  # a stream URL this young is not re-resolved when it fails 
 # A resolve that raised (YouTube's bot check, the network) is tried again after this; a verdict
 # (DRM, live, no stream up to 720p) stands as long as a URL would.
 FRAME_RETRY = 600.0
+# FFmpeg's HTTP reader asks for "bytes=N-", and googlevideo trickles an open-ended range at about
+# 300 KB/s: one frame took 2.7-5 s, all of it waiting. Bounded ranges arrive at full speed (the
+# same frames in 0.2-0.6 s). 256 KB reads about 0.8 MB per frame, 1 MB about 2 MB, at the same
+# speed. FFmpeg 8 and later take this option; an older one ignores it.
+FRAME_REQUEST_SIZE = 256 * 1024
 
 
 class FrameUnavailable(Exception):
@@ -4756,7 +4781,7 @@ def frame_jpeg(source: str, t: float) -> bytes:
     except ImportError:
         raise FrameUnavailable("PyAV is not installed in this Python") from None
     try:
-        container = av.open(source, timeout=30)
+        container = av.open(source, timeout=30, options={"request_size": str(FRAME_REQUEST_SIZE)})
     except Exception as exc:  # noqa: BLE001 - av.error.* and OSError alike: the stream did not open
         raise FrameUnavailable(f"the video stream did not open ({exc})") from None
     with container:
@@ -4841,6 +4866,172 @@ class FrameGrabber:
         return self.decode(self.stream(video_id, fresh=True), t)
 
 
+# --------------------------------------------------------------------------- mining: media made ahead
+#
+# A card used to wait for its media after Yomitan made it: the clip, then the frame (a stream
+# resolve and a decode). The viewer mines the line on screen, and the server knows where the
+# screen is: every /sync carries the playhead. So while a client syncs with auto on, Premine makes
+# the clip and the picture of the line at the playhead as it plays, on a thread of its own, and
+# keeps the last PREMINE_LINES of them. The attach takes them ready and only uploads. A line the
+# premine missed (shorter than a sync, a seek, a client without auto) is made on demand as before.
+#
+# Only lines the viewer played are made, one decode each from the stream the frame grab resolved
+# once; nothing is made for a session nobody syncs, and its media goes after PREMINE_IDLE.
+
+PREMINE_LINES = 10  # per video: the line at the playhead and the ones before it
+PREMINE_SESSIONS = 3  # videos with media kept; the one synced longest ago goes first
+PREMINE_IDLE = 60.0  # a video not synced for this long loses its media (ATTACH_SYNC_WINDOW)
+PREMINE_WAIT = 5.0  # an attach waits this long for its line when the line is being made
+
+
+def cue_at(cues, t: float) -> Optional[dict]:
+    """The cue on screen at `t`: the one started last among those spanning it (cues can overlap,
+    and their order is not their time order); None in a gap."""
+    found = None
+    for cue in cues:
+        if float(cue["start"]) <= t < float(cue["end"]) and (found is None or float(cue["start"]) > float(found["start"])):
+            found = cue
+    return found
+
+
+def clip_span(cue: dict, pad_ms: int) -> tuple:
+    """The clip of a cue with the client's padding: (start, end) in seconds."""
+    pad = pad_ms / 1000.0
+    start = max(0.0, float(cue["start"]) - pad)
+    return start, max(start + 0.3, float(cue["end"]) + pad)
+
+
+class Premine:
+    """The clip and picture of the lines being watched, made before their card exists.
+
+    observe(s) runs inside every /sync and does no I/O: it names the line at the playhead. The one
+    worker (run_forever()) makes it with `app.clip` and `frames.grab`; take() hands it to the
+    attach. `frames` is None for --mine-picture off. Media is keyed by the session token, the cue's
+    id and span, and the clip settings, so a restarted session, a revised cue or a new padding
+    never gets another line's media.
+    """
+
+    def __init__(self, app, frames=None, clock=time.time):
+        self.app, self.frames, self.clock = app, frames, clock
+        self.cond = threading.Condition()
+        # video id -> {"token", "seen": clock time of its last /sync, "ready": {key: media} oldest
+        # first, "wanted": (key, job) or None}, the one synced longest ago first. One line wanted
+        # per video: a viewer scrubbing past lines gets the one the playhead stopped on, not a queue.
+        self.videos: dict = {}
+        self.busy: Optional[tuple] = None  # (video id, key) being made right now
+
+    @staticmethod
+    def key(token: str, cue: dict, settings: dict) -> tuple:
+        return token, cue.get("id"), float(cue["start"]), float(cue["end"]), settings["pad_ms"], settings["format"]
+
+    def observe(self, s: Session) -> None:
+        with s.lock:
+            settings, token, live = s.anki, s.token, s.live
+            cue = cue_at(s.cues, s.want_t) if settings and settings["auto"] else None
+        now = self.clock()
+        with self.cond:
+            self.drop_idle(now)
+            if not settings or not settings["auto"]:
+                self.videos.pop(s.video_id, None)
+                return
+            entry = self.videos.pop(s.video_id, None)
+            if entry is None or entry["token"] != token:
+                entry = {"token": token, "ready": {}, "wanted": None}
+            entry["seen"] = now
+            self.videos[s.video_id] = entry  # last: the one synced most recently
+            while len(self.videos) > PREMINE_SESSIONS:
+                del self.videos[next(iter(self.videos))]
+            if cue is None:
+                return
+            key = self.key(token, cue, settings)
+            if key in entry["ready"] or self.busy == (s.video_id, key):
+                return
+            entry["wanted"] = key, (s.video_id, dict(cue), settings, live)
+            self.cond.notify_all()
+
+    def drop_idle(self, now: float) -> None:
+        for video_id in [v for v, entry in self.videos.items() if now - entry["seen"] > PREMINE_IDLE]:
+            del self.videos[video_id]
+
+    def next_job(self) -> Optional[tuple]:
+        """The line wanted of the video synced last: the one a card is likeliest to want."""
+        for entry in reversed(self.videos.values()):
+            job = entry["wanted"]
+            if job is not None:
+                entry["wanted"] = None
+                return job
+        return None
+
+    def run_once(self, wait: Optional[float] = PREMINE_IDLE) -> bool:
+        """Make one wanted line, waiting up to `wait` for one; False when there was none."""
+        with self.cond:
+            job = self.next_job()
+            if job is None and wait:
+                self.cond.wait(wait)
+                job = self.next_job()
+            self.drop_idle(self.clock())
+            if job is None:
+                return False
+            key, (video_id, cue, settings, live) = job
+            self.busy = video_id, key
+        media = None
+        try:
+            media = self.make(video_id, cue, settings, live)
+        finally:
+            with self.cond:
+                self.busy = None
+                entry = self.videos.get(video_id)
+                if media is not None and entry is not None and entry["token"] == key[0]:
+                    entry["ready"][key] = media
+                    while len(entry["ready"]) > PREMINE_LINES:
+                        del entry["ready"][next(iter(entry["ready"]))]
+                self.cond.notify_all()
+        return True
+
+    def run_forever(self) -> None:
+        while True:
+            try:
+                self.run_once()
+            except Exception:  # noqa: BLE001 - a line that fails is made again on demand
+                log.exception("anki premine: unexpected error")
+
+    def make(self, video_id: str, cue: dict, settings: dict, live: bool) -> dict:
+        """{"clip": app.clip()'s (data, mime, ext) or None, "picture": JPEG bytes or None}. A part
+        that fails is None, and the attach makes it on demand, with its own waits and messages."""
+        media = {"clip": None, "picture": None}
+        try:
+            media["clip"] = self.app.clip(video_id, *clip_span(cue, settings["pad_ms"]), settings["format"])
+        except Exception as exc:  # noqa: BLE001 - ClipNotReady (audio still coming) included
+            log.debug("[%s] anki premine: no clip for the line at %.2f s yet (%s)", video_id, float(cue["start"]),
+                      type(exc).__name__)
+        if self.frames is not None and not live:
+            try:
+                media["picture"] = self.frames.grab(video_id, frame_time(float(cue["start"]), float(cue["end"])))
+            except Exception as exc:  # noqa: BLE001 - FrameUnavailable, PyAV's own errors
+                log.debug("[%s] anki premine: no picture for the line at %.2f s (%s)", video_id, float(cue["start"]), exc)
+        return media
+
+    def take(self, s: Session, cue: dict, settings: dict, wait: float = PREMINE_WAIT) -> dict:
+        """The line's media made ahead, {"clip", "picture"}, each None where it is not there. A line
+        wanted or being made is waited for up to `wait`: that is quicker than making it twice."""
+        with s.lock:
+            token = s.token
+        key = self.key(token, cue, settings)
+        deadline = time.monotonic() + wait
+        with self.cond:
+            while True:
+                entry = self.videos.get(s.video_id)
+                if entry is None or entry["token"] != token:
+                    return {"clip": None, "picture": None}
+                if key in entry["ready"]:
+                    return dict(entry["ready"][key])
+                left = deadline - time.monotonic()
+                wanted = entry["wanted"] is not None and entry["wanted"][0] == key
+                if left <= 0 or not (wanted or self.busy == (s.video_id, key)):
+                    return {"clip": None, "picture": None}
+                self.cond.wait(left)
+
+
 # --------------------------------------------------------------------------- mining: attaching to new notes
 #
 # Yomitan makes a note from the line on screen; the server attaches the line's audio and picture.
@@ -4857,7 +5048,12 @@ ATTACH_NOTE_MAX_AGE = 180.0  # a note made longer ago than this when found is no
 ATTACH_MAX_BATCH = 5  # more new notes in one look: an import or a sync from another device
 ATTACH_CLIP_WAIT = 60.0  # how long an attach waits for audio still being fetched
 ATTACH_CLIP_RETRY = 2.0
-ANKI_POLL_MINING = 3.0  # the watcher's look while a client mines: a card gets its media in seconds
+ANKI_POLL_MINING = 3.0  # the watcher's look while a client mines and plays
+# While a viewer mining has paused, the look comes every second: the hover pause is when Yomitan's
+# card is made. A findNotes takes about 25 ms. A pause this long is reading, not mining, and goes
+# back to ANKI_POLL_MINING.
+ANKI_POLL_ENGAGED = 1.0
+ANKI_ENGAGED_SECONDS = 120.0
 MINE_LOG_KEEP = 20
 MINE_LOG_SECONDS = 120.0
 MINE_HANDLED_KEEP = 2000
@@ -4872,12 +5068,31 @@ class Miner:
         self.app, self.call, self.frames, self.clock, self.sleep = app, call, frames, clock, sleep
         self.jobs: "queue.Queue" = queue.Queue()
         self.handled: dict = {}  # note id -> None, oldest first: notes judged once, never again
+        self.premine = Premine(app, frames, clock)
+        # Whether AnkiConnect answers (the watcher's last look); with Anki closed no card can come,
+        # so nothing is made ahead. start_anki_watcher() points it at the watcher.
+        self.anki_up = lambda: True
 
     # ---- what the watcher and /sync hand over
 
-    def watching(self) -> bool:
-        """Whether a client mines right now: the watcher then looks every ANKI_POLL_MINING."""
-        return bool(self.candidates())
+    def poll_interval(self) -> Optional[float]:
+        """The watcher's seconds between two looks: ANKI_POLL_ENGAGED while a client mining has
+        paused (for at most ANKI_ENGAGED_SECONDS), ANKI_POLL_MINING while one plays, None when none
+        mines (the watcher's own ANKI_POLL)."""
+        candidates = self.candidates()
+        if not candidates:
+            return None
+        now = self.clock()
+        for s in candidates:
+            with s.lock:
+                if s.paused and now - s.paused_since <= ANKI_ENGAGED_SECONDS:
+                    return ANKI_POLL_ENGAGED
+        return ANKI_POLL_MINING
+
+    def observe(self, s: Session) -> None:
+        """Every /sync: the line at the playhead is made ahead (Premine), while Anki answers."""
+        if self.anki_up():
+            self.premine.observe(s)
 
     def notes_added(self, ids) -> None:
         if len(ids) > ATTACH_MAX_BATCH:
@@ -5046,15 +5261,16 @@ class Miner:
             return self.outcome(s, nonce, "filled", f"The {what} card already has its picture and audio; nothing changed", note_id)
         base = f"shisuko_{s.video_id}_{int(round(float(cue['start']) * 1000))}"
         update, notes = {}, []
+        ready = self.premine.take(s, cue, settings)
         if audio_key:
-            clip = self.clip(s, cue, settings)
+            clip = ready["clip"] or self.clip(s, cue, settings)
             if clip is None:
                 notes.append("no audio")
             else:
                 data, _, ext = clip
                 update[audio_key] = f"[sound:{escape_html(self.store(f'{base}.{ext}', data))}]"
         if picture_key:
-            picture = self.picture(s, cue)
+            picture = ready["picture"] or self.picture(s, cue)
             if picture is None:
                 notes.append("no picture")
             else:
@@ -5087,9 +5303,7 @@ class Miner:
     def clip(self, s: Session, cue: dict, settings: dict) -> Optional[tuple]:
         """The cue's audio with the client's padding, from the server's own audio; None when there is
         none. Waits a while for audio still being fetched: the cues can be cached, the audio not."""
-        pad = settings["pad_ms"] / 1000.0
-        start = max(0.0, float(cue["start"]) - pad)
-        end = max(start + 0.3, float(cue["end"]) + pad)
+        start, end = clip_span(cue, settings["pad_ms"])
         deadline = self.clock() + ATTACH_CLIP_WAIT
         while True:
             try:
@@ -6567,7 +6781,8 @@ class App:
         return {"retrying": True, "retry_in": round(max(0.0, due - now), 1)}
 
     def sync(self, video_id: str, url: str, t: float, since: int, model=None, words: bool = False,
-             anki=None, mine: Optional[dict] = None, mined_since: Optional[int] = None, deck=None) -> dict:
+             anki=None, mine: Optional[dict] = None, mined_since: Optional[int] = None, deck=None,
+             paused: bool = False) -> dict:
         """The /sync answer. `words` asks for each cue's word timings; without it no cue carries
         any, so a client that never asks sees exactly what it saw before the field existed.
 
@@ -6578,7 +6793,10 @@ class App:
         that did not validate, `anki_error`; every other answer is what it was before.
 
         `deck` asks for the word colours' deck (deck_request()): the answer carries `deck` only
-        when the client's `since` token is not the deck's (DeckIndexes.ask())."""
+        when the client's `since` token is not the deck's (DeckIndexes.ask()).
+
+        `paused` is whether the client's video is paused: it sets how often Anki is looked at
+        (Miner.poll_interval())."""
         self.request_model(model)
         settings, anki_error = None, None
         if anki is not None:
@@ -6590,6 +6808,9 @@ class App:
         with s.lock:
             s.want_t = max(0.0, float(t))
             s.last_sync = time.time()
+            if paused and not s.paused:
+                s.paused_since = s.last_sync
+            s.paused = paused
             if settings is not None:
                 s.anki = settings
             since = max(0, min(int(since), len(s.cues)))
@@ -6623,6 +6844,8 @@ class App:
         # `mined_next`, so the next answer carries it, whatever cursor this request had.
         if mine is not None:
             self.queue_mine(s, mine)
+        if self.miner is not None:
+            self.miner.observe(s)
         if deck is not None:
             answer = self.deck_answer(deck)
             if answer is not None:
@@ -7107,6 +7330,8 @@ class Handler(BaseHTTPRequestHandler):
         extra = {key: value for key, value in (("anki", body.get("anki")), ("mine", mine), ("mined_since", mined_since),
                                                ("deck", body.get("deck")))
                  if value is not None}
+        if body.get("paused") is True:  # a literal true, as `words`; anything else is playing
+            extra["paused"] = True
         try:
             self._json(200, self.app.sync(video_id, str(body.get("url") or ""), t, since, model, words, **extra))
         except Exception as exc:  # noqa: BLE001

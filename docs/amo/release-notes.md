@@ -1,12 +1,13 @@
 0.7.0 was the last version on this listing; 0.8.0 to 0.14.0 came out on GitHub only (https://github.com/Multysquid/shisu-ko/releases has every release's full notes). What changed since 0.7.0:
 
+- 0.25.0: a Yomitan card gets its line's audio and picture in about a second.
 - 0.24.0: the server, not the extension, looks for a newer release, once a day; the extension makes no request beyond your computer. With Anki not running, a mine saves the line's audio and picture to Downloads again.
 - 0.21.1 to 0.23.0: the server syncs Anki after mining, gives a Yomitan card its line's audio and picture (Alt+Shift+M too) and reads your deck for the word colours; no alarms permission.
-- 0.21.0: a Japanese video with subtitles its creator uploaded shows their text, timed by Whisper.
-- 0.19.1, 0.19.2: subtitles for speech the voice detector misses (shouting, a quiet mix) and songs running past a window; a sentence's first words stay with it; no boxes with a hex code.
+- 0.21.0: a Japanese video with its creator's own subtitles shows their text, timed by Whisper.
+- 0.19.1, 0.19.2: subtitles for speech the voice detector misses and songs running past a window; a sentence's first words stay with it; no boxes with a hex code.
 - 0.19.0: a phone portal (server/portal.cmd, .sh): subtitles, lookups, mining on a phone.
-- 0.18.0: drag the subtitle by its grip to the top of the video, the window's bottom, or beside the video in vertical text.
-- 0.17.3: a video YouTube refuses for a moment (HTTP 403) is fetched again within seconds.
+- 0.18.0: drag the subtitle to the top of the video, the window's bottom, or beside the video in vertical text.
+- 0.17.3: a video YouTube refuses for a moment (HTTP 403) is fetched again.
 - 0.17.0: an Apple Silicon Mac transcribes on its own GPU, on large-v3-turbo; a video in another language is left alone before it downloads.
 - 0.16.0: Kitsune-Transcribe models beside Whisper, small and Japanese-only; setup installs PyTorch for them.
 - 0.15.0: Whisper on an AMD graphics card (experimental; 0.17.1: --ignore-old-graphics for older ones). Setup remembers which browser's YouTube cookies to send, for "Sign in to confirm you're not a bot".
