@@ -143,16 +143,18 @@ the screen is, so the server makes that line's media while it plays.
 `Miner.observe(s)` runs inside every `/sync` of a session whose client mines with auto on, while
 AnkiConnect answers (`Miner.anki_up`, the watcher's last look), and does no I/O: `Premine.observe()`
 names the line at the playhead (`cue_at()`: the cue spanning `want_t` that started last; none in
-a gap). The one worker thread (`anki-premine`, `run_once()`) makes the newest line wanted, of the
-video synced last first: `App.clip()` over `clip_span()` and `FrameGrabber.grab()` at
-`frame_time()`, a live stream's line its clip alone. A part that fails (audio still coming, DRM,
+a gap). Each video wants one line at a time, the newest named: a viewer scrubbing past ten lines
+gets the one the playhead stopped on made, not a queue of ten. The one worker thread
+(`anki-premine`, `run_once()`) makes the line wanted of the video synced last first:
+`App.clip()` over `clip_span()` and `FrameGrabber.grab()` at `frame_time()`, a live stream's
+line its clip alone. A part that fails (audio still coming, DRM,
 YouTube's refusal) is kept as None, and the attach makes that part on demand with its own waits
 and messages. `take()` hands the attach the line's media; a line wanted or being made is waited
 for up to `PREMINE_WAIT` (5 s), quicker than making it twice.
 
 Media is keyed by the session token, the cue's id, start and end, and the clip's `pad_ms` and
 `format`, so a restarted session, a revised cue or another padding never takes another line's
-media. The bounds: `PREMINE_LINES` (10) lines per video, made and wanted alike, the newest kept;
+media. The bounds: `PREMINE_LINES` (10) lines made per video, the newest kept, and one wanted;
 `PREMINE_SESSIONS` (3) videos, the one synced longest ago dropped first; a video not synced for
 `PREMINE_IDLE` (60 s), or synced with auto off, loses all of it. A line is about 30-50 KB of
 MP3 and 55-160 KB of JPEG, so the whole store stays a few MB.

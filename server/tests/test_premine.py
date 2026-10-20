@@ -117,12 +117,15 @@ def test_memory_is_bounded_by_lines_and_videos(rig):
     ready = premine.videos[VIDEO]["ready"]
     assert len(ready) == server.PREMINE_LINES
     assert [key[1] for key in ready] == [c["id"] for c in many[-server.PREMINE_LINES:]]  # the last lines played
-    # A viewer seeking faster than the lines are made: only the newest wanted ones stay queued.
+    # A viewer scrubbing faster than the lines are made: the line the playhead stopped on is the
+    # one made, and none of those it passed.
+    made = len(rig.grabs)
     for cue in many[:2 * server.PREMINE_LINES]:
         at(s, cue["start"] + 0.5)
         rig.miner.observe(s)
-    assert len(premine.videos[VIDEO]["wanted"]) == server.PREMINE_LINES
-    assert premine.next_job()[0][1] == many[2 * server.PREMINE_LINES - 1]["id"]  # the newest first
+    assert premine.videos[VIDEO]["wanted"][0][1] == many[2 * server.PREMINE_LINES - 1]["id"]
+    assert premine.run_once(wait=0) and not premine.run_once(wait=0)
+    assert len(rig.grabs) == made + 1
     videos = [VIDEO, OTHER, "Vid3aaaaaaa", "Vid4bbbbbbb"]
     for vid in videos:
         clock.t += 1
@@ -223,7 +226,7 @@ def test_an_attach_waits_for_the_line_being_made(rig):
 def test_sync_names_the_line_to_the_premine(rig):
     rig.session(t=14.0)
     sync(rig.app)  # t=14.0 with the extension's settings: auto is on by default
-    wanted = rig.miner.premine.videos[VIDEO]["wanted"]
-    assert [key[1] for key in wanted] == [1]
+    key, _ = rig.miner.premine.videos[VIDEO]["wanted"]
+    assert key[1] == 1
     rig.app.miner = None
     sync(rig.app)  # mining off: no miner, nothing named

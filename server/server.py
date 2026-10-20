@@ -4914,8 +4914,9 @@ class Premine:
     def __init__(self, app, frames=None, clock=time.time):
         self.app, self.frames, self.clock = app, frames, clock
         self.cond = threading.Condition()
-        # video id -> {"token", "seen": clock time of its last /sync, "ready": {key: media},
-        # "wanted": {key: job}}, the one synced longest ago first; both inner dicts oldest first.
+        # video id -> {"token", "seen": clock time of its last /sync, "ready": {key: media} oldest
+        # first, "wanted": (key, job) or None}, the one synced longest ago first. One line wanted
+        # per video: a viewer scrubbing past lines gets the one the playhead stopped on, not a queue.
         self.videos: dict = {}
         self.busy: Optional[tuple] = None  # (video id, key) being made right now
 
@@ -4935,7 +4936,7 @@ class Premine:
                 return
             entry = self.videos.pop(s.video_id, None)
             if entry is None or entry["token"] != token:
-                entry = {"token": token, "ready": {}, "wanted": {}}
+                entry = {"token": token, "ready": {}, "wanted": None}
             entry["seen"] = now
             self.videos[s.video_id] = entry  # last: the one synced most recently
             while len(self.videos) > PREMINE_SESSIONS:
@@ -4943,11 +4944,9 @@ class Premine:
             if cue is None:
                 return
             key = self.key(token, cue, settings)
-            if key in entry["ready"] or key in entry["wanted"] or self.busy == (s.video_id, key):
+            if key in entry["ready"] or self.busy == (s.video_id, key):
                 return
-            entry["wanted"][key] = (s.video_id, dict(cue), settings, live)
-            while len(entry["wanted"]) > PREMINE_LINES:
-                del entry["wanted"][next(iter(entry["wanted"]))]
+            entry["wanted"] = key, (s.video_id, dict(cue), settings, live)
             self.cond.notify_all()
 
     def drop_idle(self, now: float) -> None:
@@ -4955,12 +4954,12 @@ class Premine:
             del self.videos[video_id]
 
     def next_job(self) -> Optional[tuple]:
-        """The newest line wanted, of the video synced last: the one a card is likeliest to want."""
-        for video_id in reversed(list(self.videos)):
-            wanted = self.videos[video_id]["wanted"]
-            if wanted:
-                key = next(reversed(wanted))
-                return key, wanted.pop(key)
+        """The line wanted of the video synced last: the one a card is likeliest to want."""
+        for entry in reversed(self.videos.values()):
+            job = entry["wanted"]
+            if job is not None:
+                entry["wanted"] = None
+                return job
         return None
 
     def run_once(self, wait: Optional[float] = PREMINE_IDLE) -> bool:
@@ -5029,7 +5028,8 @@ class Premine:
                 if key in entry["ready"]:
                     return dict(entry["ready"][key])
                 left = deadline - time.monotonic()
-                if left <= 0 or (key not in entry["wanted"] and self.busy != (s.video_id, key)):
+                wanted = entry["wanted"] is not None and entry["wanted"][0] == key
+                if left <= 0 or not (wanted or self.busy == (s.video_id, key)):
                     return {"clip": None, "picture": None}
                 self.cond.wait(left)
 
