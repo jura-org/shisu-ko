@@ -899,7 +899,7 @@ def test_start_anki_watcher_starts_the_miner_beside_the_sync(monkeypatch, tmp_pa
     expired = []
     monkeypatch.setattr(server.DeckIndexes, "notes_added", lambda self, ids: expired.append(ids))
     watcher = server.start_anki_watcher(args(anki_sync="off"), app)
-    assert started == ["anki-mine", "anki-deck", "anki-sync"] and watcher.sync_on is False
+    assert started == ["anki-mine", "anki-premine", "anki-deck", "anki-sync"] and watcher.sync_on is False
     assert isinstance(app.miner.frames, server.FrameGrabber) and isinstance(app.decks, server.DeckIndexes)
     # A new note reaches both: the miner judges it, and the deck indexes are read again.
     watcher.on_new([5])

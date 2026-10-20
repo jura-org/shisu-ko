@@ -4408,6 +4408,7 @@ def start_anki_watcher(args, app=None) -> Optional[AnkiWatcher]:
         app.miner = miner
         listeners.append(miner.notes_added)
         threading.Thread(target=miner.run_forever, daemon=True, name="anki-mine").start()
+        threading.Thread(target=miner.premine.run_forever, daemon=True, name="anki-premine").start()
         log.info("anki mine: new notes get their line's audio%s", " and picture" if picture else " (no picture: --mine-picture off)")
     if colours:
         app.decks = DeckIndexes(call)
@@ -4420,6 +4421,8 @@ def start_anki_watcher(args, app=None) -> Optional[AnkiWatcher]:
 
     watcher = AnkiWatcher(call, url=url, sync=on, on_new=on_new if listeners else None,
                           fast=miner.watching if miner else None)
+    if miner is not None:
+        miner.anki_up = lambda: watcher.reachable is not False
     threading.Thread(target=watcher.run_forever, daemon=True, name="anki-sync").start()
     return watcher
 
@@ -4846,6 +4849,174 @@ class FrameGrabber:
         return self.decode(self.stream(video_id, fresh=True), t)
 
 
+# --------------------------------------------------------------------------- mining: media made ahead
+#
+# A card used to wait for its media after Yomitan made it: the clip, then the frame (a stream
+# resolve and a decode). The viewer mines the line on screen, and the server knows where the
+# screen is: every /sync carries the playhead. So while a client syncs with auto on, Premine makes
+# the clip and the picture of the line at the playhead as it plays, on a thread of its own, and
+# keeps the last PREMINE_LINES of them. The attach takes them ready and only uploads. A line the
+# premine missed (shorter than a sync, a seek, a client without auto) is made on demand as before.
+#
+# Only lines the viewer played are made, one decode each from the stream the frame grab resolved
+# once; nothing is made for a session nobody syncs, and its media goes after PREMINE_IDLE.
+
+PREMINE_LINES = 10  # per video: the line at the playhead and the ones before it
+PREMINE_SESSIONS = 3  # videos with media kept; the one synced longest ago goes first
+PREMINE_IDLE = 60.0  # a video not synced for this long loses its media (ATTACH_SYNC_WINDOW)
+PREMINE_WAIT = 5.0  # an attach waits this long for its line when the line is being made
+
+
+def cue_at(cues, t: float) -> Optional[dict]:
+    """The cue on screen at `t`: the one started last among those spanning it (cues can overlap,
+    and their order is not their time order); None in a gap."""
+    found = None
+    for cue in cues:
+        if float(cue["start"]) <= t < float(cue["end"]) and (found is None or float(cue["start"]) > float(found["start"])):
+            found = cue
+    return found
+
+
+def clip_span(cue: dict, pad_ms: int) -> tuple:
+    """The clip of a cue with the client's padding: (start, end) in seconds."""
+    pad = pad_ms / 1000.0
+    start = max(0.0, float(cue["start"]) - pad)
+    return start, max(start + 0.3, float(cue["end"]) + pad)
+
+
+class Premine:
+    """The clip and picture of the lines being watched, made before their card exists.
+
+    observe(s) runs inside every /sync and does no I/O: it names the line at the playhead. The one
+    worker (run_forever()) makes it with `app.clip` and `frames.grab`; take() hands it to the
+    attach. `frames` is None for --mine-picture off. Media is keyed by the session token, the cue's
+    id and span, and the clip settings, so a restarted session, a revised cue or a new padding
+    never gets another line's media.
+    """
+
+    def __init__(self, app, frames=None, clock=time.time):
+        self.app, self.frames, self.clock = app, frames, clock
+        self.cond = threading.Condition()
+        # video id -> {"token", "seen": clock time of its last /sync, "ready": {key: media},
+        # "wanted": {key: job}}, the one synced longest ago first; both inner dicts oldest first.
+        self.videos: dict = {}
+        self.busy: Optional[tuple] = None  # (video id, key) being made right now
+
+    @staticmethod
+    def key(token: str, cue: dict, settings: dict) -> tuple:
+        return token, cue.get("id"), float(cue["start"]), float(cue["end"]), settings["pad_ms"], settings["format"]
+
+    def observe(self, s: Session) -> None:
+        with s.lock:
+            settings, token, live = s.anki, s.token, s.live
+            cue = cue_at(s.cues, s.want_t) if settings and settings["auto"] else None
+        now = self.clock()
+        with self.cond:
+            self.drop_idle(now)
+            if not settings or not settings["auto"]:
+                self.videos.pop(s.video_id, None)
+                return
+            entry = self.videos.pop(s.video_id, None)
+            if entry is None or entry["token"] != token:
+                entry = {"token": token, "ready": {}, "wanted": {}}
+            entry["seen"] = now
+            self.videos[s.video_id] = entry  # last: the one synced most recently
+            while len(self.videos) > PREMINE_SESSIONS:
+                del self.videos[next(iter(self.videos))]
+            if cue is None:
+                return
+            key = self.key(token, cue, settings)
+            if key in entry["ready"] or key in entry["wanted"] or self.busy == (s.video_id, key):
+                return
+            entry["wanted"][key] = (s.video_id, dict(cue), settings, live)
+            while len(entry["wanted"]) > PREMINE_LINES:
+                del entry["wanted"][next(iter(entry["wanted"]))]
+            self.cond.notify_all()
+
+    def drop_idle(self, now: float) -> None:
+        for video_id in [v for v, entry in self.videos.items() if now - entry["seen"] > PREMINE_IDLE]:
+            del self.videos[video_id]
+
+    def next_job(self) -> Optional[tuple]:
+        """The newest line wanted, of the video synced last: the one a card is likeliest to want."""
+        for video_id in reversed(list(self.videos)):
+            wanted = self.videos[video_id]["wanted"]
+            if wanted:
+                key = next(reversed(wanted))
+                return key, wanted.pop(key)
+        return None
+
+    def run_once(self, wait: Optional[float] = PREMINE_IDLE) -> bool:
+        """Make one wanted line, waiting up to `wait` for one; False when there was none."""
+        with self.cond:
+            job = self.next_job()
+            if job is None and wait:
+                self.cond.wait(wait)
+                job = self.next_job()
+            self.drop_idle(self.clock())
+            if job is None:
+                return False
+            key, (video_id, cue, settings, live) = job
+            self.busy = video_id, key
+        try:
+            media = self.make(video_id, cue, settings, live)
+        finally:
+            with self.cond:
+                self.busy = None
+                entry = self.videos.get(video_id)
+                if entry is not None and entry["token"] == key[0]:
+                    entry["ready"][key] = media
+                    while len(entry["ready"]) > PREMINE_LINES:
+                        del entry["ready"][next(iter(entry["ready"]))]
+                self.cond.notify_all()
+        return True
+
+    def run_forever(self) -> None:
+        while True:
+            try:
+                self.run_once()
+            except Exception:  # noqa: BLE001 - a line that fails is made again on demand
+                log.exception("anki premine: unexpected error")
+
+    def make(self, video_id: str, cue: dict, settings: dict, live: bool) -> dict:
+        """{"clip": app.clip()'s (data, mime, ext) or None, "picture": JPEG bytes or None}. A part
+        that fails is None, and the attach makes it on demand, with its own waits and messages."""
+        media = {"clip": None, "picture": None}
+        started = time.monotonic()
+        try:
+            media["clip"] = self.app.clip(video_id, *clip_span(cue, settings["pad_ms"]), settings["format"])
+        except Exception as exc:  # noqa: BLE001 - ClipNotReady (audio still coming) included
+            log.debug("[%s] anki premine: no clip for the line at %.2f s yet (%s)", video_id, float(cue["start"]),
+                      type(exc).__name__)
+        if self.frames is not None and not live:
+            try:
+                media["picture"] = self.frames.grab(video_id, frame_time(float(cue["start"]), float(cue["end"])))
+            except Exception as exc:  # noqa: BLE001 - FrameUnavailable, PyAV's own errors
+                log.debug("[%s] anki premine: no picture for the line at %.2f s (%s)", video_id, float(cue["start"]), exc)
+        log.debug("[%s] anki premine: the line at %.2f s made in %.0f ms", video_id, float(cue["start"]),
+                  (time.monotonic() - started) * 1000)
+        return media
+
+    def take(self, s: Session, cue: dict, settings: dict, wait: float = PREMINE_WAIT) -> dict:
+        """The line's media made ahead, {"clip", "picture"}, each None where it is not there. A line
+        wanted or being made is waited for up to `wait`: that is quicker than making it twice."""
+        with s.lock:
+            token = s.token
+        key = self.key(token, cue, settings)
+        deadline = time.monotonic() + wait
+        with self.cond:
+            while True:
+                entry = self.videos.get(s.video_id)
+                if entry is None or entry["token"] != token:
+                    return {"clip": None, "picture": None}
+                if key in entry["ready"]:
+                    return dict(entry["ready"][key])
+                left = deadline - time.monotonic()
+                if left <= 0 or (key not in entry["wanted"] and self.busy != (s.video_id, key)):
+                    return {"clip": None, "picture": None}
+                self.cond.wait(left)
+
+
 # --------------------------------------------------------------------------- mining: attaching to new notes
 #
 # Yomitan makes a note from the line on screen; the server attaches the line's audio and picture.
@@ -4877,12 +5048,21 @@ class Miner:
         self.app, self.call, self.frames, self.clock, self.sleep = app, call, frames, clock, sleep
         self.jobs: "queue.Queue" = queue.Queue()
         self.handled: dict = {}  # note id -> None, oldest first: notes judged once, never again
+        self.premine = Premine(app, frames, clock)
+        # Whether AnkiConnect answers (the watcher's last look); with Anki closed no card can come,
+        # so nothing is made ahead. start_anki_watcher() points it at the watcher.
+        self.anki_up = lambda: True
 
     # ---- what the watcher and /sync hand over
 
     def watching(self) -> bool:
         """Whether a client mines right now: the watcher then looks every ANKI_POLL_MINING."""
         return bool(self.candidates())
+
+    def observe(self, s: Session) -> None:
+        """Every /sync: the line at the playhead is made ahead (Premine), while Anki answers."""
+        if self.anki_up():
+            self.premine.observe(s)
 
     def notes_added(self, ids) -> None:
         if len(ids) > ATTACH_MAX_BATCH:
@@ -5051,15 +5231,17 @@ class Miner:
             return self.outcome(s, nonce, "filled", f"The {what} card already has its picture and audio; nothing changed", note_id)
         base = f"shisuko_{s.video_id}_{int(round(float(cue['start']) * 1000))}"
         update, notes = {}, []
+        started = time.monotonic()
+        ready = self.premine.take(s, cue, settings)
         if audio_key:
-            clip = self.clip(s, cue, settings)
+            clip = ready["clip"] or self.clip(s, cue, settings)
             if clip is None:
                 notes.append("no audio")
             else:
                 data, _, ext = clip
                 update[audio_key] = f"[sound:{escape_html(self.store(f'{base}.{ext}', data))}]"
         if picture_key:
-            picture = self.picture(s, cue)
+            picture = ready["picture"] or self.picture(s, cue)
             if picture is None:
                 notes.append("no picture")
             else:
@@ -5081,6 +5263,8 @@ class Miner:
             notes.insert(0, "sentence extended to the whole line")
         message = f"Added {' + '.join(update)} to the {what} Anki card" + (f" ({'; '.join(notes)})" if notes else "")
         log.info("[%s] anki mine: %s (note %d, line at %.2f s)", s.video_id, message, note_id, float(cue["start"]))
+        log.debug("[%s] anki mine: note %d took %.0f ms (clip %s, picture %s)", s.video_id, note_id,
+                  (time.monotonic() - started) * 1000, *("made ahead" if ready[k] else "made now" for k in ("clip", "picture")))
         return self.outcome(s, nonce, "attached", message, note_id)
 
     def store(self, filename: str, data: bytes) -> str:
@@ -5092,9 +5276,7 @@ class Miner:
     def clip(self, s: Session, cue: dict, settings: dict) -> Optional[tuple]:
         """The cue's audio with the client's padding, from the server's own audio; None when there is
         none. Waits a while for audio still being fetched: the cues can be cached, the audio not."""
-        pad = settings["pad_ms"] / 1000.0
-        start = max(0.0, float(cue["start"]) - pad)
-        end = max(start + 0.3, float(cue["end"]) + pad)
+        start, end = clip_span(cue, settings["pad_ms"])
         deadline = self.clock() + ATTACH_CLIP_WAIT
         while True:
             try:
@@ -6628,6 +6810,8 @@ class App:
         # `mined_next`, so the next answer carries it, whatever cursor this request had.
         if mine is not None:
             self.queue_mine(s, mine)
+        if self.miner is not None:
+            self.miner.observe(s)
         if deck is not None:
             answer = self.deck_answer(deck)
             if answer is not None:
