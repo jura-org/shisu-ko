@@ -546,6 +546,8 @@
   // being hidden or left.
   function savePosition() {
     if (!state.videoId || !state.playerReady || !state.everPlayed) return; // never overwrite with an unplayed 0
+    // A torn-down player reads 0: going home saved first, and the pagehide after it must not undo that.
+    if (state.tornDown) return;
     const t = state.player.getCurrentTime();
     if (!Number.isFinite(t)) return;
     if (!L.saveAllowed(t, state.resumeTarget, state.resumeLanded)) return; // the resume has not landed yet
@@ -568,7 +570,7 @@
       state.watch = L.newWatchLog();
       return;
     }
-    if (!state.player || state.player.kind !== "native") return;
+    if (!state.player || state.player.kind !== "native" || state.tornDown) return;
     const video = state.player.video;
     const duration = playerDuration();
     if (!duration) return;
