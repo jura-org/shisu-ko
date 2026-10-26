@@ -84,6 +84,7 @@
     glideUntil: 0,
     tornDown: false,
     endTimer: null,
+    endGen: 0, // bumped by every cancel: an endHome() past its await checks it still holds
     sheetClosedAt: 0,
     resumeTarget: null,
     resumeLanded: true,
@@ -708,8 +709,10 @@
     }).catch(() => {});
   }
 
-  function goHome() {
-    savePosition();
+  // alreadySaved: the caller has just saved this very position (endHome()); saving again would
+  // post the same t twice.
+  function goHome(alreadySaved = false) {
+    if (!alreadySaved) savePosition();
     reportWatch();
     teardownWatch();
     // Opened from the home page: going back pops that entry (and swipe-back keeps working). Opened
@@ -740,15 +743,19 @@
   function cancelEndHome() {
     clearTimeout(state.endTimer);
     state.endTimer = null;
+    state.endGen++;
   }
 
   async function endHome() {
     state.endTimer = null;
+    const gen = state.endGen;
     // The home list reads the positions as it loads: let the end's position land first (bounded,
     // so a slow computer only delays the way home). goHome() also flushes the watch report.
     const saved = savePosition();
     if (saved) await Promise.race([saved, new Promise((resolve) => setTimeout(resolve, 1000))]);
-    if (!state.tornDown && document.visibilityState !== "hidden") goHome();
+    // A touch, key, seek or play during that wait cancelled the beat: stay.
+    if (gen !== state.endGen || state.tornDown || document.visibilityState === "hidden") return;
+    goHome(true);
   }
 
   // Leaving the video: stop it and let go of its stream, so a page kept in the back-forward cache
