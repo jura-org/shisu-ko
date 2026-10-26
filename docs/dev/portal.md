@@ -360,7 +360,9 @@ card setup), each with what to do.
   `cubic-bezier(0.25, 1, 0.5, 1)`; reduced motion moves it at once. One row is open at a time; a tap
   elsewhere, a scroll of over 10 px or Escape closes it, and that tap opens nothing; a swipe never
   opens the video. Mark as watched sets the position to the end (`/api/position`), so the bar reads
-  full; on a finished video it reads Mark as unwatched and sets 0 (`watchedToggle()`). A row without
+  full; on a finished video it reads Mark as unwatched and sets 0 (`watchedToggle()`). A mark is
+  not a watch: it posts `keep_order: true`, so the entry keeps its `updated`, its place in the list
+  and its standing against the cap of saved positions. A row without
   a duration offers Delete alone. Delete drops the position here and on the computer
   (`/api/position/delete`). Edit's red minus opens the same actions, for the keyboard, a screen
   reader and the mouse.

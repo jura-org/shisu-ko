@@ -1991,10 +1991,14 @@ class PortalState:
             items = [{"id": k, **v} for k, v in self.load()["positions"].items()]
         return sorted(items, key=lambda x: x.get("updated", 0), reverse=True)
 
-    def put(self, video_id: str, t: float, duration=None, title=None, updated=None) -> dict:
+    def put(self, video_id: str, t: float, duration=None, title=None, updated=None, keep_order=False) -> dict:
+        """keep_order: an entry that exists keeps its `updated`, so the home list's order and which
+        entries the cap drops stay as they were (Mark as watched / unwatched is not a watch)."""
         with self.lock:
             positions = self.load()["positions"]
             entry = dict(positions.get(video_id) or {})
+            if keep_order and "updated" in entry:
+                updated = entry["updated"]
             entry["t"] = round(max(0.0, float(t)), 1)
             if isinstance(duration, (int, float)) and duration > 0:
                 entry["duration"] = round(float(duration), 1)
@@ -2399,7 +2403,11 @@ class Handler(BaseHTTPRequestHandler):
                 t = body.get("t")
                 if not valid_video_id(video_id) or not isinstance(t, (int, float)) or not 0 <= t < 1e6:
                     return self.json(400, {"ok": False, "error": "video_id and t please"})
-                entry = self.services.positions.put(video_id, t, body.get("duration"), body.get("title"))
+                keep_order = body.get("keep_order", False)
+                if not isinstance(keep_order, bool):
+                    return self.json(400, {"ok": False, "error": "keep_order: true or false"})
+                entry = self.services.positions.put(video_id, t, body.get("duration"), body.get("title"),
+                                                    keep_order=keep_order)
                 return self.json(200, {"ok": True, "position": entry})
             if path == "/api/position/delete":
                 video_id = body.get("video_id")

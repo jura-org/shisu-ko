@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pure helpers of portal/portal.py: allowlist, host check, cloze, glossary sanitiser, tokens."""
 
+import http.client
 import importlib.util
 import json
+import threading
 import time
+from http.server import ThreadingHTTPServer
 from types import SimpleNamespace
 import sys
 from pathlib import Path
@@ -383,6 +386,47 @@ def test_a_bare_position_keeps_the_title_and_duration(tmp_path):
     store.put("AAAAAAAAAAA", 500, 1033, "first", updated=1000)
     entry = store.put("AAAAAAAAAAA", 0)
     assert (entry["t"], entry["duration"], entry["title"]) == (0.0, 1033.0, "first")
+
+
+def test_keep_order_keeps_the_entry_s_place(tmp_path):
+    # Mark as watched / unwatched posts with keep_order: the row neither jumps to the top nor
+    # changes which entries the cap drops.
+    store = portal.PositionStore(tmp_path / "s.json")
+    store.put("AAAAAAAAAAA", 500, 1033, "first", updated=1000)
+    store.put("BBBBBBBBBBB", 5, 600, "second", updated=2000)
+    entry = store.put("AAAAAAAAAAA", 1033, 1033, keep_order=True)
+    assert (entry["t"], entry["updated"]) == (1033.0, 1000)
+    assert [v["id"] for v in store.all()] == ["BBBBBBBBBBB", "AAAAAAAAAAA"]
+    assert store.put("AAAAAAAAAAA", 0)["updated"] > 2000  # a plain save is a watch: to the top
+    assert store.put("CCCCCCCCCCC", 0, keep_order=True)["updated"] > 2000  # nothing to keep: now
+
+
+def test_api_position_keep_order_is_a_bool(tmp_path, monkeypatch):
+    services = make_services(tmp_path, "local")
+    services.positions = services.state
+    services.state.put("AAAAAAAAAAA", 500, 1033, "first", updated=1000)
+    monkeypatch.setattr(portal.Handler, "services", services)
+    monkeypatch.setattr(portal.Handler, "allowed_hosts", {"127.0.0.1"})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), portal.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+    def post(body):
+        conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+        conn.request("POST", "/api/position", json.dumps(body), {"Host": "127.0.0.1", "Content-Type": "application/json"})
+        res = conn.getresponse()
+        answer = (res.status, json.loads(res.read()))
+        conn.close()
+        return answer
+
+    try:
+        for bad in ("yes", 1, None):
+            assert post({"video_id": "AAAAAAAAAAA", "t": 1033, "keep_order": bad})[0] == 400
+        status, answer = post({"video_id": "AAAAAAAAAAA", "t": 1033, "duration": 1033, "keep_order": True})
+        assert status == 200 and answer["position"]["updated"] == 1000
+        assert post({"video_id": "AAAAAAAAAAA", "t": 0})[1]["position"]["updated"] > 1000
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
 
 
 def test_validate_card():
