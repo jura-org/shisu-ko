@@ -327,11 +327,40 @@ Yomitan's tokens. The page sends a token only; the deck is the portal's choice. 
 ## Positions and the home screen
 
 Where each video was left is kept in `portal-state.json` (`positions`), shared by every device:
-saved every 5 s while playing, on pause, seek, hide and leaving. Reopening resumes 2 s before it;
+saved every 5 s while playing, on pause, seek, hide and leaving (never by a torn-down player, which
+reads 0). Reopening resumes 2 s before it;
 under 10 s, or within 30 s of the end, starts from 0; a `?t=` in the link wins (`resumeTime()`).
-The home screen lists them with thumbnails (`/api/thumb/<id>`, cached on the computer) and a
-progress bar, and shows what is still missing (`/api/health`: the server, Yomitan API, AnkiConnect,
-yt-dlp, PyAV, and the card setup), each with what to do.
+The home screen lists them with thumbnails (`/api/thumb/<id>`, cached on the computer) and shows
+what is still missing (`/api/health`: the server, Yomitan API, AnkiConnect, yt-dlp, PyAV, and the
+card setup), each with what to do.
+
+- **The watch bar** is YouTube's: a translucent grey track flush with the thumbnail's bottom edge,
+  3 px here, and the watched part in YouTube's brand red, `#ff0033`, at least 3 px wide. Its length
+  is `watchedFraction()`, the position over the duration; within 2 s of the end the video is
+  finished (`finished()`, `FINISHED_S`) and the bar full. No duration, or a position of 0: no bar.
+- **Swipe actions**, as in iOS Mail: a row slides left off Mark as watched and Delete, 80 px a
+  slot. Pointer events, so a mouse drags too. A gesture picks its axis after 10 px (`swipeAxis()`);
+  the rows are `touch-action: pan-y`, so a vertical one stays the browser's scroll. From there the
+  row follows the finger 1:1, past the actions at 0.8, and right of closed on iOS's rubber band
+  (`swipeShift()`). Only transforms change during a drag, once per frame; the row's width is read
+  at the touch, nothing else is measured. Each action is a row-wide slab sliding in from the right
+  edge, so the buttons grow with the drag (`actionOffsets()`), the icon centred in what shows and
+  the label fading in. A release follows the finger's speed over its last 100 ms
+  (`swipeVelocity()`): 0.4 px/ms or more to the left opens, to the right closes, however short;
+  slower, past a third of the actions opens (from open, it must close by a third); past 60% of the
+  row deletes (`swipeSettle()`, `SWIPE`). Past that point Delete takes the whole width, with a short
+  vibration where the browser has one (Android). It springs there in 300 ms on
+  `cubic-bezier(0.25, 1, 0.5, 1)`; reduced motion moves it at once. One row is open at a time; a tap
+  elsewhere, a scroll of over 10 px or Escape closes it, and that tap opens nothing; a swipe never
+  opens the video. Mark as watched sets the position to the end (`/api/position`), so the bar reads
+  full; on a finished video it reads Mark as unwatched and sets 0 (`watchedToggle()`). A row without
+  a duration offers Delete alone. Delete drops the position here and on the computer
+  (`/api/position/delete`). Edit's red minus opens the same actions, for the keyboard, a screen
+  reader and the mouse.
+- **The end returns home.** A video played to its end (`ended`, or YouTube's player's ended state)
+  goes home after 1.5 s, its end saved first so the bar there is full. A touch, a key, a hidden
+  page or an open sheet in that beat keeps the viewer on the video. A live stream never returns,
+  nor does an `ended` more than 2 s short of the duration; a scrub to the very end is an end.
 
 `portal-state.json` is written atomically (a temporary file and a rename).
 

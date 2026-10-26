@@ -225,10 +225,28 @@ test("resumeTime: ?t= wins, near start and near end start over", () => {
   assert.equal(L.resumeTime({ saved: null, urlT: null }), 0);
 });
 
-test("watchedFraction", () => {
+test("watchedFraction: the position over the duration, the last 2 s finished", () => {
   assert.equal(L.watchedFraction({ t: 250, duration: 1000 }), 0.25);
-  assert.equal(L.watchedFraction({ t: 990, duration: 1000 }), 1);
-  assert.equal(L.watchedFraction({ t: 50 }), 0);
+  assert.equal(L.watchedFraction({ t: 990, duration: 1000 }), 0.99); // 10 s left: not finished
+  assert.equal(L.watchedFraction({ t: 998, duration: 1000 }), 1);
+  assert.equal(L.watchedFraction({ t: 1000, duration: 1000 }), 1);
+  assert.equal(L.watchedFraction({ t: 1200, duration: 1000 }), 1); // past the end
+  assert.equal(L.watchedFraction({ t: 0.4, duration: 3600 }) > 0, true); // a sliver still shows
+  assert.equal(L.watchedFraction({ t: 50 }), 0); // no duration: no bar
+  assert.equal(L.watchedFraction({ t: 50, duration: null }), 0);
+  assert.equal(L.watchedFraction({ t: 0, duration: 1000 }), 0); // started over
+  assert.equal(L.watchedFraction({ t: -5, duration: 1000 }), 0);
+  assert.equal(L.watchedFraction({ t: "x", duration: 1000 }), 0);
+  assert.equal(L.watchedFraction(null), 0);
+});
+
+test("finished: within 2 s of a known end", () => {
+  assert.equal(L.finished(98, 100), true);
+  assert.equal(L.finished(97.9, 100), false);
+  assert.equal(L.finished(150, 100), true);
+  assert.equal(L.finished(98, 0), false);
+  assert.equal(L.finished(98, NaN), false);
+  assert.equal(L.finished(Infinity, Infinity), false); // a live stream never finishes
 });
 
 test("other languages: even timing by letters, words from Intl.Segmenter", () => {
@@ -483,4 +501,77 @@ test("the landscape mode turns only an upright viewport", () => {
   assert.equal(L.shouldTurn(390, 844), true);
   assert.equal(L.shouldTurn(844, 390), false);
   assert.equal(L.shouldTurn(800, 800), false);
+});
+
+test("swipeAxis: nothing before 10 px, then the larger direction", () => {
+  assert.equal(L.swipeAxis(6, 6), null);
+  assert.equal(L.swipeAxis(-12, 3), "x");
+  assert.equal(L.swipeAxis(4, -11), "y");
+  assert.equal(L.swipeAxis(-8, 8), "y"); // a tie scrolls: the page's own gesture wins
+});
+
+test("swipeSettle: a third opens, two thirds back closes, 60% of the row deletes", () => {
+  const row = { actions: 160, row: 360 };
+  assert.equal(L.swipeSettle({ ...row, shift: 50, wasOpen: false }), "closed");
+  assert.equal(L.swipeSettle({ ...row, shift: 54, wasOpen: false }), "open");
+  assert.equal(L.swipeSettle({ ...row, shift: 110, wasOpen: true }), "open");
+  assert.equal(L.swipeSettle({ ...row, shift: 100, wasOpen: true }), "closed");
+  assert.equal(L.swipeSettle({ ...row, shift: 215, wasOpen: false }), "open");
+  assert.equal(L.swipeSettle({ ...row, shift: 216, wasOpen: false }), "delete");
+  assert.equal(L.swipeSettle({ ...row, shift: 300, wasOpen: true }), "delete");
+});
+
+test("swipeSettle: a flick goes the way it moved, however short", () => {
+  const row = { actions: 160, row: 360 };
+  assert.equal(L.swipeSettle({ ...row, shift: 25, wasOpen: false, velocity: 0.6 }), "open"); // fast and short
+  assert.equal(L.swipeSettle({ ...row, shift: 25, wasOpen: false, velocity: 0.2 }), "closed"); // slow and short
+  assert.equal(L.swipeSettle({ ...row, shift: 140, wasOpen: true, velocity: -0.5 }), "closed"); // a flick right
+  assert.equal(L.swipeSettle({ ...row, shift: 140, wasOpen: true, velocity: -0.1 }), "open");
+  assert.equal(L.swipeSettle({ ...row, shift: 230, wasOpen: false, velocity: -1 }), "delete"); // past 60% is past
+});
+
+test("swipeShift: 1:1 to the actions, damped past them, a rubber band right of closed", () => {
+  const base = { row: 360, actions: 160 };
+  assert.equal(L.swipeShift({ ...base, start: 0, dx: -40 }), 40);
+  assert.equal(L.swipeShift({ ...base, start: 160, dx: 30 }), 130);
+  assert.equal(L.swipeShift({ ...base, start: 0, dx: -160 }), 160);
+  assert.equal(L.swipeShift({ ...base, start: 0, dx: -260 }), 240); // 160 + 100 * 0.8
+  assert.equal(L.swipeShift({ ...base, start: 160, dx: -400 }), 360); // never past the row
+  assert.equal(L.swipeShift({ ...base, start: 0, dx: 0 }), 0);
+  const band = L.swipeShift({ ...base, start: 0, dx: 50 });
+  assert.ok(band < 0 && band > -50 * 0.55, `rubber band: ${band}`);
+  assert.ok(L.swipeShift({ ...base, start: 0, dx: 5000 }) > -60); // tends to BAND, never reaches it
+  // the delete point is reachable: 60% of 360 = 216 at 230 px of travel
+  assert.ok(L.swipeShift({ ...base, start: 0, dx: -230 }) >= 216);
+});
+
+test("swipeVelocity: px/ms leftward over the last 100 ms", () => {
+  assert.equal(L.swipeVelocity([]), 0);
+  assert.equal(L.swipeVelocity([{ t: 0, x: 300 }]), 0);
+  // 60 px left in 50 ms
+  assert.equal(L.swipeVelocity([{ t: 0, x: 330 }, { t: 25, x: 300 }, { t: 50, x: 270 }]), 1.2);
+  // only the last 100 ms count: a slow start, then a quick finish
+  assert.equal(L.swipeVelocity([{ t: 0, x: 400 }, { t: 900, x: 330 }, { t: 950, x: 300 }, { t: 1000, x: 280 }]), 0.5);
+  // the finger stopped 200 ms before lifting: no flick
+  assert.equal(L.swipeVelocity([{ t: 0, x: 330 }, { t: 30, x: 250 }, { t: 230, x: 250 }]), 0);
+  // rightward is negative
+  assert.equal(L.swipeVelocity([{ t: 0, x: 200 }, { t: 40, x: 240 }]), -1);
+});
+
+test("actionOffsets: the buttons share the uncovered width; full gives Delete all of it", () => {
+  assert.deepEqual(L.actionOffsets(160, 2, false), [160, 80]);
+  assert.deepEqual(L.actionOffsets(60, 2, false), [60, 30]);
+  assert.deepEqual(L.actionOffsets(250, 2, true), [250, 250]);
+  assert.deepEqual(L.actionOffsets(100, 1, false), [100]);
+  assert.deepEqual(L.actionOffsets(-20, 2, false), [0, 0]); // the rubber band shows nothing
+});
+
+test("watchedToggle: an unfinished video goes to its end, a finished one back to 0", () => {
+  assert.equal(L.watchedToggle({ t: 120, duration: 600 }), 600);
+  assert.equal(L.watchedToggle({ t: 0, duration: 600 }), 600);
+  assert.equal(L.watchedToggle({ t: 599, duration: 600 }), 0); // within 2 s: finished
+  assert.equal(L.watchedToggle({ t: 600, duration: 600 }), 0);
+  assert.equal(L.watchedFraction({ t: L.watchedToggle({ t: 120, duration: 600 }), duration: 600 }), 1); // the bar reads full
+  assert.equal(L.watchedToggle({ t: 120 }), null); // no duration: no action
+  assert.equal(L.watchedToggle(null), null);
 });

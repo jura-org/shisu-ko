@@ -21,6 +21,7 @@
   const TOAST_MS = 2000;
   const WATCH_FIRST_MS = 10000; // the first /api/watched report after play starts, then one every
   const WATCH_REPORT_MS = 30000; // WATCH_REPORT_MS while playing, and at every pause, end and leave
+  const END_HOME_MS = 1500; // a finished video goes home after this beat, so its end is seen
   // YT.PlayerState values, usable before the API has loaded.
   const YT_ENDED = 0;
   const YT_PLAYING = 1;
@@ -82,6 +83,7 @@
     reanchor: false,
     glideUntil: 0,
     tornDown: false,
+    endTimer: null,
     sheetClosedAt: 0,
     resumeTarget: null,
     resumeLanded: true,
@@ -223,11 +225,14 @@
         }
       });
     }
+    $("edit-btn").textContent = S.edit;
     $("edit-btn").addEventListener("click", () => {
       const editing = !$("home").classList.contains("editing");
       $("home").classList.toggle("editing", editing);
-      $("edit-btn").textContent = editing ? "Done" : "Edit";
+      $("edit-btn").textContent = editing ? S.done : S.edit;
+      closeRow();
     });
+    bindSwipe();
     bindAnkiSetup();
     renderRecent(recentList()); // the local copy at once; the server's list replaces it
     // Opening a video from here: its back button may return here with history.back().
@@ -300,45 +305,347 @@
     return img;
   }
 
+  // Each row: the actions behind it (actionsFor()), and in front the row itself, which a swipe to
+  // the left slides off them. Edit mode's red minus opens the same actions.
   function renderRecent(list) {
     const ul = $("recent");
+    swipe.open = null;
+    swipe.drag = null;
     ul.replaceChildren();
-    $("recent-empty").hidden = list.length > 0;
-    $("edit-btn").hidden = !list.length;
-    for (const r of list) {
-      const li = document.createElement("li");
-      const a = document.createElement("a");
-      a.href = `?v=${encodeURIComponent(r.id)}`;
-      const thumb = document.createElement("div");
-      thumb.className = "thumb";
-      thumb.append(thumbImage(r.id));
-      const fraction = L.watchedFraction(r);
-      if (fraction > 0) {
-        const bar = document.createElement("div");
-        bar.className = "progress";
-        const fill = document.createElement("span");
-        fill.style.width = `${(fraction * 100).toFixed(1)}%`;
-        bar.append(fill);
-        thumb.append(bar);
+    for (const r of list) ul.append(recentRow(r));
+    listChanged();
+  }
+
+  function recentRow(r) {
+    const name = r.title || r.id;
+    const li = document.createElement("li");
+    const actions = document.createElement("div");
+    actions.className = "row-actions";
+    actions.inert = true;
+    const buttons = actionsFor(r).map((spec) => {
+      const button = document.createElement("button");
+      fillAction(button, spec, name);
+      button.addEventListener("click", () => button.spec.run(li, r));
+      return button;
+    });
+    actions.append(...buttons);
+    swipe.rows.set(li, { r, buttons, width: buttons.length * ACTION_W });
+
+    const front = document.createElement("div");
+    front.className = "row-front";
+    const a = document.createElement("a");
+    a.href = `?v=${encodeURIComponent(r.id)}`;
+    a.draggable = false; // a mouse drag swipes; it never drags the link away
+    const thumb = document.createElement("div");
+    thumb.className = "thumb";
+    thumb.append(thumbImage(r.id));
+    const title = document.createElement("div");
+    title.className = "title";
+    title.textContent = name;
+    a.append(thumb, title);
+    const remove = document.createElement("button");
+    remove.className = "remove";
+    remove.setAttribute("aria-label", S.rowActions(name));
+    remove.addEventListener("click", () => {
+      if (swipe.open === li) closeRow();
+      else {
+        openRow(li);
+        buttons[0].focus({ preventScroll: true });
       }
-      const title = document.createElement("div");
-      title.className = "title";
-      title.textContent = r.title || r.id;
-      a.append(thumb, title);
-      const remove = document.createElement("button");
-      remove.className = "remove";
-      remove.setAttribute("aria-label", S.removeVideo(r.title || r.id));
-      remove.addEventListener("click", async () => {
-        li.remove();
-        localStorage.setItem(RECENT_KEY, JSON.stringify(recentList().filter((x) => x.id !== r.id)));
-        try {
-          await api("/api/position/delete", { video_id: r.id });
-        } catch {
-          // gone locally; the server copy goes next time
+    });
+    front.append(remove, a);
+    li.append(actions, front);
+    drawBar(li, r);
+    return li;
+  }
+
+  // The watch bar under the thumbnail, drawn again whenever the position changes.
+  function drawBar(li, r) {
+    const thumb = li.querySelector(".thumb");
+    const old = thumb.querySelector(".progress");
+    if (old) old.remove();
+    const fraction = L.watchedFraction(r);
+    if (fraction <= 0) return;
+    const bar = document.createElement("div");
+    bar.className = "progress";
+    const fill = document.createElement("span");
+    fill.style.width = `${(fraction * 100).toFixed(1)}%`;
+    bar.append(fill);
+    thumb.append(bar);
+  }
+
+  // Line icons in the page's own SVG style (app.css svg), from path data.
+  const ICONS = {
+    trash: ["M4 7h16", "M9.5 7V4.5h5V7", "M6.5 7l1 12.5h9l1-12.5", "M10 11v5", "M14 11v5"],
+    eyeCheck: ["M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z", "M9 12.2l2.1 2.1 3.9-3.9"],
+    eyeOff: ["M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z", "M4 4l16 16"],
+  };
+
+  function icon(name) {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    for (const d of ICONS[name]) {
+      const path = document.createElementNS(NS, "path");
+      path.setAttribute("d", d);
+      svg.append(path);
+    }
+    return svg;
+  }
+
+  // The swipe's actions, left to right; Delete is always last (a full swipe runs it). Mark as
+  // watched needs the duration, which a row moved over from an old device's list may lack.
+  function actionsFor(r) {
+    const del = { className: "delete", icon: "trash", label: S.delete, aria: S.deleteVideo, run: deleteRow };
+    if (L.watchedToggle(r) === null) return [del];
+    return [markAction(r), del];
+  }
+
+  function markAction(r) {
+    return L.watchedToggle(r) === 0
+      ? { className: "mark", icon: "eyeOff", label: S.markUnwatched, aria: S.markUnwatchedVideo, run: markWatched }
+      : { className: "mark", icon: "eyeCheck", label: S.markWatched, aria: S.markWatchedVideo, run: markWatched };
+  }
+
+  function fillAction(button, spec, name) {
+    button.spec = spec;
+    button.className = spec.className;
+    const face = document.createElement("span");
+    face.className = "act-face";
+    const label = document.createElement("span");
+    label.textContent = spec.label;
+    face.append(icon(spec.icon), label);
+    const old = button.firstChild;
+    if (old) {
+      face.style.cssText = old.style.cssText;
+      label.style.opacity = old.lastChild.style.opacity;
+    }
+    button.replaceChildren(face);
+    button.setAttribute("aria-label", spec.aria(name));
+  }
+
+  function listChanged() {
+    const empty = !$("recent").children.length;
+    $("recent-empty").hidden = !empty;
+    $("edit-btn").hidden = empty;
+    if (empty && $("home").classList.contains("editing")) $("edit-btn").click();
+  }
+
+  function forget(id) {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(recentList().filter((x) => x.id !== id)));
+  }
+
+  async function deleteRow(li, r) {
+    if (swipe.open === li) swipe.open = null;
+    collapse(li);
+    forget(r.id);
+    try {
+      await api("/api/position/delete", { video_id: r.id });
+    } catch {
+      // gone locally; the server copy goes next time
+    }
+  }
+
+  // Mark as watched sets the position to the end, here and on the PC, so the bar reads full and the
+  // next open starts at 0 (resumeTime() starts the last 30 s over); on a finished video it marks it
+  // unwatched: 0, the bar gone. The button then offers the other.
+  async function markWatched(li, r) {
+    const t = L.watchedToggle(r);
+    if (t === null) return;
+    closeRow();
+    r.t = t;
+    drawBar(li, r);
+    fillAction(swipe.rows.get(li).buttons[0], markAction(r), r.title || r.id);
+    localStorage.setItem(RECENT_KEY, JSON.stringify(recentList().map((x) => (x.id === r.id ? { ...x, t } : x))));
+    try {
+      await api("/api/position", { video_id: r.id, t, duration: r.duration });
+    } catch {
+      // offline: the PC keeps the old position until the video is played again
+    }
+  }
+
+  // ------------------------------------------------------------ swiping a home row
+
+  // How it stays smooth: during a drag only transforms change (the row, and each button sliding in
+  // from the right edge), written once per frame; nothing is measured but the row's width, read at
+  // the touch. Released, the row springs to where swipeSettle() sends it (the finger's speed
+  // included) on a CSS transition; li.live holds will-change while a row moves.
+  const ACTION_W = 80; // one action button's share of an open row
+  const SETTLE_MS = 300; // app.css .recent .row-front transition
+  const EXPAND_MS = 200; // app.css .recent li .row-actions button.expanding
+  const COLLAPSE_MS = 300; // app.css .recent li.collapsing
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  // open: the row whose actions show. drag: the gesture under way. eat: the click this gesture would
+  // make is swallowed (it closed a row, or it was a swipe).
+  const swipe = { open: null, openScrollY: 0, drag: null, eat: false, gesture: 0, rows: new WeakMap() };
+
+  // shift px left of closed (negative: the rubber band to the right); rowW the row's width.
+  function setShift(li, shift, rowW) {
+    const row = swipe.rows.get(li);
+    li.querySelector(".row-front").style.transform = shift ? `translateX(${-shift}px)` : "";
+    // Past the delete point Delete takes the whole width, as in iOS Mail, with a tick where the
+    // device has one (Android; iOS gives the web none).
+    const full = shift >= rowW * L.SWIPE.DELETE;
+    const last = row.buttons[row.buttons.length - 1];
+    if (full !== li.classList.contains("full")) {
+      li.classList.toggle("full", full);
+      last.classList.add("expanding");
+      clearTimeout(last.expandTimer);
+      last.expandTimer = setTimeout(() => last.classList.remove("expanding"), EXPAND_MS);
+      if (full && navigator.vibrate) navigator.vibrate(8);
+    }
+    const offsets = L.actionOffsets(shift, row.buttons.length, full);
+    row.buttons.forEach((b, i) => {
+      b.style.transform = `translateX(${-offsets[i]}px)`;
+      // Its icon and label stay centred in the part of it that shows, until that is a full slot.
+      const shown = offsets[i] - (offsets[i + 1] || 0);
+      b.firstChild.style.transform = shown < ACTION_W ? `translateX(${(shown - ACTION_W) / 2}px)` : "";
+      // The label fades in over the second half of the slot: clipped words read worse than none.
+      b.firstChild.lastChild.style.opacity = Math.max(0, Math.min(1, (shown - ACTION_W / 2) / (ACTION_W / 2)));
+    });
+  }
+
+  function settle(li, shift) {
+    li.classList.add("live");
+    clearTimeout(li.settleTimer);
+    setShift(li, shift, li.offsetWidth);
+    if (!shift) li.settleTimer = setTimeout(() => li.classList.remove("live"), SETTLE_MS);
+  }
+
+  function openRow(li) {
+    if (swipe.open && swipe.open !== li) closeRow();
+    swipe.open = li;
+    swipe.openScrollY = window.scrollY;
+    li.querySelector(".row-actions").inert = false;
+    settle(li, swipe.rows.get(li).width);
+  }
+
+  function closeRow() {
+    const li = swipe.open;
+    if (!li) return;
+    swipe.open = null;
+    li.querySelector(".row-actions").inert = true;
+    settle(li, 0);
+  }
+
+  // The row slides off to the left, then its space closes.
+  function collapse(li) {
+    if (reducedMotion.matches) {
+      li.remove();
+      listChanged();
+      return;
+    }
+    settle(li, li.offsetWidth);
+    li.style.height = `${li.offsetHeight}px`;
+    void li.offsetHeight; // the height above is the transition's start
+    li.classList.add("collapsing");
+    li.style.height = "0px";
+    setTimeout(() => {
+      li.remove();
+      listChanged();
+    }, COLLAPSE_MS);
+  }
+
+  // Pointer events, so touch and a mouse drag alike. The rows are touch-action: pan-y: the browser
+  // scrolls vertically itself, and a gesture becomes a swipe only once its first SLOP px went
+  // sideways.
+  function bindSwipe() {
+    const ul = $("recent");
+    document.addEventListener("pointerdown", (ev) => {
+      swipe.eat = false;
+      swipe.gesture++;
+      const open = swipe.open;
+      // With a row open, a touch anywhere but on its actions or on the row itself only closes it.
+      if (open && !open.contains(ev.target)) {
+        closeRow();
+        swipe.eat = true;
+      }
+    }, true);
+    document.addEventListener("click", (ev) => {
+      if (!swipe.eat) return;
+      swipe.eat = false;
+      ev.preventDefault();
+      ev.stopPropagation();
+    }, true);
+    document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeRow(); });
+    // A scroll closes the open row; a few px of jitter (a rubber band settling) does not.
+    window.addEventListener("scroll", () => {
+      if (swipe.open && Math.abs(window.scrollY - swipe.openScrollY) > L.SWIPE.SLOP) closeRow();
+    }, { passive: true });
+
+    ul.addEventListener("pointerdown", (ev) => {
+      if (!ev.isPrimary || ev.button > 0 || swipe.eat) return;
+      const li = ev.target.closest("li");
+      if (!li || ev.target.closest(".row-actions, .remove")) return;
+      const row = swipe.rows.get(li);
+      // live (will-change) now, so the layers exist by the time the first SLOP px are past.
+      li.classList.add("live");
+      clearTimeout(li.settleTimer);
+      swipe.drag = { li, row, rowW: li.offsetWidth, id: ev.pointerId, x0: ev.clientX, y0: ev.clientY, axis: null,
+        start: li === swipe.open ? row.width : 0, shift: 0, frame: 0, samples: [{ t: ev.timeStamp, x: ev.clientX }] };
+    });
+    ul.addEventListener("pointermove", (ev) => {
+      const d = swipe.drag;
+      if (!d || ev.pointerId !== d.id) return;
+      const dx = ev.clientX - d.x0;
+      d.samples.push({ t: ev.timeStamp, x: ev.clientX });
+      if (d.samples.length > 12) d.samples.shift();
+      if (!d.axis) {
+        d.axis = L.swipeAxis(dx, ev.clientY - d.y0);
+        if (!d.axis) return;
+        if (d.axis === "y") {
+          swipe.drag = null;
+          if (d.li !== swipe.open) settle(d.li, 0); // drops live
+          closeRow();
+          return;
         }
+        d.li.setPointerCapture(d.id);
+        d.li.classList.add("dragging");
+        if (swipe.open && swipe.open !== d.li) closeRow();
+        // Measured from here, so the row starts moving under the finger, not SLOP px behind it.
+        d.x0 = ev.clientX;
+      }
+      d.shift = L.swipeShift({ start: d.start, dx: ev.clientX - d.x0, row: d.rowW, actions: d.row.width });
+      if (!d.frame) {
+        d.frame = requestAnimationFrame(() => {
+          d.frame = 0;
+          setShift(d.li, d.shift, d.rowW);
+        });
+      }
+    });
+    const release = (ev) => {
+      const d = swipe.drag;
+      if (!d || ev.pointerId !== d.id) return;
+      swipe.drag = null;
+      cancelAnimationFrame(d.frame);
+      if (!d.axis) {
+        // A tap on the open row closes it and opens nothing.
+        if (d.li === swipe.open) {
+          closeRow();
+          swipe.eat = true;
+        } else settle(d.li, 0);
+        return;
+      }
+      swipe.eat = true; // a swipe is never also a tap on the link
+      d.samples.push({ t: ev.timeStamp, x: ev.clientX });
+      d.li.classList.remove("dragging");
+      const verdict = ev.type === "pointercancel" ? (d.start ? "open" : "closed")
+        : L.swipeSettle({ shift: d.shift, actions: d.row.width, row: d.rowW, wasOpen: d.start > 0, velocity: L.swipeVelocity(d.samples) });
+      if (verdict === "delete") deleteRow(d.li, d.row.r);
+      else if (verdict === "open") openRow(d.li);
+      else if (swipe.open === d.li) closeRow();
+      else settle(d.li, 0);
+    };
+    ul.addEventListener("pointerup", release);
+    ul.addEventListener("pointercancel", release);
+    // The click that follows a gesture comes right after its pointerup; one that never comes
+    // (a touch that moved) must not eat a later click, a keyboard's among them.
+    for (const name of ["pointerup", "pointercancel"]) {
+      document.addEventListener(name, () => {
+        const gesture = swipe.gesture;
+        if (swipe.eat) setTimeout(() => { if (swipe.gesture === gesture) swipe.eat = false; }, 600);
       });
-      li.append(remove, a);
-      ul.append(li);
     }
   }
 
@@ -350,15 +657,17 @@
   }
 
   // Saved on the PC (shared by every device) and locally. keepalive lets it outlive a page that is
-  // being hidden or left.
+  // being hidden or left. Answers the request, or null when there was nothing to save.
   function savePosition() {
-    if (!state.videoId || !state.playerReady || !state.everPlayed) return; // never overwrite with an unplayed 0
+    if (!state.videoId || !state.playerReady || !state.everPlayed) return null; // never overwrite with an unplayed 0
+    // A torn-down player reads 0: going home saved first, and the pagehide after it must not undo that.
+    if (state.tornDown) return null;
     const t = state.player.getCurrentTime();
-    if (!Number.isFinite(t)) return;
-    if (!L.saveAllowed(t, state.resumeTarget, state.resumeLanded)) return; // the resume has not landed yet
+    if (!Number.isFinite(t)) return null;
+    if (!L.saveAllowed(t, state.resumeTarget, state.resumeLanded)) return null; // the resume has not landed yet
     state.t = t;
     remember();
-    fetch("/api/position", {
+    return fetch("/api/position", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ video_id: state.videoId, t, duration: playerDuration(), title: state.title || null }),
@@ -381,7 +690,7 @@
       state.watch = L.newWatchLog();
       return;
     }
-    if (!state.player || state.player.kind !== "native") return;
+    if (!state.player || state.player.kind !== "native" || state.tornDown) return;
     const video = state.player.video;
     const duration = playerDuration();
     if (!duration) return;
@@ -415,6 +724,33 @@
     }
   }
 
+  // A video that played to its end goes home after a beat, its position the end, so its bar there
+  // is full. Anything the viewer does in the beat keeps them here (cancelEndHome()), and so does a
+  // sheet already open. Not for a live stream, and not for an "ended" short of the end (an HLS
+  // stream may end a segment early): only the last FINISHED_S counts. A scrub to the very end is an
+  // end like any other.
+  function scheduleEndHome() {
+    cancelEndHome();
+    if (!state.playerReady || (state.syncData && state.syncData.live)) return;
+    if (!L.finished(state.player.getCurrentTime(), playerDuration())) return;
+    if (state.sheet.open || $("settings").classList.contains("open") || document.visibilityState === "hidden") return;
+    state.endTimer = setTimeout(endHome, END_HOME_MS);
+  }
+
+  function cancelEndHome() {
+    clearTimeout(state.endTimer);
+    state.endTimer = null;
+  }
+
+  async function endHome() {
+    state.endTimer = null;
+    // The home list reads the positions as it loads: let the end's position land first (bounded,
+    // so a slow computer only delays the way home). goHome() also flushes the watch report.
+    const saved = savePosition();
+    if (saved) await Promise.race([saved, new Promise((resolve) => setTimeout(resolve, 1000))]);
+    if (!state.tornDown && document.visibilityState !== "hidden") goHome();
+  }
+
   // Leaving the video: stop it and let go of its stream, so a page kept in the back-forward cache
   // neither plays nor downloads.
   function teardownWatch() {
@@ -444,8 +780,11 @@
     bindSettings();
     setInterval(tick, 250);
     requestAnimationFrame(frame);
+    // Any touch, click or key in the beat after the end keeps the viewer here.
+    for (const name of ["pointerdown", "keydown"]) document.addEventListener(name, cancelEndHome, true);
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") {
+        cancelEndHome();
         savePosition();
         reportWatch();
       }
@@ -657,6 +996,8 @@
       state.player.setPlaybackRate(settings.speed);
     }
     if (s === YT_PAUSED || s === YT_ENDED) savePosition();
+    if (s === YT_ENDED) scheduleEndHome();
+    else cancelEndHome();
     renderPlayState();
     updateVeil();
     sync();
@@ -689,6 +1030,7 @@
   function seek(t, andPlay) {
     if (!state.playerReady) return;
     state.resumeLanded = true; // the viewer chose a place: no resume correction, no saver guard
+    cancelEndHome();
     state.autoPausedFor = null;
     state.player.seekTo(Math.max(0, t), true);
     state.t = Math.max(0, t);
