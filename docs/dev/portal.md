@@ -144,7 +144,9 @@ tap. The tap lands a second or more after the words that prompted it, so closing
 seeks back before it plays (`lookupResume()`): by default one second before the tap, never before
 the line's start; with Settings > Resume after a lookup > Start of the line, to the line's start.
 The line is the tapped word's when it is the line being said or the one before it, else the line
-being said. Auto-pause skips that line's end once. A sheet opened while paused resumes nothing.
+being said. Before the first line (an intro, or a tap on the line still to come) there is no line:
+both settings resume one second before the tap, never at 0:00 unless the tap was within that
+second. Auto-pause skips that line's end once. A sheet opened while paused resumes nothing.
 
 ## The YouTube watch history
 

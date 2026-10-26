@@ -62,14 +62,16 @@
   // comes a second or more after the words that made the viewer stop: resuming there loses them.
   // The line is the tapped word's when it is the line being said or the one before it (still on
   // screen), else the line being said. "line" resumes at its start; anything else LOOKUP_LEAD_S
-  // before the tap, never before the line's start and never after the tap.
+  // before the tap, never before the line's start and never after the tap. Before the first line
+  // (an intro, or a tap on the line still to come) there is no line to anchor to: both modes
+  // resume LOOKUP_LEAD_S before the tap, so a long intro is never rewound to 0:00.
   const LOOKUP_LEAD_S = 1;
   function lookupResume(cues, at, tappedId, mode) {
     const active = activeCueIndex(cues, at);
     const tapped = cues.findIndex((c) => c.id === tappedId);
     const cue = cues[tapped >= 0 && (tapped === active || tapped === active - 1) ? tapped : active] || null;
-    const from = cue ? cue.start : 0;
-    const t = mode === "line" ? from : Math.max(from, at - LOOKUP_LEAD_S);
+    const lead = at - LOOKUP_LEAD_S;
+    const t = !cue ? lead : mode === "line" ? cue.start : Math.max(cue.start, lead);
     return { t: Math.max(0, Math.min(at, t)), cue };
   }
 

@@ -60,6 +60,20 @@ test("lookupResume goes back a second before the tap, never past the line's star
   assert.deepEqual(L.lookupResume([early], 2, 5, "line"), { t: 2, cue: early });
 });
 
+test("lookupResume before the first line: a second back in both modes, never to 0:00", () => {
+  const cues = [{ id: 0, start: 60, end: 63 }, { id: 1, start: 64, end: 66 }];
+  for (const mode of ["tap", "line"]) {
+    // A tap on the first line, shown ahead of time during a 55 s intro.
+    assert.deepEqual(L.lookupResume(cues, 55, 0, mode), { t: 54, cue: null }, mode);
+    // A tap on a later line, or on nothing known.
+    assert.deepEqual(L.lookupResume(cues, 55, 1, mode), { t: 54, cue: null }, mode);
+    assert.deepEqual(L.lookupResume(cues, 55, null, mode), { t: 54, cue: null }, mode);
+    // A tap within the lead of the start: 0, never below.
+    assert.deepEqual(L.lookupResume(cues, 0.6, 0, mode), { t: 0, cue: null }, mode);
+  }
+  assert.deepEqual(L.lookupResume([], 55, null, "line"), { t: 54, cue: null }); // no cues at all
+});
+
 test("tokenOffsets index the original line", () => {
   const out = L.tokenOffsets([{ text: "今日は" }, { text: "、" }, { text: "寿司" }]);
   assert.deepEqual(out.map((t) => [t.start, t.end]), [[0, 3], [3, 4], [4, 6]]);
