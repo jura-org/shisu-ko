@@ -478,6 +478,15 @@ test("a report while playing cuts the open stretch there and carries on from it"
   assert.equal(log.open, null);
 });
 
+test("the next report comes when the server's answer says, else not at all", () => {
+  assert.equal(L.watchNextMs({ ok: true, reported: true, next: 10 }), 10000);
+  assert.equal(L.watchNextMs({ next: 40.5 }), 40500);
+  for (const answer of [null, {}, { reported: false }, { next: 0 }, { next: -10 }, { next: "10" }, { next: NaN },
+    { next: Infinity }, { next: 3601 }]) {
+    assert.equal(L.watchNextMs(answer), null, JSON.stringify(answer));
+  }
+});
+
 test("a report holds at most twenty stretches; the rest wait for the next", () => {
   const log = L.newWatchLog();
   for (let i = 0; i < 25; i++) {

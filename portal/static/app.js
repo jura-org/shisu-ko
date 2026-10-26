@@ -19,8 +19,11 @@
   const GLIDE_MS = 400; // the list's transition (app.css .lyrics-track)
   const DOUBLE_TAP_MS = 300;
   const TOAST_MS = 2000;
-  const WATCH_FIRST_MS = 10000; // the first /api/watched report after play starts, then one every
-  const WATCH_REPORT_MS = 30000; // WATCH_REPORT_MS while playing, and at every pause, end and leave
+  // /api/watched: the first report 10 s after play starts (YouTube's first scheduled flush), then
+  // when the server's answer says (`next`, YouTube's own schedule), and a final one at every pause,
+  // end, hide and leave.
+  const WATCH_FIRST_MS = 10000;
+  const WATCH_UNANSWERED_MS = 40000; // the next report when no answer names one
   const END_HOME_MS = 1500; // a finished video goes home after this beat, so its end is seen
   // YT.PlayerState values, usable before the API has loaded.
   const YT_ENDED = 0;
@@ -103,7 +106,8 @@
     title: null,
     lastSavedAt: 0,
     watch: L.newWatchLog(), // the stretches our own player played, for /api/watched
-    watchSentAt: 0,
+    watchDueAt: Infinity, // the next scheduled /api/watched report; Infinity until a play starts the schedule
+    watchGapMs: WATCH_FIRST_MS, // playing time from a resume to that report: the server's last `next`
     lastShieldTap: null,
     inDeck: new Map(), // term -> boolean, from /api/canadd
     // The word colours: the deck's rows as the server sent them (L.applyDeck), and the words.js
@@ -702,7 +706,14 @@
     document.addEventListener(name, () => { lastActivity = Date.now(); }, { capture: true, passive: true });
   }
 
-  function reportWatch() {
+  // final: the viewing ends here (a pause, the end, the page hidden or left): YouTube gets this
+  // report's ping at once, marked final. A later play goes on in the same session.
+  function reportWatch(final = false) {
+    if (final) {
+      // Still playing (the page hidden, the player swapped): the schedule goes on; else a play restarts it.
+      const video = state.player && state.player.video;
+      state.watchDueAt = video && !video.paused && !video.ended ? Date.now() + state.watchGapMs : Infinity;
+    }
     if (!state.info) return; // not known yet: the stretches wait
     if (state.info.watch_history !== "on") {
       state.watch = L.newWatchLog();
@@ -715,20 +726,26 @@
     const playing = !video.paused && !video.ended;
     const ranges = L.watchDrain(state.watch, video.currentTime, playing);
     if (!ranges.length) return;
-    state.watchSentAt = Date.now();
+    const sentAt = Date.now();
+    if (!final) state.watchDueAt = sentAt + WATCH_UNANSWERED_MS;
     fetch("/api/watched", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ video_id: state.videoId, ranges, cmt: Math.min(video.currentTime, duration), duration,
-        state: playing ? "playing" : "paused", lact: Date.now() - lastActivity, volume: Math.round(video.volume * 100),
+        state: playing ? "playing" : "paused", final, lact: Date.now() - lastActivity, volume: Math.round(video.volume * 100),
         muted: video.muted, client: L.clientInfo(navigator.userAgent) }),
       keepalive: true,
+    }).then((r) => r.json()).then((answer) => {
+      const gap = L.watchNextMs(answer);
+      if (gap === null) return;
+      state.watchGapMs = gap;
+      if (!final && state.watchDueAt !== Infinity) state.watchDueAt = sentAt + state.watchGapMs;
     }).catch(() => {});
   }
 
   function goHome() {
     savePosition(); // after endHome()'s save, the same position: nothing posted again (repeatsSave())
-    reportWatch();
+    reportWatch(true);
     teardownWatch();
     // Opened from the home page: going back pops that entry (and swipe-back keeps working). Opened
     // any other way (a link, the home-screen app's start, a reload), there is no such entry: load home.
@@ -818,12 +835,12 @@
       if (document.visibilityState === "hidden") {
         cancelEndHome();
         savePosition();
-        reportWatch();
+        reportWatch(true);
       }
     });
     window.addEventListener("pagehide", () => {
       savePosition();
-      reportWatch();
+      reportWatch(true);
       teardownWatch();
     });
 
@@ -896,8 +913,9 @@
         } else {
           state.resumeLanded = true;
         }
-        state.watchSentAt = Date.now() - WATCH_REPORT_MS + WATCH_FIRST_MS;
       }
+      // A start or a resume (not the end of a stall): the schedule goes on from the server's last answer.
+      if (state.watchDueAt === Infinity) state.watchDueAt = Date.now() + state.watchGapMs;
       emit(YT_PLAYING);
     });
     // The played stretches, once the resume has landed (before it the element may still say 0).
@@ -909,7 +927,7 @@
     for (const name of ["pause", "ended"]) {
       video.addEventListener(name, () => {
         L.watchClose(state.watch);
-        reportWatch();
+        reportWatch(true);
       });
     }
     video.addEventListener("seeked", () => {
@@ -961,7 +979,7 @@
   function useYouTube(reason) {
     if (state.player && state.player.kind === "youtube") return;
     console.log("using YouTube's player:", reason);
-    reportWatch(); // what our own player played until now
+    reportWatch(true); // what our own player played until now
     if (state.player) {
       state.startAt = state.everPlayed ? state.player.getCurrentTime() : state.startAt;
       state.player.destroy();
@@ -1720,7 +1738,7 @@
       state.lastSavedAt = Date.now();
       savePosition();
     }
-    if (state.playing && Date.now() - state.watchSentAt >= WATCH_REPORT_MS) reportWatch();
+    if (state.playing && Date.now() >= state.watchDueAt) reportWatch();
   }
 
   // ------------------------------------------------------------ line navigation

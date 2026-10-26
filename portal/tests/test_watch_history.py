@@ -27,11 +27,15 @@ PLAYBACK = "https://s.youtube.com/api/stats/playback?cl=1&docid=X&ei=E&el=detail
 WATCHTIME = "https://s.youtube.com/api/stats/watchtime?cl=1&docid=X&ei=E&el=detailpage&len=600&ns=yt&plid=P"
 TRACKING = {"playback": PLAYBACK, "watchtime": WATCHTIME}
 CLIENT = {"c": "WEB", "cver": "2.20260101.00.00", "cr": "JP"}
-CAPTURED = {**TRACKING, "client": CLIENT}
+CADENCE = {"schedule": (10.0, 20.0, 30.0), "interval": 40.0}
+# What the capture keeps: the URLs moved to www.youtube.com, the client, the flush schedule.
+CAPTURED = {**{k: v.replace("//s.", "//www.") for k, v in TRACKING.items()}, "client": CLIENT, "cadence": CADENCE}
 RESPONSES = [
     {"streamingData": {}},  # a client's response without tracking
     {"playbackTracking": {"videostatsPlaybackUrl": {"baseUrl": PLAYBACK},
-                          "videostatsWatchtimeUrl": {"baseUrl": WATCHTIME}},
+                          "videostatsWatchtimeUrl": {"baseUrl": WATCHTIME},
+                          "videostatsScheduledFlushWalltimeSeconds": [10, 20, 30],
+                          "videostatsDefaultFlushIntervalSeconds": 40},
      "responseContext": {"serviceTrackingParams": [
          {"service": "GFEEDBACK", "params": [{"key": "ipcc", "value": "JP"}, {"key": "logged_in", "value": "1"}]},
          {"service": "CSI", "params": [{"key": "c", "value": "WEB"}, {"key": "cver", "value": "2.20260101.00.00"},
@@ -298,6 +302,27 @@ def test_resolve_without_the_switch_captures_nothing(home, fake_ytdlp):
     assert all(ydl.extractor.own_ran for ydl in FakeYoutubeDL.made)  # yt-dlp's own, untouched
 
 
+def test_tracking_urls_go_to_www_youtube_com_only_from_s_youtube_com():
+    assert portal.stats_host(PLAYBACK) == PLAYBACK.replace("https://s.youtube.com/", "https://www.youtube.com/")
+    for other in ("https://www.youtube.com/api/stats/playback?x=1", "https://m.youtube.com/api/stats/playback",
+                  "https://s.youtube.com.evil.example/api/stats/playback", "https://xs.youtube.com/api/stats/playback"):
+        assert portal.stats_host(other) == other
+    captured = portal.tracking_urls(RESPONSES)
+    assert all(urllib.parse.urlsplit(captured[k]).hostname == "www.youtube.com" for k in ("playback", "watchtime"))
+    assert query(captured["watchtime"]) == query(WATCHTIME)  # only the host moves
+
+
+def test_flush_cadence_reads_the_response_or_keeps_the_web_players():
+    assert portal.flush_cadence({"videostatsScheduledFlushWalltimeSeconds": [5, 15, 30.5],
+                                 "videostatsDefaultFlushIntervalSeconds": 60}) == {"schedule": (5.0, 15.0, 30.5),
+                                                                                  "interval": 60.0}
+    assert portal.flush_cadence({}) == CADENCE
+    for schedule in ([], [10, 5], [10, 11], [0, 10], [10, 20, 9999], ["10"], [True], list(range(10, 230, 20)), "10,20"):
+        assert portal.flush_cadence({"videostatsScheduledFlushWalltimeSeconds": schedule})["schedule"] == CADENCE["schedule"]
+    for interval in (0, 1, -40, 9999, "40", None, float("nan")):
+        assert portal.flush_cadence({"videostatsDefaultFlushIntervalSeconds": interval})["interval"] == 40.0
+
+
 def test_tracking_urls_takes_youtube_https_urls_only():
     assert portal.tracking_urls(RESPONSES) == CAPTURED
     assert portal.tracking_urls([]) is None and portal.tracking_urls(None) is None
@@ -361,6 +386,107 @@ def test_one_watchtime_ping_per_ten_seconds_merges_the_stretches():
     (ping,) = reporter.due(10.0)
     assert query(ping[1])["st"] == "10.000,50.000" and query(ping[1])["et"] == "14.000,55.000"
     assert reporter.due(30.0) == [] and reporter.wait_time(30.0) is None  # nothing new: nothing sent
+
+
+def test_the_schedule_sets_the_gap_and_the_next_report():
+    reporter = portal.WatchReporter("on", send=None, clock=lambda: 0.0)
+    reporter.background = False
+    assert reporter.next_report(VIDEO) is None
+    reporter.report(report([[0, 10]]), CAPTURED)
+    session = reporter.sessions[VIDEO]
+    assert [session.flush_at(n) for n in range(1, 6)] == [10, 20, 30, 70, 110]
+    assert session.gap() == portal.WATCH_PING_GAP and reporter.next_report(VIDEO) == 10.0
+    # A schedule with closer steps than WATCH_PING_GAP: the server never holds it back.
+    session.tracking = {**CAPTURED, "cadence": {"schedule": (4.0, 8.0), "interval": 30.0}}
+    assert session.gap() == 4.0
+    nexts = []
+    for flushes in (0, 1, 2, 3):
+        session.flushes = flushes
+        nexts.append(session.next_report())
+    assert nexts == [4.0, 4.0, 30.0, 30.0]
+    # A capture from before the schedule was kept: the web player's.
+    session.tracking = TRACKING
+    assert session.cadence() == {"schedule": portal.WATCH_FLUSH_SCHEDULE, "interval": portal.WATCH_FLUSH_INTERVAL}
+
+
+def test_a_final_report_goes_within_two_seconds_with_final_1():
+    clock = [0.0]
+    reporter = portal.WatchReporter("on", send=None, clock=lambda: clock[0])
+    reporter.background = False
+    reporter.report(report([[0, 10]]), CAPTURED)
+    first = reporter.due(0.0)
+    assert len(first) == 2 and "final" not in query(first[1][1])
+    # A pause 1 s later: not before WATCH_FINAL_GAP, then at once, not after the 10 s gap.
+    clock[0] = 1.0
+    reporter.report(report([[10, 11]], state="paused") | {"final": True}, CAPTURED)
+    assert reporter.due(1.0) == [] and reporter.wait_time(1.0) == pytest.approx(1.0)
+    (ping,) = reporter.due(2.0)
+    got = query(ping[1])
+    assert got["final"] == "1" and got["state"] == "paused" and got["st"] == "10.000" and got["et"] == "11.000"
+    assert portal.ping_summary(ping[1]).endswith("state=paused final=1")
+    # Another final at once (the page hidden right after): held to the 2 s limit.
+    clock[0] = 2.5
+    reporter.report(report([[11, 11.5]], state="paused") | {"final": True}, CAPTURED)
+    assert reporter.due(2.5) == [] and reporter.wait_time(2.5) == pytest.approx(1.5)
+    assert query(reporter.due(4.0)[0][1])["final"] == "1"
+    # A later play goes on in the same session, scheduled again, without final.
+    clock[0] = 20.0
+    reporter.report(report([[11.5, 21.5]]), CAPTURED)
+    (later,) = reporter.due(20.0)
+    assert "final" not in query(later[1]) and query(later[1])["cpn"] == got["cpn"]
+    clock[0] = 25.0
+    reporter.report(report([[21.5, 26.5]]), CAPTURED)
+    assert reporter.due(25.0) == []  # a scheduled report keeps the 10 s gap
+
+
+def test_a_final_report_then_more_play_before_its_ping_drops_final():
+    reporter = portal.WatchReporter("on", send=None, clock=lambda: 0.0)
+    reporter.background = False
+    reporter.report(report([[0, 10]]), CAPTURED)
+    reporter.due(0.0)
+    reporter.report(report([[10, 11]], state="paused") | {"final": True}, CAPTURED)
+    reporter.report(report([[11, 15]]), CAPTURED)  # the last report decides
+    (ping,) = reporter.due(10.0)
+    assert "final" not in query(ping[1]) and query(ping[1])["st"] == "10.000"
+
+
+def test_pings_carry_the_authuser_header_through_yt_dlp(monkeypatch):
+    opened = []
+
+    class Response:
+        status = 204
+
+        def read(self):
+            return b""
+
+        def close(self):
+            pass
+
+    class FakeYDL:
+        def __init__(self, opts):
+            pass
+
+        def urlopen(self, request):
+            opened.append(request)
+            return Response()
+
+    class Request:
+        def __init__(self, url, headers=None):
+            self.url, self.headers = url, headers
+
+    fake = SimpleNamespace(YoutubeDL=FakeYDL, networking=SimpleNamespace(Request=Request))
+    monkeypatch.setattr(portal, "import_ytdlp", lambda: fake)
+    monkeypatch.setattr(portal, "ydl_options", lambda *a, **k: {})
+    reporter = portal.WatchReporter("on")
+    assert reporter.youtube_get(CAPTURED["watchtime"]) == 204
+    (request,) = opened
+    assert request.url == CAPTURED["watchtime"] and request.headers == {"X-Goog-AuthUser": "0"}
+
+
+def test_yt_dlps_own_request_carries_the_header():
+    networking = pytest.importorskip("yt_dlp.networking")
+    request = networking.Request(CAPTURED["watchtime"], headers=portal.WATCH_HEADERS)
+    assert request.headers["x-goog-authuser"] == "0" and request.url == CAPTURED["watchtime"]
 
 
 def test_a_report_with_nothing_played_sends_nothing():
@@ -429,6 +555,8 @@ def test_merge_ranges_keeps_the_order_played():
     {"video_id": VIDEO, "ranges": [[0, 1, 2]], "duration": 600, "cmt": 0, "state": "playing"},
     {"video_id": VIDEO, "ranges": "0-5", "duration": 600, "cmt": 0, "state": "playing"},
     {"video_id": VIDEO, "ranges": None, "duration": 600, "cmt": 0, "state": "playing"},
+    {"video_id": VIDEO, "ranges": [], "duration": 600, "cmt": 0, "state": "paused", "final": "yes"},
+    {"video_id": VIDEO, "ranges": [], "duration": 600, "cmt": 0, "state": "paused", "final": 1},
 ])
 def test_bad_reports_are_refused(body):
     with pytest.raises(ValueError):
@@ -438,7 +566,8 @@ def test_bad_reports_are_refused(body):
 def test_a_good_report():
     got = portal.parse_watch_report({"video_id": VIDEO, "ranges": [[0, 604.5]], "duration": 600, "cmt": 604, "state": "paused",
                                      "url": "https://evil.example/"})
-    assert got == {"video_id": VIDEO, "ranges": [(0.0, 604.5)], "cmt": 604.0, "duration": 600.0, "state": "paused"}
+    assert got == {"video_id": VIDEO, "ranges": [(0.0, 604.5)], "cmt": 604.0, "duration": 600.0, "state": "paused",
+                   "final": False}
 
 
 # ---------------------------------------------------------------- /api/watched over HTTP
@@ -478,8 +607,12 @@ GOOD = {"video_id": VIDEO, "ranges": [[0, 30]], "duration": 600, "cmt": 30, "sta
 
 
 def test_api_watched_holds_a_good_report(server):
-    assert post(server.port, GOOD) == (200, {"ok": True, "reported": True})
+    # The answer names when the page reports next: YouTube's schedule, 10, 20, 30 s, then every 40 s.
+    assert post(server.port, GOOD) == (200, {"ok": True, "reported": True, "next": 10.0})
     assert server.services.watch.sessions[VIDEO].pending == [(0.0, 30.0)]
+    assert [post(server.port, GOOD)[1]["next"] for _ in range(3)] == [10.0, 40.0, 40.0]
+    # A final report does not move the schedule.
+    assert post(server.port, {**GOOD, "state": "paused", "final": True})[1]["next"] == 40.0
     # A video that never streamed through the portal: accepted, nothing held.
     assert post(server.port, {**GOOD, "video_id": "ZyXwVuTsRqP"}) == (200, {"ok": True, "reported": False})
 
@@ -574,7 +707,7 @@ def test_bad_page_context_is_refused(extra):
 
 def test_the_page_context_is_optional():
     got = portal.parse_watch_report({"video_id": VIDEO, "ranges": [], "duration": 600, "cmt": 0, "state": "paused"})
-    assert set(got) == {"video_id", "ranges", "cmt", "duration", "state"}
+    assert set(got) == {"video_id", "ranges", "cmt", "duration", "state", "final"} and got["final"] is False
     assert full_report(client={"os": "X11"})["client"] == {"cos": "X11"}
 
 
@@ -590,5 +723,5 @@ def test_fmt_and_afmt_are_the_variants_the_player_takes_segments_from(server, mo
         conn.request("GET", f"/api/hls/{video.token}/{path}", headers={"Host": "127.0.0.1"})
         assert conn.getresponse().status == 200
         conn.close()
-    assert post(server.port, GOOD) == (200, {"ok": True, "reported": True})
+    assert post(server.port, GOOD)[1]["reported"] is True
     assert server.services.watch.sessions[VIDEO].page == {"fmt": "134", "afmt": "140"}  # the variant playing now

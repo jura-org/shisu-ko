@@ -569,7 +569,9 @@ account, as if watched on YouTube: it lands in your watch history, and your reco
 time you actually watched. It reports through the YouTube cookies of the browser the server sends
 (`--save-cookies-from-browser firefox`; on Windows Chrome and Edge lock their cookies away) and
 does nothing without them. It sends YouTube which stretches of the video played, nothing else, and
-only for the portal's own player; YouTube's player, the fallback, records its own.
+only for the portal's own player; YouTube's player, the fallback, records its own. YouTube's
+history bar takes the position on videos of about 20 minutes or more; on shorter ones it shows a
+10% "started" mark, as it does for every client outside YouTube's own apps.
 
 ## Settings
 
