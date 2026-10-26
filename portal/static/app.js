@@ -8,7 +8,7 @@
   const SETTINGS_KEY = "portal.settings";
   const RECENT_KEY = "portal.recent";
   // wordColours is off by default, like the extension's cardStatus.
-  const DEFAULTS = { pauseOnLookup: true, autoPause: false, speed: 1, listening: false, furigana: false, sweep: true, wordColours: false };
+  const DEFAULTS = { pauseOnLookup: true, lookupResume: "tap", autoPause: false, speed: 1, listening: false, furigana: false, sweep: true, wordColours: false };
   const SPEEDS = [0.75, 1, 1.25, 1.5];
   const SYNC_PLAYING_MS = 1000;
   const SYNC_PAUSED_MS = 5000;
@@ -38,6 +38,7 @@
     window.portalDebug = debug;
   }
   if (!SPEEDS.includes(settings.speed)) settings.speed = 1;
+  if (settings.lookupResume !== "line") settings.lookupResume = "tap"; // "tap" or "line": lib.js lookupResume()
 
   const state = {
     videoId: null,
@@ -1798,6 +1799,7 @@
   function applySettings() {
     $("set-autopause").checked = settings.autoPause;
     $("set-lookup-pause").checked = settings.pauseOnLookup;
+    $(`set-resume-${settings.lookupResume}`).checked = true;
     $("set-furigana").checked = settings.furigana;
     $("set-listening").checked = settings.listening;
     $("set-sweep").checked = settings.sweep;
@@ -1834,6 +1836,11 @@
     });
     bindSwitch("set-autopause", "autoPause");
     bindSwitch("set-lookup-pause", "pauseOnLookup");
+    for (const id of ["set-resume-tap", "set-resume-line"]) $(id).addEventListener("change", (ev) => {
+      settings.lookupResume = ev.target.value;
+      saveSettings();
+      applySettings();
+    });
     bindSwitch("set-furigana", "furigana");
     bindSwitch("set-listening", "listening");
     bindSwitch("set-sweep", "sweep");

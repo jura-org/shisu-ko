@@ -182,6 +182,9 @@
     position: "Position",
     positionOf: (at, total) => `${at} of ${total}`,
     live: "LIVE",
+    resumeAfterLookup: "Resume after a lookup",
+    resumeBeforeTap: "Just before where I tapped",
+    resumeLineStart: "Start of the line",
   };
 
   function statusText(view) {

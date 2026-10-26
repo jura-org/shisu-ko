@@ -444,6 +444,22 @@ rt { font-size: 0.45em; color: var(--label-2); font-weight: 400; }
 .switch:checked { background: rgba(235, 235, 245, 0.75); }
 .switch:checked::after { transform: translateX(20px); background: #1c1c1e; }
 
+/* A choice among rows: a checkmark on the chosen one, drawn by the radio itself. */
+.check {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  width: 14px;
+  height: 8px;
+  margin: 0 4px 4px 0;
+  border: solid transparent;
+  border-width: 0 0 2.5px 2.5px;
+  border-radius: 0;
+  transform: rotate(-45deg);
+  cursor: pointer;
+}
+.check:checked { border-color: var(--label); }
+
 .segmented { display: flex; padding: 2px; border-radius: 9px; background: var(--fill); }
 .segmented button { min-width: 48px; height: 28px; border-radius: 7px; font-size: 13px; font-weight: 500; color: var(--label); }
 .segmented button.on { background: #636366; box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12); }
