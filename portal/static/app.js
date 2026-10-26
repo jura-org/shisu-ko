@@ -21,6 +21,7 @@
   const TOAST_MS = 2000;
   const WATCH_FIRST_MS = 10000; // the first /api/watched report after play starts, then one every
   const WATCH_REPORT_MS = 30000; // WATCH_REPORT_MS while playing, and at every pause, end and leave
+  const END_HOME_MS = 1500; // a finished video goes home after this beat, so its end is seen
   // YT.PlayerState values, usable before the API has loaded.
   const YT_ENDED = 0;
   const YT_PLAYING = 1;
@@ -82,6 +83,7 @@
     reanchor: false,
     glideUntil: 0,
     tornDown: false,
+    endTimer: null,
     sheetClosedAt: 0,
     resumeTarget: null,
     resumeLanded: true,
@@ -543,17 +545,17 @@
   }
 
   // Saved on the PC (shared by every device) and locally. keepalive lets it outlive a page that is
-  // being hidden or left.
+  // being hidden or left. Answers the request, or null when there was nothing to save.
   function savePosition() {
-    if (!state.videoId || !state.playerReady || !state.everPlayed) return; // never overwrite with an unplayed 0
+    if (!state.videoId || !state.playerReady || !state.everPlayed) return null; // never overwrite with an unplayed 0
     // A torn-down player reads 0: going home saved first, and the pagehide after it must not undo that.
-    if (state.tornDown) return;
+    if (state.tornDown) return null;
     const t = state.player.getCurrentTime();
-    if (!Number.isFinite(t)) return;
-    if (!L.saveAllowed(t, state.resumeTarget, state.resumeLanded)) return; // the resume has not landed yet
+    if (!Number.isFinite(t)) return null;
+    if (!L.saveAllowed(t, state.resumeTarget, state.resumeLanded)) return null; // the resume has not landed yet
     state.t = t;
     remember();
-    fetch("/api/position", {
+    return fetch("/api/position", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ video_id: state.videoId, t, duration: playerDuration(), title: state.title || null }),
@@ -603,6 +605,33 @@
     }
   }
 
+  // A video that played to its end goes home after a beat, its position the end, so its bar there
+  // is full. Anything the viewer does in the beat keeps them here (cancelEndHome()), and so does a
+  // sheet already open. Not for a live stream, and not for an "ended" short of the end (an HLS
+  // stream may end a segment early): only the last FINISHED_S counts. A scrub to the very end is an
+  // end like any other.
+  function scheduleEndHome() {
+    cancelEndHome();
+    if (!state.playerReady || (state.syncData && state.syncData.live)) return;
+    if (!L.finished(state.player.getCurrentTime(), playerDuration())) return;
+    if (state.sheet.open || $("settings").classList.contains("open") || document.visibilityState === "hidden") return;
+    state.endTimer = setTimeout(endHome, END_HOME_MS);
+  }
+
+  function cancelEndHome() {
+    clearTimeout(state.endTimer);
+    state.endTimer = null;
+  }
+
+  async function endHome() {
+    state.endTimer = null;
+    // The home list reads the positions as it loads: let the end's position land first (bounded,
+    // so a slow computer only delays the way home). goHome() also flushes the watch report.
+    const saved = savePosition();
+    if (saved) await Promise.race([saved, new Promise((resolve) => setTimeout(resolve, 1000))]);
+    if (!state.tornDown && document.visibilityState !== "hidden") goHome();
+  }
+
   // Leaving the video: stop it and let go of its stream, so a page kept in the back-forward cache
   // neither plays nor downloads.
   function teardownWatch() {
@@ -631,8 +660,11 @@
     bindSettings();
     setInterval(tick, 250);
     requestAnimationFrame(frame);
+    // Any touch, click or key in the beat after the end keeps the viewer here.
+    for (const name of ["pointerdown", "keydown"]) document.addEventListener(name, cancelEndHome, true);
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") {
+        cancelEndHome();
         savePosition();
         reportWatch();
       }
@@ -844,6 +876,8 @@
       state.player.setPlaybackRate(settings.speed);
     }
     if (s === YT_PAUSED || s === YT_ENDED) savePosition();
+    if (s === YT_ENDED) scheduleEndHome();
+    else cancelEndHome();
     renderPlayState();
     updateVeil();
     sync();
@@ -876,6 +910,7 @@
   function seek(t, andPlay) {
     if (!state.playerReady) return;
     state.resumeLanded = true; // the viewer chose a place: no resume correction, no saver guard
+    cancelEndHome();
     state.autoPausedFor = null;
     state.player.seekTo(Math.max(0, t), true);
     state.t = Math.max(0, t);
