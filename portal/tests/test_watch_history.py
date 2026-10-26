@@ -228,6 +228,51 @@ def test_reports_wait_for_the_tracking_urls_and_go_when_they_come():
     assert reporter.report({**report([[0, 5]]), "video_id": "ZyXwVuTsRqP"}, None) is False
 
 
+class RacingVideo(portal.HlsVideo):
+    """A video whose first read of `tracking` lets the signed-in look-up finish (`finish()`), so
+    the look-up lands exactly between Services.watched()'s reads of tracking and tracking_busy."""
+
+    finish = None
+
+    @property
+    def tracking(self):
+        value = self.__dict__.get("tracking")  # read before the look-up lands
+        finish, RacingVideo.finish = RacingVideo.finish, None
+        if finish:
+            finish()
+        return value
+
+    @tracking.setter
+    def tracking(self, value):
+        self.__dict__["tracking"] = value
+
+
+def test_a_report_racing_the_look_up_keeps_its_stretches(home, fake_ytdlp):
+    with_cookies(home)
+    services = portal.Services(SimpleNamespace(mode="local", config=home / "portal.json", watch_history="on"))
+    services.watch.background = False
+    video = RacingVideo(VIDEO)
+    video.tracking_busy = True  # start_tracking()'s claim
+    services.hls.videos[VIDEO] = video
+    FakeYoutubeDL.gate = threading.Event()
+    done = threading.Event()
+    look_up = threading.Thread(target=lambda: (services.hls.fetch_tracking(video), done.set()), daemon=True)
+    look_up.start()
+
+    def finish():
+        # The look-up's answer arrives now. It hands its URLs over under the lock the report holds,
+        # so it may not finish until the report is in; without that lock it finishes here.
+        FakeYoutubeDL.gate.set()
+        done.wait(0.5)
+
+    RacingVideo.finish = finish
+    assert services.watched(report([[0, 12]])) is True
+    assert done.wait(5)
+    assert video.tracking == CAPTURED and not video.tracking_busy
+    playback, watchtime = services.watch.due(time.monotonic())
+    assert query(playback[1])["cmt"] == "0.000" and query(watchtime[1])["st"] == "0.000"
+
+
 def test_resolve_without_the_switch_captures_nothing(home, fake_ytdlp):
     with_cookies(home)
     FakeYoutubeDL.anonymous_hls = False  # resolved signed in, yet the switch is off

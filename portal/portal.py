@@ -1074,17 +1074,21 @@ class Services:
 
     def watched(self, report: dict) -> bool:
         """A checked /api/watched report: held for YouTube when the video streamed through the
-        portal with its tracking URLs (or while they are looked up), else dropped."""
+        portal with its tracking URLs (or while they are looked up), else dropped.
+
+        hls.lock is held to the end: fetch_tracking() hands its URLs over under it, so a report
+        sees either the look-up still running (its session then waits for set_tracking()) or the
+        URLs, never the gap between the two."""
         with self.hls.lock:
             video = self.hls.videos.get(report["video_id"])
-        if video is None:
-            return False
-        for kind, param in (("v", "fmt"), ("a", "afmt")):
-            key = video.played.get(kind)
-            itag = itag_of(video.upstream.get(key, "")) if key else None
-            if itag:
-                report[param] = itag
-        return self.watch.report(report, video.tracking, waiting=video.tracking_busy)
+            if video is None:
+                return False
+            for kind, param in (("v", "fmt"), ("a", "afmt")):
+                key = video.played.get(kind)
+                itag = itag_of(video.upstream.get(key, "")) if key else None
+                if itag:
+                    report[param] = itag
+            return self.watch.report(report, video.tracking, waiting=video.tracking_busy)
 
     def card_info(self) -> dict:
         return {"ok": True, "card": self.card(), "saved": self.state.card(),
@@ -1456,15 +1460,20 @@ class HlsProxy:
                 ydl.extract_info(f"https://www.youtube.com/watch?v={video.video_id}", download=False, process=False)
             if not tracking:
                 raise UpstreamError("no tracking URLs in YouTube's answer")
-            video.tracking = tracking
-            if self.on_tracking:
-                self.on_tracking(video.video_id, tracking)
+            # One step under the lock Services.watched() reads under: the URLs, the waiting
+            # session's flush and the end of the look-up land together.
+            with self.lock:
+                video.tracking = tracking
+                if self.on_tracking:
+                    self.on_tracking(video.video_id, tracking)
+                video.tracking_busy = False
         except Exception as exc:  # noqa: BLE001 - the history misses this video; playback goes on
             if not video.tracking_failed:
                 video.tracking_failed = True
                 log.warning("[%s] watch history: the signed-in look-up failed (%s)", video.video_id, exc)
         finally:
-            video.tracking_busy = False
+            with self.lock:
+                video.tracking_busy = False
 
     def get(self, video_id: str) -> HlsVideo:
         """The resolved video, resolving it (or again, after HLS_TOKEN_TTL) as needed."""
