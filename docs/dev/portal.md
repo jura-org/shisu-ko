@@ -268,11 +268,31 @@ Yomitan's tokens. The page sends a token only; the deck is the portal's choice. 
 ## Positions and the home screen
 
 Where each video was left is kept in `portal-state.json` (`positions`), shared by every device:
-saved every 5 s while playing, on pause, seek, hide and leaving. Reopening resumes 2 s before it;
+saved every 5 s while playing, on pause, seek, hide and leaving (never by a torn-down player, which
+reads 0). Reopening resumes 2 s before it;
 under 10 s, or within 30 s of the end, starts from 0; a `?t=` in the link wins (`resumeTime()`).
-The home screen lists them with thumbnails (`/api/thumb/<id>`, cached on the computer) and a
-progress bar, and shows what is still missing (`/api/health`: the server, Yomitan API, AnkiConnect,
-yt-dlp, PyAV, and the card setup), each with what to do.
+The home screen lists them with thumbnails (`/api/thumb/<id>`, cached on the computer) and shows
+what is still missing (`/api/health`: the server, Yomitan API, AnkiConnect, yt-dlp, PyAV, and the
+card setup), each with what to do.
+
+- **The watch bar** is YouTube's: a translucent grey track flush with the thumbnail's bottom edge,
+  3 px here, and the watched part in YouTube's brand red, `#ff0033`, at least 3 px wide. Its length
+  is `watchedFraction()`, the position over the duration; within 2 s of the end the video is
+  finished (`finished()`, `FINISHED_S`) and the bar full. No duration, or a position of 0: no bar.
+- **Swipe actions**, as in iOS Mail: a row slides left off Start over and Delete (160 px). Pointer
+  events, so a mouse drags too. A gesture picks its axis after 10 px (`swipeAxis()`); the rows are
+  `touch-action: pan-y`, so a vertical one stays the browser's scroll. Released past a third of
+  the actions the row opens, else it closes (from open, it must close by a third); past 60% of the
+  row it deletes, sliding off and collapsing (`swipeSettle()`, `SWIPE`). One row is open at a time;
+  a tap elsewhere, a scroll or Escape closes it, and that tap opens nothing; a swipe never opens
+  the video. Delete drops the position here and on the computer (`/api/position/delete`); Start
+  over sets it to 0 (`/api/position` with `t: 0`, which keeps the title and duration), so the bar
+  empties and the next open starts at 0. Edit's red minus opens the same actions, for the keyboard,
+  a screen reader and the mouse.
+- **The end returns home.** A video played to its end (`ended`, or YouTube's player's ended state)
+  goes home after 1.5 s, its end saved first so the bar there is full. A touch, a key, a hidden
+  page or an open sheet in that beat keeps the viewer on the video. A live stream never returns,
+  nor does an `ended` more than 2 s short of the duration; a scrub to the very end is an end.
 
 `portal-state.json` is written atomically (a temporary file and a rename).
 
