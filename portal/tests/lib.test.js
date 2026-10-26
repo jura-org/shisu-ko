@@ -515,3 +515,13 @@ test("actionOffsets: the buttons share the uncovered width; full gives Delete al
   assert.deepEqual(L.actionOffsets(100, 1, false), [100]);
   assert.deepEqual(L.actionOffsets(-20, 2, false), [0, 0]); // the rubber band shows nothing
 });
+
+test("watchedToggle: an unfinished video goes to its end, a finished one back to 0", () => {
+  assert.equal(L.watchedToggle({ t: 120, duration: 600 }), 600);
+  assert.equal(L.watchedToggle({ t: 0, duration: 600 }), 600);
+  assert.equal(L.watchedToggle({ t: 599, duration: 600 }), 0); // within 2 s: finished
+  assert.equal(L.watchedToggle({ t: 600, duration: 600 }), 0);
+  assert.equal(L.watchedFraction({ t: L.watchedToggle({ t: 120, duration: 600 }), duration: 600 }), 1); // the bar reads full
+  assert.equal(L.watchedToggle({ t: 120 }), null); // no duration: no action
+  assert.equal(L.watchedToggle(null), null);
+});

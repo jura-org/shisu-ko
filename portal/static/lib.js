@@ -138,9 +138,11 @@
     notALink: "That isn't a YouTube link or video ID.",
     rowActions: (name) => `Delete or start over: ${name}`,
     deleteVideo: (name) => `Delete ${name}`,
-    startOverVideo: (name) => `Start over: ${name}`,
+    markWatchedVideo: (name) => `Mark as watched: ${name}`,
+    markUnwatchedVideo: (name) => `Mark as unwatched: ${name}`,
     delete: "Delete",
-    startOver: "Start over",
+    markWatched: "Watched",
+    markUnwatched: "Unwatched",
     edit: "Edit",
     done: "Done",
     play: "Play",
@@ -473,6 +475,14 @@
     return Math.min(1, t / d);
   }
 
+  // Mark as watched / unwatched: the position it sets. A finished video goes back to 0, any other
+  // to its end, so the bar reads full; null without a duration (no end to set).
+  function watchedToggle(entry) {
+    const d = Number(entry && entry.duration) || 0;
+    if (!(d > 0)) return null;
+    return finished(Number(entry.t) || 0, d) ? 0 : d;
+  }
+
   // ---- swiping a home row (iOS Mail's swipe to the left)
 
   // SLOP: px of movement before the gesture picks an axis; a vertical one is the page's scroll.
@@ -790,7 +800,7 @@
     parseVideoInput, parseStart, activeCueIndex, formatTime, coveredUntil, statusText, tokenOffsets,
     morae, pitchPattern, splitFurigana, hasKanji, VIDEO_ID_RE, watchStatus, freqLabel,
     STRINGS, resumeTime, saveAllowed, dismissAction, GHOST_CLICK_MS, watchedFraction, finished, FINISHED_S,
-    SWIPE, swipeAxis, swipeSettle, swipeShift, swipeVelocity, actionOffsets, formatClock, spokenTime,
+    watchedToggle, SWIPE, swipeAxis, swipeSettle, swipeShift, swipeVelocity, actionOffsets, formatClock, spokenTime,
     SCHEDULES, backoffDelay, isTransient, withRetry, retryLeft,
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,

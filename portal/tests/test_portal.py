@@ -377,8 +377,8 @@ def test_position_store(tmp_path):
     assert portal.PositionStore(tmp_path / "s.json").get("AAAAAAAAAAA") is None
 
 
-def test_start_over_keeps_the_title_and_duration(tmp_path):
-    # The home list's Start over posts t=0 alone: the row keeps its name and its bar's length.
+def test_a_bare_position_keeps_the_title_and_duration(tmp_path):
+    # The home list's Mark as unwatched posts a position of 0 with no title: the row keeps its name.
     store = portal.PositionStore(tmp_path / "s.json")
     store.put("AAAAAAAAAAA", 500, 1033, "first", updated=1000)
     entry = store.put("AAAAAAAAAAA", 0)

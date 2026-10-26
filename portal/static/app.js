@@ -322,15 +322,8 @@
     actions.inert = true;
     const buttons = actionsFor(r).map((spec) => {
       const button = document.createElement("button");
-      button.className = spec.className;
-      const face = document.createElement("span");
-      face.className = "act-face";
-      const label = document.createElement("span");
-      label.textContent = spec.label;
-      face.append(icon(spec.icon), label);
-      button.append(face);
-      button.setAttribute("aria-label", spec.aria(name));
-      button.addEventListener("click", () => spec.run(li, r));
+      fillAction(button, spec, name);
+      button.addEventListener("click", () => button.spec.run(li, r));
       return button;
     });
     actions.append(...buttons);
@@ -382,7 +375,8 @@
   // Line icons in the page's own SVG style (app.css svg), from path data.
   const ICONS = {
     trash: ["M4 7h16", "M9.5 7V4.5h5V7", "M6.5 7l1 12.5h9l1-12.5", "M10 11v5", "M14 11v5"],
-    restart: ["M4 5v5h5", "M5.2 14.5a7.2 7.2 0 1 0 1.7-7.4L4 10"],
+    eyeCheck: ["M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z", "M9 12.2l2.1 2.1 3.9-3.9"],
+    eyeOff: ["M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z", "M4 4l16 16"],
   };
 
   function icon(name) {
@@ -398,12 +392,35 @@
     return svg;
   }
 
-  // The swipe's actions, left to right; Delete is always last (a full swipe runs it).
-  function actionsFor() {
-    return [
-      { className: "start-over", icon: "restart", label: S.startOver, aria: S.startOverVideo, run: startOver },
-      { className: "delete", icon: "trash", label: S.delete, aria: S.deleteVideo, run: deleteRow },
-    ];
+  // The swipe's actions, left to right; Delete is always last (a full swipe runs it). Mark as
+  // watched needs the duration, which a row moved over from an old device's list may lack.
+  function actionsFor(r) {
+    const del = { className: "delete", icon: "trash", label: S.delete, aria: S.deleteVideo, run: deleteRow };
+    if (L.watchedToggle(r) === null) return [del];
+    return [markAction(r), del];
+  }
+
+  function markAction(r) {
+    return L.watchedToggle(r) === 0
+      ? { className: "mark", icon: "eyeOff", label: S.markUnwatched, aria: S.markUnwatchedVideo, run: markWatched }
+      : { className: "mark", icon: "eyeCheck", label: S.markWatched, aria: S.markWatchedVideo, run: markWatched };
+  }
+
+  function fillAction(button, spec, name) {
+    button.spec = spec;
+    button.className = spec.className;
+    const face = document.createElement("span");
+    face.className = "act-face";
+    const label = document.createElement("span");
+    label.textContent = spec.label;
+    face.append(icon(spec.icon), label);
+    const old = button.firstChild;
+    if (old) {
+      face.style.cssText = old.style.cssText;
+      label.style.opacity = old.lastChild.style.opacity;
+    }
+    button.replaceChildren(face);
+    button.setAttribute("aria-label", spec.aria(name));
   }
 
   function listChanged() {
@@ -428,15 +445,19 @@
     }
   }
 
-  // Back to 0 here and on the PC (which keeps the title and duration), so the bar empties and the
-  // next open starts at the beginning (resumeTime() starts anything under 10 s from 0).
-  async function startOver(li, r) {
+  // Mark as watched sets the position to the end, here and on the PC, so the bar reads full and the
+  // next open starts at 0 (resumeTime() starts the last 30 s over); on a finished video it marks it
+  // unwatched: 0, the bar gone. The button then offers the other.
+  async function markWatched(li, r) {
+    const t = L.watchedToggle(r);
+    if (t === null) return;
     closeRow();
-    r.t = 0;
+    r.t = t;
     drawBar(li, r);
-    localStorage.setItem(RECENT_KEY, JSON.stringify(recentList().map((x) => (x.id === r.id ? { ...x, t: 0 } : x))));
+    fillAction(swipe.rows.get(li).buttons[0], markAction(r), r.title || r.id);
+    localStorage.setItem(RECENT_KEY, JSON.stringify(recentList().map((x) => (x.id === r.id ? { ...x, t } : x))));
     try {
-      await api("/api/position", { video_id: r.id, t: 0 });
+      await api("/api/position", { video_id: r.id, t, duration: r.duration });
     } catch {
       // offline: the PC keeps the old position until the video is played again
     }

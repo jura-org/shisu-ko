@@ -90,7 +90,7 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 .recent .row-actions button:active { opacity: 1; }
 .recent .act-face { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; width: 80px; height: 100%; font-size: 13px; font-weight: 500; }
 .recent .act-face svg { width: 22px; height: 22px; stroke-width: 2; }
-.recent .start-over { background: #636366; }
+.recent .mark { background: #0a84ff; }
 .recent .delete { background: #ff453a; }
 .recent a { flex: 1; min-width: 0; display: flex; gap: 16px; align-items: center; padding: 8px 0; color: inherit; text-decoration: none; }
 .recent a:active { opacity: 0.55; }
