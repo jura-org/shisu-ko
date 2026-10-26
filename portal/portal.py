@@ -614,7 +614,8 @@ class Services:
         self.stream_locks: dict[str, threading.Lock] = {}
         self.audio_cache: dict[tuple, dict] = {}
         self.pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mine")
-        self.hls = HlsProxy()
+        self.watch = WatchReporter(watch_history_state(getattr(args, "watch_history", "off"))[0])
+        self.hls = HlsProxy(capture_tracking=self.watch.mode == "on")
         self.state = PortalState()
         self.positions = self.state
         self.card_file = None  # portal.json's keys, read at start
@@ -1068,7 +1069,15 @@ class Services:
     def info(self) -> dict:
         card = self.card()
         return {"ok": True, "mode": self.args.mode, "language": self.language(),
-                "card": {"deck": card["deck"], "note_model": card["note_model"]} if card else None}
+                "card": {"deck": card["deck"], "note_model": card["note_model"]} if card else None,
+                "watch_history": self.watch.mode}
+
+    def watched(self, report: dict) -> bool:
+        """A checked /api/watched report: held for YouTube when the video streamed through the
+        portal with its tracking URLs, else dropped."""
+        with self.hls.lock:
+            video = self.hls.videos.get(report["video_id"])
+        return self.watch.report(report, video.tracking if video else None)
 
     def card_info(self) -> dict:
         return {"ok": True, "card": self.card(), "saved": self.state.card(),
@@ -1355,10 +1364,12 @@ class HlsVideo:
         self.media: dict[str, tuple[str, list[str], list[float]]] = {}
         self.duration = None
         self.title = None
+        self.tracking = None  # YouTube's own watch-tracking URLs, kept only with --watch-history on
 
 
 class HlsProxy:
-    def __init__(self):
+    def __init__(self, capture_tracking: bool = False):
+        self.capture_tracking = capture_tracking
         self.lock = threading.Lock()
         self.videos: dict[str, HlsVideo] = {}
         self.by_token: dict[str, HlsVideo] = {}
@@ -1373,7 +1384,10 @@ class HlsProxy:
     def resolve(self, video: HlsVideo) -> None:
         """yt-dlp -> the HLS master URL -> our master. Call with video.lock held."""
         yt_dlp = import_ytdlp()
+        tracking = {}
         with yt_dlp.YoutubeDL(ydl_options()) as ydl:
+            if self.capture_tracking:
+                capture_tracking(ydl, tracking)
             info = ydl.extract_info(f"https://www.youtube.com/watch?v={video.video_id}", download=False)
         if info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming", "post_live"):
             raise UpstreamError("live stream: YouTube's player plays these", 422)
@@ -1389,6 +1403,7 @@ class HlsProxy:
         video.media = {}
         video.duration = info.get("duration")
         video.title = info.get("title")
+        video.tracking = tracking or video.tracking
         video.created = time.time()
 
     def get(self, video_id: str) -> HlsVideo:
@@ -1510,6 +1525,246 @@ class HlsProxy:
         durations = self.media_playlist(video, key)[2]
         index, offset = segment_at(durations, t)
         return frame_jpeg(self.segment(video, key, index), offset, relative=True)
+
+
+# ---------------------------------------------------------------- the viewer's YouTube watch history
+#
+# Off unless the portal starts with --watch-history on. Then a watch in the portal's own player
+# (the HLS proxy; YouTube's iframe player records its own) is reported to YouTube under the
+# viewer's account, the browser whose cookies the server sends, the way YouTube's player reports
+# one: a playback ping once, which adds the video to the history, and watch-time pings naming the
+# stretches actually played (st/et), every 10 s at most. Both URLs come from the player response
+# yt-dlp fetched at resolve (playbackTracking); the page sends only times. yt-dlp's own
+# mark_watched is never used: it sends both pings at resolve, claiming the whole video watched.
+
+WATCH_STATES = ("on", "off", "no-cookies")
+WATCH_PING_GAP = 10.0  # seconds between two watch-time pings for one video
+WATCH_IDLE_DROP = HLS_IDLE_DROP
+WATCH_RANGES_MAX = 20  # per report from the page
+WATCH_PENDING_MAX = 50  # held for one ping; older stretches go first
+WATCH_JOIN_GAP = 0.5  # a stretch starting this close after the last one's end continues it
+WATCH_YDL_TTL = 3600  # how long one YoutubeDL (and the cookies it read) serves the pings
+CPN_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+
+
+def watch_history_state(flag: str) -> tuple[str, str | None]:
+    """The page's watch_history ("on", "off", "no-cookies") and, unless off, a line for the log."""
+    if flag != "on":
+        return "off", None
+    if os.environ.get("SHISUKO_CONTAINER"):
+        return "no-cookies", ("--watch-history on does nothing in the container: it has no browser "
+                              "whose YouTube cookies it could send")
+    if not cookies_browser():
+        return "no-cookies", ("--watch-history on does nothing: the server sends no YouTube cookies. Run the "
+                              "server once with --save-cookies-from-browser <browser> (Firefox; on Windows "
+                              "Chrome and Edge lock their cookies away), then restart the portal")
+    return "on", f"watch history: watches in the portal go to the YouTube account signed in to {cookies_browser()}"
+
+
+def youtube_url(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    parts = urllib.parse.urlsplit(value)
+    host = (parts.hostname or "").lower()
+    return parts.scheme == "https" and (host == "youtube.com" or host.endswith(".youtube.com"))
+
+
+def tracking_urls(player_responses) -> dict | None:
+    """{"playback", "watchtime"}: the base URLs of the first player response that has both."""
+    for response in player_responses or []:
+        tracking = response.get("playbackTracking") if isinstance(response, dict) else None
+        if not isinstance(tracking, dict):
+            continue
+        urls = {name: (tracking.get(key) or {}).get("baseUrl")
+                for name, key in (("playback", "videostatsPlaybackUrl"), ("watchtime", "videostatsWatchtimeUrl"))}
+        if all(youtube_url(u) for u in urls.values()):
+            return urls
+    return None
+
+
+def capture_tracking(ydl, into: dict) -> None:
+    """Have yt-dlp's YouTube extractor hand its player responses' tracking URLs to `into` when it
+    would mark the video watched, and send nothing. The override lives on this YoutubeDL's own
+    extractor instance only."""
+    try:
+        extractor = ydl.get_info_extractor("Youtube")
+    except Exception as exc:  # noqa: BLE001 - another yt-dlp: play on, report nothing
+        log.warning("watch history: yt-dlp's YouTube extractor not found (%s)", exc)
+        return
+
+    def mark_watched(video_id, player_responses, *args, **kwargs):
+        found = tracking_urls(player_responses)
+        if found and not into:
+            into.update(found)
+
+    extractor.mark_watched = mark_watched
+
+
+def new_cpn(choice=secrets.choice) -> str:
+    """A client playback nonce, as YouTube's player makes one: 16 characters of CPN_ALPHABET."""
+    return "".join(choice(CPN_ALPHABET) for _ in range(16))
+
+
+def finite(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value == value and abs(value) != float("inf")
+
+
+def parse_watch_report(body: dict) -> dict:
+    """POST /api/watched's body, checked; ValueError names what is wrong."""
+    video_id = body.get("video_id")
+    if not valid_video_id(video_id):
+        raise ValueError("bad video id")
+    duration, cmt, state = body.get("duration"), body.get("cmt"), body.get("state")
+    if not finite(duration) or not 0 < duration < 1e6:
+        raise ValueError("duration: a number of seconds")
+    limit = duration + 5
+    if not finite(cmt) or not 0 <= cmt <= limit:
+        raise ValueError("cmt: a time inside the video")
+    if state not in ("playing", "paused"):
+        raise ValueError('state: "playing" or "paused"')
+    ranges = body.get("ranges")
+    if not isinstance(ranges, list) or len(ranges) > WATCH_RANGES_MAX:
+        raise ValueError(f"ranges: a list of at most {WATCH_RANGES_MAX}")
+    clean = []
+    for item in ranges:
+        if (not isinstance(item, list) or len(item) != 2 or not all(finite(x) for x in item)
+                or not 0 <= item[0] <= item[1] <= limit):
+            raise ValueError("ranges: [start, end] pairs inside the video")
+        clean.append((float(item[0]), float(item[1])))
+    return {"video_id": video_id, "ranges": clean, "cmt": float(cmt), "duration": float(duration), "state": state}
+
+
+def merge_ranges(ranges) -> list[tuple[float, float]]:
+    """Played stretches in the order played, one stretch where the next continues the last."""
+    out: list[tuple[float, float]] = []
+    for st, et in ranges:
+        if et <= st:
+            continue
+        if out and abs(st - out[-1][1]) <= WATCH_JOIN_GAP:
+            out[-1] = (out[-1][0], max(out[-1][1], et))
+        else:
+            out.append((st, et))
+    return out
+
+
+def ping_url(base: str, params: dict) -> str:
+    """`base` with `params` set over its own query (YouTube's len stays when there is one)."""
+    parts = urllib.parse.urlsplit(base)
+    query = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
+    if "len" in params and query.get("len"):
+        params = {k: v for k, v in params.items() if k != "len"}
+    query.update(params)
+    return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query, safe=",")))
+
+
+def seconds(value: float) -> str:
+    return f"{value:.3f}"
+
+
+class WatchSession:
+    def __init__(self, tracking: dict, now: float):
+        self.tracking = tracking
+        self.cpn = new_cpn()
+        self.began = now
+        self.used = now
+        self.announced = False  # the playback ping went out
+        self.last_ping = float("-inf")
+        self.pending: list[tuple[float, float]] = []
+        self.cmt = 0.0
+        self.duration = 0.0
+        self.state = "playing"
+
+
+class WatchReporter:
+    """The page's reports, held per video and sent as YouTube's pings on a thread of its own."""
+
+    def __init__(self, mode: str = "off", send=None, clock=time.monotonic):
+        self.mode = mode
+        self.send = send or self.youtube_get
+        self.background = send is None  # a test hands in its own send and calls due() itself
+        self.clock = clock
+        self.cond = threading.Condition()
+        self.sessions: dict[str, WatchSession] = {}
+        self.failed: set[str] = set()
+        self.thread = None
+        self.ydl = None
+        self.ydl_at = 0.0
+
+    def report(self, report: dict, tracking: dict | None) -> bool:
+        """Hold a checked report for the next ping; False when nothing will be sent for it."""
+        if self.mode != "on" or not tracking:
+            return False
+        now = self.clock()
+        with self.cond:
+            for video_id, old in list(self.sessions.items()):
+                if now - old.used > WATCH_IDLE_DROP:
+                    del self.sessions[video_id]
+            session = self.sessions.get(report["video_id"])
+            if session is None:
+                session = self.sessions[report["video_id"]] = WatchSession(tracking, now)
+            session.used = now
+            session.pending = merge_ranges(session.pending + report["ranges"])[-WATCH_PENDING_MAX:]
+            session.cmt, session.duration, session.state = report["cmt"], report["duration"], report["state"]
+            if self.thread is None and self.background:
+                self.thread = threading.Thread(target=self.run, daemon=True, name="watch-history")
+                self.thread.start()
+            self.cond.notify()
+        return True
+
+    def due(self, now: float) -> list[tuple[str, str]]:
+        """The pings due at `now` as (video id, URL), taken off their sessions."""
+        out = []
+        with self.cond:
+            for video_id, s in self.sessions.items():
+                if not s.pending or now - s.last_ping < WATCH_PING_GAP:
+                    continue
+                if not s.announced:
+                    s.announced = True
+                    out.append((video_id, ping_url(s.tracking["playback"], {
+                        "ver": "2", "cpn": s.cpn, "cmt": seconds(s.pending[0][0]), "el": "detailpage"})))
+                out.append((video_id, ping_url(s.tracking["watchtime"], {
+                    "ver": "2", "cpn": s.cpn, "cmt": seconds(s.cmt), "el": "detailpage",
+                    "st": ",".join(seconds(st) for st, _ in s.pending),
+                    "et": ",".join(seconds(et) for _, et in s.pending),
+                    "len": seconds(s.duration), "state": s.state, "rt": seconds(now - s.began)})))
+                s.pending = []
+                s.last_ping = now
+        return out
+
+    def wait_time(self, now: float) -> float | None:
+        """Seconds until the next ping is due; None when nothing waits."""
+        waits = [max(0.0, s.last_ping + WATCH_PING_GAP - now) for s in self.sessions.values() if s.pending]
+        return min(waits) if waits else None
+
+    def run(self) -> None:
+        while True:
+            with self.cond:
+                wait = self.wait_time(self.clock())
+                if wait is None or wait > 0:
+                    self.cond.wait(wait)
+                    continue
+            for video_id, url in self.due(self.clock()):
+                try:
+                    self.send(url)
+                    self.failed.discard(video_id)
+                except Exception as exc:  # noqa: BLE001 - a lost ping costs a line of history, never playback
+                    if video_id not in self.failed:
+                        self.failed.add(video_id)
+                        log.warning("[%s] watch history: YouTube refused the report (%s)", video_id, exc)
+
+    def youtube_get(self, url: str) -> None:
+        """GET a tracking URL with the cookies yt-dlp reads from the server's browser; one
+        YoutubeDL serves an hour of pings, so the browser's cookie store is not read for each."""
+        if self.ydl is None or self.clock() - self.ydl_at > WATCH_YDL_TTL:
+            if self.ydl is not None:
+                self.ydl.close()
+            self.ydl = import_ytdlp().YoutubeDL(ydl_options())
+            self.ydl_at = self.clock()
+        response = self.ydl.urlopen(url)
+        try:
+            response.read()
+        finally:
+            response.close()
 
 
 # ---------------------------------------------------------------- watch positions and thumbnails
@@ -1995,6 +2250,12 @@ class Handler(BaseHTTPRequestHandler):
                     self.services.positions.put(item["id"], t, None, item.get("title"), at)
                     added += 1
                 return self.json(200, {"ok": True, "added": added})
+            if path == "/api/watched":
+                try:
+                    report = parse_watch_report(body)
+                except ValueError as exc:
+                    return self.json(400, {"ok": False, "error": str(exc)})
+                return self.json(200, {"ok": True, "reported": self.services.watched(report)})
             if path == "/api/canadd":
                 term = body.get("term")
                 if not isinstance(term, str) or not 0 < len(term) <= 40:
@@ -2115,6 +2376,9 @@ def main(argv=None) -> int:
     parser.add_argument("--server", default="127.0.0.1:8790", help="the Shisu-ko server (host:port)")
     parser.add_argument("--yomitan", default="127.0.0.1:19633", help="the Yomitan API (host:port)")
     parser.add_argument("--anki", default="127.0.0.1:8765", help="AnkiConnect (host:port)")
+    parser.add_argument("--watch-history", choices=("on", "off"), default="off",
+                        help="report what you watch in the portal's own player to your YouTube history, "
+                             "with the server's YouTube cookies (default off)")
     parser.add_argument("--tailscale-bin", default=shutil.which("tailscale") or "tailscale")
     args = parser.parse_args(argv)
     if args.tailscale:
@@ -2161,6 +2425,9 @@ def main(argv=None) -> int:
     log.info("card: %s", f"deck {card['deck']}, note type {card['note_model']}" if card else "not set up yet (the page asks)")
     if services.card_file:
         log.info("%s overrides: %s", args.config, ", ".join(sorted(services.card_file)))
+    watch_note = watch_history_state(args.watch_history)[1]
+    if watch_note:
+        (log.info if services.watch.mode == "on" else log.warning)("%s", watch_note)
 
     status = tailscale_status(args.tailscale_bin) if args.mode == "tailscale" else {}
     if args.mode == "tailscale":
