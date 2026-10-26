@@ -565,7 +565,11 @@ test("swipeSettle: a flick goes the way it moved, however short", () => {
   assert.equal(L.swipeSettle({ ...row, shift: 25, wasOpen: false, velocity: 0.2 }), "closed"); // slow and short
   assert.equal(L.swipeSettle({ ...row, shift: 140, wasOpen: true, velocity: -0.5 }), "closed"); // a flick right
   assert.equal(L.swipeSettle({ ...row, shift: 140, wasOpen: true, velocity: -0.1 }), "open");
-  assert.equal(L.swipeSettle({ ...row, shift: 230, wasOpen: false, velocity: -1 }), "delete"); // past 60% is past
+  // Past 60%, a flick back to the right takes the delete back; a slow release or a flick left deletes.
+  assert.equal(L.swipeSettle({ ...row, shift: 230, wasOpen: false, velocity: -1 }), "closed");
+  assert.equal(L.swipeSettle({ ...row, shift: 300, wasOpen: true, velocity: -0.4 }), "closed");
+  assert.equal(L.swipeSettle({ ...row, shift: 230, wasOpen: false, velocity: -0.3 }), "delete");
+  assert.equal(L.swipeSettle({ ...row, shift: 230, wasOpen: false, velocity: 1 }), "delete");
 });
 
 test("swipeShift: 1:1 to the actions, damped past them, a rubber band right of closed", () => {

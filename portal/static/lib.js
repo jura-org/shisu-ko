@@ -519,11 +519,12 @@
 
   // Where a released row goes: "open", "closed" or "delete". shift is how far left it sits (px),
   // actions the buttons' width, row the row's width, wasOpen how the swipe began, velocity the
-  // release speed (swipeVelocity(): px/ms, leftward positive).
+  // release speed (swipeVelocity(): px/ms, leftward positive). A flick back to the right closes
+  // first of all, as in iOS Mail: a finger pulling back is taking the delete back.
   function swipeSettle({ shift, actions, row, wasOpen, velocity = 0 }) {
+    if (velocity <= -SWIPE.FLICK) return "closed";
     if (shift >= row * SWIPE.DELETE) return "delete";
     if (velocity >= SWIPE.FLICK) return "open";
-    if (velocity <= -SWIPE.FLICK) return "closed";
     const needed = wasOpen ? actions * (1 - SWIPE.OPEN) : actions * SWIPE.OPEN;
     return shift >= needed ? "open" : "closed";
   }

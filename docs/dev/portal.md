@@ -354,7 +354,8 @@ card setup), each with what to do.
   the label fading in. A release follows the finger's speed over its last 100 ms
   (`swipeVelocity()`): 0.4 px/ms or more to the left opens, to the right closes, however short;
   slower, past a third of the actions opens (from open, it must close by a third); past 60% of the
-  row deletes (`swipeSettle()`, `SWIPE`). Past that point Delete takes the whole width, with a short
+  row deletes (`swipeSettle()`, `SWIPE`), unless the release is that flick to the right, which
+  closes first of all, as iOS Mail takes a delete back. Past that point Delete takes the whole width, with a short
   vibration where the browser has one (Android). It springs there in 300 ms on
   `cubic-bezier(0.25, 1, 0.5, 1)`; reduced motion moves it at once. One row is open at a time; a tap
   elsewhere, a scroll of over 10 px or Escape closes it, and that tap opens nothing; a swipe never
