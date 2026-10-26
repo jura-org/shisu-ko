@@ -732,6 +732,13 @@
     return log.closed.splice(0, max).map(([a, b]) => [ms(a), ms(b)]);
   }
 
+  // /api/watched's answer: milliseconds of playing until the next scheduled report (YouTube's own
+  // flush schedule, `next` in seconds), or null when it names none.
+  function watchNextMs(answer) {
+    const next = answer && answer.next;
+    return typeof next === "number" && Number.isFinite(next) && next > 0 && next <= 3600 ? next * 1000 : null;
+  }
+
   // The browser and system a User-Agent names, as YouTube's pings name them (cbr, cbrver, cos,
   // cosver): {browser, browser_version, os, os_version}, only the parts it names plainly. The
   // version keeps the User-Agent's own spelling (iOS "17_5").
@@ -884,7 +891,7 @@
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
     ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs, nearestBox, lookupResume, LOOKUP_LEAD_S,
-    watchHistoryText, newWatchLog, watchAt, watchClose, watchDrain, clientInfo, viewPoint, viewDelta, viewRect, shouldTurn,
+    watchHistoryText, newWatchLog, watchAt, watchClose, watchDrain, watchNextMs, clientInfo, viewPoint, viewDelta, viewRect, shouldTurn,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.PortalLib = api;

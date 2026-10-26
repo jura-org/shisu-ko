@@ -1609,13 +1609,20 @@ class HlsProxy:
 # (the HLS proxy; YouTube's iframe player records its own) is reported to YouTube under the
 # viewer's account, the browser whose cookies the server sends, the way YouTube's player reports
 # one: a playback ping once, which adds the video to the history, and watch-time pings naming the
-# stretches actually played (st/et), every 10 s at most. Both URLs come from the player response
-# yt-dlp fetched at resolve (playbackTracking); the page sends only times. yt-dlp's own
-# mark_watched is never used: it sends both pings at resolve, claiming the whole video watched.
+# stretches actually played (st/et), on the player response's own schedule (10, 20, 30 s, then
+# every 40 s), the last of a viewing with final=1. Both URLs come from the player response yt-dlp
+# fetched at resolve (playbackTracking); the page sends only times. yt-dlp's own mark_watched is
+# never used: it sends both pings at resolve, claiming the whole video watched.
 
 WATCH_STATES = ("on", "off", "no-cookies")
-WATCH_PING_GAP = 10.0  # seconds between two watch-time pings for one video
+WATCH_PING_GAP = 10.0  # seconds between two watch-time pings for one video, or the schedule's shortest gap
 WATCH_FINAL_GAP = 2.0  # a viewing's last ping goes this soon after the one before, never sooner
+# YouTube's web player flushes watch time at these seconds of wall time into a playback, then every
+# WATCH_FLUSH_INTERVAL (playbackTracking's videostatsScheduledFlushWalltimeSeconds and
+# videostatsDefaultFlushIntervalSeconds; these are the values a WEB response carries).
+WATCH_FLUSH_SCHEDULE = (10.0, 20.0, 30.0)
+WATCH_FLUSH_INTERVAL = 40.0
+WATCH_FLUSH_MAX = 600  # seconds; a schedule beyond it, or more than 10 steps, is not believed
 WATCH_IDLE_DROP = HLS_IDLE_DROP
 WATCH_RANGES_MAX = 20  # per report from the page
 WATCH_PENDING_MAX = 50  # held for one ping; older stretches go first
@@ -1681,7 +1688,7 @@ def tracking_urls(player_responses) -> dict | None:
                 for name, key in (("playback", "videostatsPlaybackUrl"), ("watchtime", "videostatsWatchtimeUrl"))}
         if all(youtube_url(u) for u in urls.values()):
             urls = {name: stats_host(u) for name, u in urls.items()}
-            return {**urls, "client": response_client(response)}
+            return {**urls, "client": response_client(response), "cadence": flush_cadence(tracking)}
     return None
 
 
@@ -1693,6 +1700,23 @@ def stats_host(url: str) -> str:
         return url
     port = f":{parts.port}" if parts.port else ""
     return urllib.parse.urlunsplit(parts._replace(netloc=f"www.youtube.com{port}"))
+
+
+def flush_cadence(tracking: dict) -> dict:
+    """{"schedule", "interval"}: when the web player flushes watch time, read from playbackTracking
+    when it holds a believable schedule (1-10 rising steps, at least WATCH_FINAL_GAP apart, within
+    WATCH_FLUSH_MAX), else the WEB player's own."""
+    def number(x):
+        return finite(x) and WATCH_FINAL_GAP <= x <= WATCH_FLUSH_MAX
+
+    schedule = tracking.get("videostatsScheduledFlushWalltimeSeconds")
+    interval = tracking.get("videostatsDefaultFlushIntervalSeconds")
+    if not (isinstance(schedule, list) and 1 <= len(schedule) <= 10 and all(number(x) for x in schedule)
+            and all(b - a >= WATCH_FINAL_GAP for a, b in zip(schedule, schedule[1:]))):
+        schedule = WATCH_FLUSH_SCHEDULE
+    if not number(interval):
+        interval = WATCH_FLUSH_INTERVAL
+    return {"schedule": tuple(float(x) for x in schedule), "interval": float(interval)}
 
 
 def capture_tracking(ydl, into: dict) -> None:
@@ -1826,11 +1850,34 @@ class WatchSession:
         self.duration = 0.0
         self.state = "playing"
         self.final = False  # the last report ended a viewing: its ping goes soon, with final=1
+        self.flushes = 0  # the scheduled (not final) reports so far
         self.page: dict = {}  # the last report's lact, volume, muted, client, fmt, afmt
 
+    def cadence(self) -> dict:
+        return (self.tracking or {}).get("cadence") or {"schedule": WATCH_FLUSH_SCHEDULE, "interval": WATCH_FLUSH_INTERVAL}
+
+    def flush_at(self, n: int) -> float:
+        """Seconds into a playback of the web player's n-th scheduled flush (n from 1)."""
+        cadence = self.cadence()
+        schedule = cadence["schedule"]
+        if n <= len(schedule):
+            return schedule[n - 1]
+        return schedule[-1] + (n - len(schedule)) * cadence["interval"]
+
+    def next_report(self) -> float:
+        """Seconds of playing from this report to the page's next scheduled one. The page's first
+        report comes at the first flush, so the n-th scheduled report stands for the n-th flush."""
+        n = self.flushes
+        return self.flush_at(1) if n == 0 else self.flush_at(n + 1) - self.flush_at(n)
+
     def gap(self) -> float:
-        """The least time between two pings of this session."""
-        return WATCH_FINAL_GAP if self.final else WATCH_PING_GAP
+        """The least time between two pings of this session: WATCH_FINAL_GAP for a final one, else
+        WATCH_PING_GAP or the schedule's shortest step, so the schedule is never held back."""
+        if self.final:
+            return WATCH_FINAL_GAP
+        schedule = self.cadence()["schedule"]
+        steps = [b - a for a, b in zip((0.0, *schedule), schedule)] + [self.cadence()["interval"]]
+        return max(WATCH_FINAL_GAP, min(WATCH_PING_GAP, *steps))
 
     def context(self, now: float) -> dict:
         """The client context YouTube's web player sends with every ping: the response's client,
@@ -1885,12 +1932,21 @@ class WatchReporter:
             session.pending = merge_ranges(session.pending + report["ranges"])[-WATCH_PENDING_MAX:]
             session.cmt, session.duration, session.state = report["cmt"], report["duration"], report["state"]
             session.final = report.get("final", False)
+            if not session.final:
+                session.flushes += 1
             session.page = {k: report[k] for k in ("lact", "volume", "muted", "client", "fmt", "afmt") if k in report}
             if self.thread is None and self.background:
                 self.thread = threading.Thread(target=self.run, daemon=True, name="watch-history")
                 self.thread.start()
             self.cond.notify()
         return True
+
+    def next_report(self, video_id: str) -> float | None:
+        """Seconds of playing until the page's next scheduled report for this video; None
+        without a session."""
+        with self.cond:
+            session = self.sessions.get(video_id)
+            return session.next_report() if session else None
 
     def set_tracking(self, video_id: str, tracking: dict) -> None:
         """The tracking URLs a held session waited for: its stretches go with the next ping."""
@@ -2469,7 +2525,12 @@ class Handler(BaseHTTPRequestHandler):
                     report = parse_watch_report(body)
                 except ValueError as exc:
                     return self.json(400, {"ok": False, "error": str(exc)})
-                return self.json(200, {"ok": True, "reported": self.services.watched(report)})
+                reported = self.services.watched(report)
+                answer = {"ok": True, "reported": reported}
+                if reported:
+                    # When the page reports next: the web player's own flush schedule.
+                    answer["next"] = self.services.watch.next_report(report["video_id"])
+                return self.json(200, answer)
             if path == "/api/canadd":
                 term = body.get("term")
                 if not isinstance(term, str) or not 0 < len(term) <= 40:
