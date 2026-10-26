@@ -202,7 +202,17 @@ The server's language (`/health`, through `/api/info`) decides the Japanese-only
 the mora estimate and Japanese fonts. Lines are tokenised by Yomitan (`/tokenize`); a language it
 has no dictionaries for comes back without headwords, and the page splits the line itself with
 `Intl.Segmenter` (or runs of letters). When Yomitan is down, Japanese lines become tappable per
-character and a tap looks up the text from there on, as Yomitan's own scan does.
+character.
+
+A tap on a Japanese word looks up the text from the character under the finger on (12 characters),
+as Yomitan's own scan does, so a token the parser started early (a particle or an expression glued
+on: 雨が降っています is one token) costs nothing: a tap on 降 looks up 降る. The longest match
+becomes the span, which the list lights and the card's cloze bolds. The character is the glyph
+whose box (`Range.getBoundingClientRect()`) holds the point, or the nearest (`nearestBox()`); a
+tap on furigana picks among its ruby base. Not `caretPositionFromPoint()`: a caret is the nearest
+boundary, so the right half of a glyph answered the next one. A span that starts or ends inside a
+token is lit exactly with the CSS Highlight API (`::highlight(picked)`), else whole tokens. Other
+languages look up the tapped token whole.
 
 The scrubber above the toolbar shows elapsed and remaining time (h:mm:ss only for a video of an
 hour or more) and what is loaded. It updates from the frame clock with `transform: scaleX()` on its
