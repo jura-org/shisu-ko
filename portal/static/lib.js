@@ -450,13 +450,21 @@
     return Math.abs(t - resumeTarget) <= 2;
   }
 
-  // How far in, 0..1, for the progress bar under a thumbnail; a finished video reads as 1.
+  // A position this close to the end is the end: players stop a frame or a segment short.
+  const FINISHED_S = 2;
+
+  function finished(t, duration) {
+    return Number.isFinite(duration) && duration > 0 && Number.isFinite(t) && t >= duration - FINISHED_S;
+  }
+
+  // How far in, 0..1, for the bar under a thumbnail: the position over the duration, a finished
+  // video 1. No duration, no bar.
   function watchedFraction(entry) {
     const d = Number(entry && entry.duration) || 0;
     const t = Number(entry && entry.t) || 0;
-    if (!d) return 0;
-    if (t >= d - 30) return 1;
-    return Math.max(0, Math.min(1, t / d));
+    if (!(d > 0) || !(t > 0)) return 0;
+    if (finished(t, d)) return 1;
+    return Math.min(1, t / d);
   }
 
   // ---- retries
@@ -720,7 +728,7 @@
   const api = {
     parseVideoInput, parseStart, activeCueIndex, formatTime, coveredUntil, statusText, tokenOffsets,
     morae, pitchPattern, splitFurigana, hasKanji, VIDEO_ID_RE, watchStatus, freqLabel,
-    STRINGS, resumeTime, saveAllowed, dismissAction, GHOST_CLICK_MS, watchedFraction, formatClock, spokenTime,
+    STRINGS, resumeTime, saveAllowed, dismissAction, GHOST_CLICK_MS, watchedFraction, finished, FINISHED_S, formatClock, spokenTime,
     SCHEDULES, backoffDelay, isTransient, withRetry, retryLeft,
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,

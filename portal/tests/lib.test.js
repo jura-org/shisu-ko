@@ -225,10 +225,28 @@ test("resumeTime: ?t= wins, near start and near end start over", () => {
   assert.equal(L.resumeTime({ saved: null, urlT: null }), 0);
 });
 
-test("watchedFraction", () => {
+test("watchedFraction: the position over the duration, the last 2 s finished", () => {
   assert.equal(L.watchedFraction({ t: 250, duration: 1000 }), 0.25);
-  assert.equal(L.watchedFraction({ t: 990, duration: 1000 }), 1);
-  assert.equal(L.watchedFraction({ t: 50 }), 0);
+  assert.equal(L.watchedFraction({ t: 990, duration: 1000 }), 0.99); // 10 s left: not finished
+  assert.equal(L.watchedFraction({ t: 998, duration: 1000 }), 1);
+  assert.equal(L.watchedFraction({ t: 1000, duration: 1000 }), 1);
+  assert.equal(L.watchedFraction({ t: 1200, duration: 1000 }), 1); // past the end
+  assert.equal(L.watchedFraction({ t: 0.4, duration: 3600 }) > 0, true); // a sliver still shows
+  assert.equal(L.watchedFraction({ t: 50 }), 0); // no duration: no bar
+  assert.equal(L.watchedFraction({ t: 50, duration: null }), 0);
+  assert.equal(L.watchedFraction({ t: 0, duration: 1000 }), 0); // started over
+  assert.equal(L.watchedFraction({ t: -5, duration: 1000 }), 0);
+  assert.equal(L.watchedFraction({ t: "x", duration: 1000 }), 0);
+  assert.equal(L.watchedFraction(null), 0);
+});
+
+test("finished: within 2 s of a known end", () => {
+  assert.equal(L.finished(98, 100), true);
+  assert.equal(L.finished(97.9, 100), false);
+  assert.equal(L.finished(150, 100), true);
+  assert.equal(L.finished(98, 0), false);
+  assert.equal(L.finished(98, NaN), false);
+  assert.equal(L.finished(Infinity, Infinity), false); // a live stream never finishes
 });
 
 test("other languages: even timing by letters, words from Intl.Segmenter", () => {
