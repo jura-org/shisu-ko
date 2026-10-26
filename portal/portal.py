@@ -1623,6 +1623,9 @@ WATCH_JOIN_GAP = 0.5  # a stretch starting this close after the last one's end c
 # from the web player carry rti + 10 early on; ours come with the page's reports.
 WATCH_RTN_AHEAD = 10
 WATCH_YDL_TTL = 3600  # how long one YoutubeDL (and the cookies it read) serves the pings
+# Every ping says which signed-in Google account it is for, as the web clients that credit a resume
+# position send it: the first, the one the cookies sign in.
+WATCH_HEADERS = {"X-Goog-AuthUser": "0"}
 CPN_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
 
 
@@ -1676,8 +1679,19 @@ def tracking_urls(player_responses) -> dict | None:
         urls = {name: (tracking.get(key) or {}).get("baseUrl")
                 for name, key in (("playback", "videostatsPlaybackUrl"), ("watchtime", "videostatsWatchtimeUrl"))}
         if all(youtube_url(u) for u in urls.values()):
+            urls = {name: stats_host(u) for name, u in urls.items()}
             return {**urls, "client": response_client(response)}
     return None
+
+
+def stats_host(url: str) -> str:
+    """A tracking URL on www.youtube.com: the response names s.youtube.com, and the clients whose
+    pings YouTube credits with a resume position (YouTube.js, ReVanced) send to www instead."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.hostname != "s.youtube.com":
+        return url
+    port = f":{parts.port}" if parts.port else ""
+    return urllib.parse.urlunsplit(parts._replace(netloc=f"www.youtube.com{port}"))
 
 
 def capture_tracking(ydl, into: dict) -> None:
@@ -1928,12 +1942,13 @@ class WatchReporter:
     def youtube_get(self, url: str) -> int:
         """GET a tracking URL with the cookies yt-dlp reads from the server's browser; one
         YoutubeDL serves an hour of pings, so the browser's cookie store is not read for each."""
+        yt_dlp = import_ytdlp()
         if self.ydl is None or self.clock() - self.ydl_at > WATCH_YDL_TTL:
             if self.ydl is not None:
                 self.ydl.close()
-            self.ydl = import_ytdlp().YoutubeDL(ydl_options())
+            self.ydl = yt_dlp.YoutubeDL(ydl_options())
             self.ydl_at = self.clock()
-        response = self.ydl.urlopen(url)
+        response = self.ydl.urlopen(yt_dlp.networking.Request(url, headers=WATCH_HEADERS))
         try:
             response.read()
             return response.status

@@ -27,7 +27,8 @@ PLAYBACK = "https://s.youtube.com/api/stats/playback?cl=1&docid=X&ei=E&el=detail
 WATCHTIME = "https://s.youtube.com/api/stats/watchtime?cl=1&docid=X&ei=E&el=detailpage&len=600&ns=yt&plid=P"
 TRACKING = {"playback": PLAYBACK, "watchtime": WATCHTIME}
 CLIENT = {"c": "WEB", "cver": "2.20260101.00.00", "cr": "JP"}
-CAPTURED = {**TRACKING, "client": CLIENT}
+# What the capture keeps: the URLs moved to www.youtube.com, and the client.
+CAPTURED = {**{k: v.replace("//s.", "//www.") for k, v in TRACKING.items()}, "client": CLIENT}
 RESPONSES = [
     {"streamingData": {}},  # a client's response without tracking
     {"playbackTracking": {"videostatsPlaybackUrl": {"baseUrl": PLAYBACK},
@@ -298,6 +299,16 @@ def test_resolve_without_the_switch_captures_nothing(home, fake_ytdlp):
     assert all(ydl.extractor.own_ran for ydl in FakeYoutubeDL.made)  # yt-dlp's own, untouched
 
 
+def test_tracking_urls_go_to_www_youtube_com_only_from_s_youtube_com():
+    assert portal.stats_host(PLAYBACK) == PLAYBACK.replace("https://s.youtube.com/", "https://www.youtube.com/")
+    for other in ("https://www.youtube.com/api/stats/playback?x=1", "https://m.youtube.com/api/stats/playback",
+                  "https://s.youtube.com.evil.example/api/stats/playback", "https://xs.youtube.com/api/stats/playback"):
+        assert portal.stats_host(other) == other
+    captured = portal.tracking_urls(RESPONSES)
+    assert all(urllib.parse.urlsplit(captured[k]).hostname == "www.youtube.com" for k in ("playback", "watchtime"))
+    assert query(captured["watchtime"]) == query(WATCHTIME)  # only the host moves
+
+
 def test_tracking_urls_takes_youtube_https_urls_only():
     assert portal.tracking_urls(RESPONSES) == CAPTURED
     assert portal.tracking_urls([]) is None and portal.tracking_urls(None) is None
@@ -361,6 +372,45 @@ def test_one_watchtime_ping_per_ten_seconds_merges_the_stretches():
     (ping,) = reporter.due(10.0)
     assert query(ping[1])["st"] == "10.000,50.000" and query(ping[1])["et"] == "14.000,55.000"
     assert reporter.due(30.0) == [] and reporter.wait_time(30.0) is None  # nothing new: nothing sent
+
+
+def test_pings_carry_the_authuser_header_through_yt_dlp(monkeypatch):
+    opened = []
+
+    class Response:
+        status = 204
+
+        def read(self):
+            return b""
+
+        def close(self):
+            pass
+
+    class FakeYDL:
+        def __init__(self, opts):
+            pass
+
+        def urlopen(self, request):
+            opened.append(request)
+            return Response()
+
+    class Request:
+        def __init__(self, url, headers=None):
+            self.url, self.headers = url, headers
+
+    fake = SimpleNamespace(YoutubeDL=FakeYDL, networking=SimpleNamespace(Request=Request))
+    monkeypatch.setattr(portal, "import_ytdlp", lambda: fake)
+    monkeypatch.setattr(portal, "ydl_options", lambda *a, **k: {})
+    reporter = portal.WatchReporter("on")
+    assert reporter.youtube_get(CAPTURED["watchtime"]) == 204
+    (request,) = opened
+    assert request.url == CAPTURED["watchtime"] and request.headers == {"X-Goog-AuthUser": "0"}
+
+
+def test_yt_dlps_own_request_carries_the_header():
+    networking = pytest.importorskip("yt_dlp.networking")
+    request = networking.Request(CAPTURED["watchtime"], headers=portal.WATCH_HEADERS)
+    assert request.headers["x-goog-authuser"] == "0" and request.url == CAPTURED["watchtime"]
 
 
 def test_a_report_with_nothing_played_sends_nothing():
