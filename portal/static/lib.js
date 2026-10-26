@@ -58,6 +58,21 @@
     return idx;
   }
 
+  // Where playback picks up when the dictionary sheet closes. `at` is the playhead at the tap, which
+  // comes a second or more after the words that made the viewer stop: resuming there loses them.
+  // The line is the tapped word's when it is the line being said or the one before it (still on
+  // screen), else the line being said. "line" resumes at its start; anything else LOOKUP_LEAD_S
+  // before the tap, never before the line's start and never after the tap.
+  const LOOKUP_LEAD_S = 1;
+  function lookupResume(cues, at, tappedId, mode) {
+    const active = activeCueIndex(cues, at);
+    const tapped = cues.findIndex((c) => c.id === tappedId);
+    const cue = cues[tapped >= 0 && (tapped === active || tapped === active - 1) ? tapped : active] || null;
+    const from = cue ? cue.start : 0;
+    const t = mode === "line" ? from : Math.max(from, at - LOOKUP_LEAD_S);
+    return { t: Math.max(0, Math.min(at, t)), cue };
+  }
+
   function formatTime(seconds) {
     const s = Math.max(0, Math.floor(Number(seconds) || 0));
     const h = Math.floor(s / 3600);
@@ -706,7 +721,7 @@
     SCHEDULES, backoffDelay, isTransient, withRetry, retryLeft,
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
-    ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs, nearestBox,
+    ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs, nearestBox, lookupResume, LOOKUP_LEAD_S,
     watchHistoryText, newWatchLog, watchAt, watchClose, watchDrain,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;

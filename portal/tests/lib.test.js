@@ -37,6 +37,29 @@ test("activeCueIndex keeps the last started cue up through a gap", () => {
   assert.equal(L.activeCueIndex([], 5), -1);
 });
 
+test("lookupResume goes back a second before the tap, never past the line's start", () => {
+  const cues = [{ id: 0, start: 1, end: 3 }, { id: 1, start: 4, end: 8 }, { id: 2, start: 9, end: 12 }];
+  const at = (t, id, mode) => L.lookupResume(cues, t, id, mode);
+  assert.equal(L.LOOKUP_LEAD_S, 1);
+  // Mid-line: one second back. Near the line's start: the start, not the line before.
+  assert.deepEqual(at(6.5, 1), { t: 5.5, cue: cues[1] });
+  assert.deepEqual(at(4.4, 1), { t: 4, cue: cues[1] });
+  // "line": the start of the line, wherever the tap fell in it.
+  assert.deepEqual(at(7.9, 1, "line"), { t: 4, cue: cues[1] });
+  // A word of the line just ended, while the next one has begun: that line counts.
+  assert.deepEqual(at(9.2, 1, "line"), { t: 4, cue: cues[1] });
+  assert.equal(at(9.2, 1).cue, cues[1]);
+  assert.ok(Math.abs(at(9.2, 1).t - 8.2) < 1e-9);
+  // An older line (browsed back to) or one still to come: the line being said.
+  assert.deepEqual(at(10, 0, "line"), { t: 9, cue: cues[2] });
+  assert.deepEqual(at(6, 2, "line"), { t: 4, cue: cues[1] });
+  // No cue yet, or an unknown one: a second back, never below 0, never after the tap.
+  assert.deepEqual(at(0.4, null), { t: 0, cue: null });
+  assert.deepEqual(at(0.5, 7, "line"), { t: 0, cue: null });
+  const early = { id: 5, start: 2.03, end: 3 };
+  assert.deepEqual(L.lookupResume([early], 2, 5, "line"), { t: 2, cue: early });
+});
+
 test("tokenOffsets index the original line", () => {
   const out = L.tokenOffsets([{ text: "今日は" }, { text: "、" }, { text: "寿司" }]);
   assert.deepEqual(out.map((t) => [t.start, t.end]), [[0, 3], [3, 4], [4, 6]]);

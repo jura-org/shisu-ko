@@ -1425,9 +1425,9 @@
     const s = state.sheet;
     const seq = ++s.seq;
     if (!s.open) {
+      s.openedAt = state.player ? state.player.getCurrentTime() : state.t; // the playhead at the tap
       s.pausedIt = settings.pauseOnLookup && state.playing;
       if (s.pausedIt) pause("sheet");
-      s.openedAt = state.player ? state.player.getCurrentTime() : state.t; // where the close resumes
     }
     s.open = true;
     s.cue = cue;
@@ -1627,13 +1627,10 @@
     state.sheetClosedAt = Date.now(); // the ghost-click guard counts from here
     if (s.pausedIt) {
       s.pausedIt = false;
-      // Resume the line the sheet was opened on, never further: if anything moved the playhead
-      // while the sheet was open, put it back first.
-      if (state.player && Number.isFinite(s.openedAt) && Math.abs(state.player.getCurrentTime() - s.openedAt) > 0.5) {
-        state.player.seekTo(s.openedAt, true);
-      }
+      // Back to just before the tap, or the line's start (Settings): never on from where it paused.
+      const { t, cue } = L.lookupResume(state.cues, s.openedAt, s.cue && s.cue.id, settings.lookupResume);
+      if (Number.isFinite(t)) seek(t, false);
       // The line looked up may have ended while the sheet was open; auto-pause must not fire for it again.
-      const cue = state.cues[L.activeCueIndex(state.cues, s.openedAt)];
       state.autoPausedFor = cue ? cue.id : null;
       if (resume) play(); // still inside the gesture that closed the sheet
     }
