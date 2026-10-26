@@ -185,6 +185,8 @@
     resumeAfterLookup: "Resume after a lookup",
     resumeBeforeTap: "Just before where I tapped",
     resumeLineStart: "Start of the line",
+    fullscreen: "Full screen",
+    exitFullscreen: "Exit full screen",
   };
 
   function statusText(view) {
@@ -713,6 +715,12 @@
     return best;
   }
 
+  // A viewport taller than wide shows the landscape mode turned: the viewer turns the phone, even
+  // with its rotation lock on, which is the only way an iPhone's page goes sideways.
+  function shouldTurn(width, height) {
+    return height > width;
+  }
+
   function hasKanji(text) {
     return /[㐀-鿿豈-﫿々]/.test(String(text || ""));
   }
@@ -725,7 +733,7 @@
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
     ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs, nearestBox, lookupResume, LOOKUP_LEAD_S,
-    watchHistoryText, newWatchLog, watchAt, watchClose, watchDrain,
+    watchHistoryText, newWatchLog, watchAt, watchClose, watchDrain, shouldTurn,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.PortalLib = api;

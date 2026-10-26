@@ -100,6 +100,9 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
    - It is taller than the box: the video still fills the box exactly, while the title row (top)
      and the logo and share buttons (bottom) land in the letterbox, which the box clips away. */
 .player-box { --crop: 72px; }
+/* A phone held sideways outside the landscape mode: the box never runs off the screen, so its
+   corner buttons stay in reach. Upright, 16:9 is far below this. */
+.player-box { max-height: 70vh; max-height: 70dvh; }
 /* Our own <video>: no crop, no scale; the box is exactly the picture. */
 .player-box video#player { top: 0; height: 100%; width: 100%; transform: none; object-fit: contain; background: #000; }
 .btn-home {
@@ -128,6 +131,10 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 }
 .btn-home svg { position: relative; width: 20px; height: 20px; stroke-width: 2.2; }
 .player-box.show-back .btn-home { opacity: 1; pointer-events: auto; }
+/* The full-screen button: the back button's twin, in the opposite corner. */
+.btn-full { left: auto; top: auto; right: calc(4px + var(--safe-right)); bottom: 4px; }
+.btn-full .icon-collapse, .btn-full.on .icon-expand { display: none; }
+.btn-full.on .icon-collapse { display: block; }
 .player-box iframe, .player-box #player {
   position: absolute;
   left: 0;
@@ -594,4 +601,85 @@ button.row-item { width: 100%; text-align: left; background: none; border-radius
 .lyrics { -webkit-mask-image: linear-gradient(transparent 0, #000 16%, #000 calc(84% - var(--scrub-h)), transparent calc(100% - var(--scrub-h))); mask-image: linear-gradient(transparent 0, #000 16%, #000 calc(84% - var(--scrub-h)), transparent calc(100% - var(--scrub-h))); }
 @media (prefers-reduced-motion: reduce) {
   .scrub-rail, .scrub-thumb { transition: none; }
+}
+
+/* ------------------------------------------------ the landscape mode (app.js enterLandscape)
+
+   The video fills the view, the line being said is a strip along its bottom, the scrubber and the
+   way out sit just above the strip while the controls show.
+   The page is fixed to the viewport, or, on a phone held upright, turned a quarter clockwise and
+   sized to the screen's other way round (html.turned): every fixed sheet, toast and bar then lies
+   in the turned body, which a transform makes their containing block. Percentages below are of
+   the view, never vw/vh, which stay the screen's. */
+
+html.landscape, html.landscape body { height: 100%; overflow: hidden; }
+html.landscape body { position: fixed; inset: 0; }
+html.landscape.turned body {
+  right: auto;
+  bottom: auto;
+  width: 100vh;
+  height: 100vw;
+  width: 100dvh;
+  height: 100dvw;
+  transform-origin: 0 0;
+  transform: rotate(90deg) translateY(-100%);
+}
+/* The screen's top (the notch) is the turned view's left, its bottom (the home bar) the view's right. */
+html.landscape.turned {
+  --safe-top: env(safe-area-inset-right, 0px);
+  --safe-right: env(safe-area-inset-bottom, 0px);
+  --safe-bottom: env(safe-area-inset-left, 0px);
+  --safe-left: env(safe-area-inset-top, 0px);
+}
+
+html.landscape .watch {
+  position: absolute;
+  inset: 0;
+  height: auto;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  --strip-h: clamp(88px, 32%, 168px);
+}
+html.landscape .player-box { position: absolute; inset: 0; width: auto; max-height: none; aspect-ratio: auto; }
+html.landscape .btn-home { top: calc(4px + var(--safe-top)); left: calc(4px + var(--safe-left)); }
+html.landscape .btn-full { top: auto; left: auto; right: calc(4px + var(--safe-right)); bottom: var(--strip-h); }
+html.landscape .toolbar, html.landscape .toolbar-space { display: none; }
+
+html.landscape #lyrics {
+  position: absolute;
+  z-index: 4;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--strip-h);
+  flex: none;
+  background: linear-gradient(rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.55) 35%, rgba(0, 0, 0, 0.72));
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+html.landscape .lyrics-track { padding: 0 calc(24px + var(--safe-right)) 0 calc(24px + var(--safe-left)); }
+html.landscape .cue { font-size: 24px; margin-bottom: 14px; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8); }
+/* The strip holds the line being said alone; a drag still browses its neighbours. */
+html.landscape .lyrics:not(.browsing) .cue:not([data-d="0"]) { visibility: hidden; opacity: 0; }
+html.landscape .back-to-now { top: 8px; bottom: auto; left: auto; right: calc(16px + var(--safe-right)); transform: none; }
+
+html.landscape .scrubber {
+  z-index: 5;
+  left: 0;
+  right: calc(52px + var(--safe-right)); /* the exit button's room: the bar must not cover it */
+  max-width: none;
+  margin: 0;
+  bottom: var(--strip-h);
+  padding: 0 4px 0 calc(20px + var(--safe-left));
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.25s var(--spring), visibility 0.25s;
+}
+html.landscape .watch:has(.player-box.show-back) .scrubber, html.landscape .scrubber.dragging { opacity: 1; visibility: visible; }
+
+html.landscape .settings-sheet { max-height: 88%; }
+html.switching .sheet, html.switching .lyrics-track, html.switching .scrubber { transition: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  html.landscape .scrubber { transition: none; }
 }

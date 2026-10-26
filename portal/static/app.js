@@ -106,6 +106,8 @@
     wordIndex: null,
     wordsKey: "",
     sheet: { open: false, pausedIt: false, cue: null, span: null, entries: [], pick: 0, def: null, seq: 0 },
+    // The landscape mode: on, and whether the browser's fullscreen holds the page for it.
+    landscape: { on: false, fullscreen: false },
   };
 
   function readJson(key, fallback) {
@@ -409,6 +411,7 @@
   // Leaving the video: stop it and let go of its stream, so a page kept in the back-forward cache
   // neither plays nor downloads.
   function teardownWatch() {
+    exitLandscape(); // leaving by any way (home, the end of the video, a link) restores the page
     if (!state.player || state.tornDown) return;
     state.tornDown = true;
     try {
@@ -714,6 +717,101 @@
   function renderBack() {
     const show = state.ytState === YT_PAUSED || state.ytState === YT_ENDED || Date.now() < state.backUntil;
     document.querySelector(".player-box").classList.toggle("show-back", show);
+  }
+
+  // ------------------------------------------------------------ the landscape mode
+
+  // The video as large as the screen allows, the line being said as a strip along its bottom.
+  // Where a page may go fullscreen (Android, iPad, desktop) the whole page does, so the subtitles
+  // and the dictionary sheet come along, and the screen is locked sideways where that is allowed.
+  // An iPhone lets only a bare <video> go fullscreen, into Apple's player with nothing of ours over
+  // it; there the mode is the page's own layout, turned a quarter (app.css html.turned) while the
+  // phone is held upright, so the viewer just turns the phone, rotation lock or not.
+  function canFullscreen() {
+    const root = document.documentElement;
+    return !!((document.fullscreenEnabled && root.requestFullscreen) || (document.webkitFullscreenEnabled && root.webkitRequestFullscreen));
+  }
+
+  function fullscreenElement() {
+    return document.fullscreenElement || document.webkitFullscreenElement || null;
+  }
+
+  // Runs inside the tap: a fullscreen request needs the gesture.
+  function enterLandscape() {
+    if (state.landscape.on) return;
+    state.landscape.on = true;
+    document.documentElement.classList.add("switching", "landscape");
+    if (canFullscreen()) {
+      const root = document.documentElement;
+      try {
+        const asked = root.requestFullscreen ? root.requestFullscreen({ navigationUI: "hide" }) : root.webkitRequestFullscreen();
+        if (asked && asked.catch) asked.catch((err) => console.log("fullscreen refused:", err.name));
+      } catch (err) {
+        console.log("fullscreen refused:", err.name); // the page-level layout stays
+      }
+    }
+    modeChanged();
+  }
+
+  function exitLandscape() {
+    if (!state.landscape.on) return;
+    state.landscape.on = false;
+    state.landscape.fullscreen = false;
+    document.documentElement.classList.add("switching");
+    document.documentElement.classList.remove("landscape", "turned");
+    if (screen.orientation && screen.orientation.unlock) {
+      try {
+        screen.orientation.unlock();
+      } catch {
+        // never locked
+      }
+    }
+    if (fullscreenElement()) {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      try {
+        const left = exit.call(document);
+        if (left && left.catch) left.catch(() => {});
+      } catch {
+        // already leaving
+      }
+    }
+    modeChanged();
+  }
+
+  function onFullscreenChange() {
+    if (fullscreenElement()) {
+      if (!state.landscape.on) return;
+      state.landscape.fullscreen = true;
+      // Allowed only in fullscreen, and not everywhere then (a desktop, a tablet that refuses).
+      if (screen.orientation && screen.orientation.lock) screen.orientation.lock("landscape").catch(() => {});
+    } else if (state.landscape.fullscreen) {
+      exitLandscape(); // the browser's own way out: the back gesture, Escape
+    }
+  }
+
+  function modeChanged() {
+    const b = $("btn-full");
+    b.classList.toggle("on", state.landscape.on);
+    b.setAttribute("aria-label", state.landscape.on ? S.exitFullscreen : S.fullscreen);
+    exitBrowse(); // a browse offset is in the old layout's pixels
+    viewChanged();
+  }
+
+  // After the mode or the viewport changed: turned or not, the list re-centred without motion (the
+  // same cue stays the focus, L.focusMotion), the scrubber and an open sheet measured again.
+  function viewChanged() {
+    const root = document.documentElement;
+    // The closed sheets and the list jump to their new places instead of gliding across the
+    // screen: the new layout is committed with transitions off ("switching", also set by
+    // enterLandscape() and exitLandscape()), then they come back.
+    const turned = state.landscape.on && L.shouldTurn(window.innerWidth, window.innerHeight);
+    if (turned !== root.classList.contains("turned")) root.classList.add("switching");
+    root.classList.toggle("turned", turned);
+    state.focusKey = null;
+    if (state.sheet.open) capSheet(state.sheet.cue);
+    measureScrubber();
+    void document.body.offsetHeight;
+    root.classList.remove("switching");
   }
 
   // ------------------------------------------------------------ /sync
@@ -1042,6 +1140,8 @@
   // The centre point: the middle of the list, or of the room left above the dictionary sheet.
   function focusY() {
     const box = $("lyrics");
+    // The landscape strip: its middle; the scrubber sits above it.
+    if (state.landscape.on) return box.clientHeight / 2;
     // The scrubber covers the list's faded bottom edge: centre in what is left above it.
     if (!state.sheet.open) return (box.clientHeight - $("scrubber").offsetHeight) / 2;
     const sheetTop = window.innerHeight - $("sheet").offsetHeight;
@@ -1252,6 +1352,16 @@
       ev.stopPropagation();
       goHome();
     });
+    $("btn-full").addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (state.landscape.on) exitLandscape();
+      else enterLandscape();
+      state.backUntil = Date.now() + 3000; // the controls stay up a moment in the new layout
+      setTimeout(renderBack, 3050);
+      renderBack();
+    });
+    for (const name of ["fullscreenchange", "webkitfullscreenchange"]) document.addEventListener(name, onFullscreenChange);
+    window.addEventListener("orientationchange", viewChanged);
 
     // The shield over the video: a tap toggles play; a quick second tap on the left or right third
     // steps a line back or forward (and plays). Both act inside the tap itself.
@@ -1344,7 +1454,7 @@
       browseIdle();
     }, { passive: false });
 
-    window.addEventListener("resize", () => { state.focusKey = null; });
+    window.addEventListener("resize", viewChanged);
   }
 
   // ------------------------------------------------------------ the word sheet

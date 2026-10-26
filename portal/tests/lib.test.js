@@ -434,3 +434,9 @@ test("nearestBox finds the character a tap falls in, else the nearest one", () =
   assert.equal(L.nearestBox(boxes, 26, -8), 2); // furigana above the last glyph
   assert.equal(L.nearestBox([], 5, 5), -1);
 });
+
+test("the landscape mode turns only an upright viewport", () => {
+  assert.equal(L.shouldTurn(390, 844), true);
+  assert.equal(L.shouldTurn(844, 390), false);
+  assert.equal(L.shouldTurn(800, 800), false);
+});
