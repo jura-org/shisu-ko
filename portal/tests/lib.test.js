@@ -452,3 +452,28 @@ test("nearestBox finds the character a tap falls in, else the nearest one", () =
   assert.equal(L.nearestBox(boxes, 26, -8), 2); // furigana above the last glyph
   assert.equal(L.nearestBox([], 5, 5), -1);
 });
+
+test("swipeAxis: nothing before 10 px, then the larger direction", () => {
+  assert.equal(L.swipeAxis(6, 6), null);
+  assert.equal(L.swipeAxis(-12, 3), "x");
+  assert.equal(L.swipeAxis(4, -11), "y");
+  assert.equal(L.swipeAxis(-8, 8), "y"); // a tie scrolls: the page's own gesture wins
+});
+
+test("swipeSettle: a third opens, two thirds back closes, 60% of the row deletes", () => {
+  const row = { actions: 160, row: 360 };
+  assert.equal(L.swipeSettle({ ...row, shift: 50, wasOpen: false }), "closed");
+  assert.equal(L.swipeSettle({ ...row, shift: 54, wasOpen: false }), "open");
+  assert.equal(L.swipeSettle({ ...row, shift: 110, wasOpen: true }), "open");
+  assert.equal(L.swipeSettle({ ...row, shift: 100, wasOpen: true }), "closed");
+  assert.equal(L.swipeSettle({ ...row, shift: 215, wasOpen: false }), "open");
+  assert.equal(L.swipeSettle({ ...row, shift: 216, wasOpen: false }), "delete");
+  assert.equal(L.swipeSettle({ ...row, shift: 300, wasOpen: true }), "delete");
+});
+
+test("swipeShift: follows the finger, never right of closed or past the row", () => {
+  assert.equal(L.swipeShift({ start: 0, dx: -40, row: 360 }), 40);
+  assert.equal(L.swipeShift({ start: 160, dx: 30, row: 360 }), 130);
+  assert.equal(L.swipeShift({ start: 0, dx: 50, row: 360 }), 0);
+  assert.equal(L.swipeShift({ start: 160, dx: -400, row: 360 }), 360);
+});

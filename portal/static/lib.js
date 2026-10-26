@@ -136,7 +136,13 @@
     transcribing: "Transcribing…",
     // the page
     notALink: "That isn't a YouTube link or video ID.",
-    removeVideo: (name) => `Remove ${name}`,
+    rowActions: (name) => `Delete or start over: ${name}`,
+    deleteVideo: (name) => `Delete ${name}`,
+    startOverVideo: (name) => `Start over: ${name}`,
+    delete: "Delete",
+    startOver: "Start over",
+    edit: "Edit",
+    done: "Done",
     play: "Play",
     pause: "Pause",
     lookingUp: "Looking up…",
@@ -467,6 +473,34 @@
     return Math.min(1, t / d);
   }
 
+  // ---- swiping a home row (iOS Mail's swipe to the left)
+
+  // SLOP: px of movement before the gesture picks an axis; a vertical one is the page's scroll.
+  // OPEN: the share of the action buttons' width a release must pass to open them (from open, the
+  // share it must close by to close them). DELETE: the share of the row's width a swipe must pass
+  // to delete on release.
+  const SWIPE = { SLOP: 10, OPEN: 1 / 3, DELETE: 0.6 };
+
+  // null until the finger has moved SLOP px, then "x" or "y".
+  function swipeAxis(dx, dy) {
+    if (Math.hypot(dx, dy) < SWIPE.SLOP) return null;
+    return Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+  }
+
+  // Where a released row goes: "open", "closed" or "delete". shift is how far left it sits (px,
+  // positive), actions the buttons' width, row the row's width, wasOpen how the swipe began.
+  function swipeSettle({ shift, actions, row, wasOpen }) {
+    if (shift >= row * SWIPE.DELETE) return "delete";
+    const needed = wasOpen ? actions * (1 - SWIPE.OPEN) : actions * SWIPE.OPEN;
+    return shift >= needed ? "open" : "closed";
+  }
+
+  // How far left a row sits while dragged: the finger's travel from where it began, never right
+  // of closed and never past the row.
+  function swipeShift({ start, dx, row }) {
+    return Math.max(0, Math.min(row, start - dx));
+  }
+
   // ---- retries
 
   // Backoff schedules, in milliseconds before retry number `attempt` (0 = the first retry).
@@ -728,7 +762,8 @@
   const api = {
     parseVideoInput, parseStart, activeCueIndex, formatTime, coveredUntil, statusText, tokenOffsets,
     morae, pitchPattern, splitFurigana, hasKanji, VIDEO_ID_RE, watchStatus, freqLabel,
-    STRINGS, resumeTime, saveAllowed, dismissAction, GHOST_CLICK_MS, watchedFraction, finished, FINISHED_S, formatClock, spokenTime,
+    STRINGS, resumeTime, saveAllowed, dismissAction, GHOST_CLICK_MS, watchedFraction, finished, FINISHED_S,
+    SWIPE, swipeAxis, swipeSettle, swipeShift, formatClock, spokenTime,
     SCHEDULES, backoffDelay, isTransient, withRetry, retryLeft,
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
