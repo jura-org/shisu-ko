@@ -1615,6 +1615,7 @@ class HlsProxy:
 
 WATCH_STATES = ("on", "off", "no-cookies")
 WATCH_PING_GAP = 10.0  # seconds between two watch-time pings for one video
+WATCH_FINAL_GAP = 2.0  # a viewing's last ping goes this soon after the one before, never sooner
 WATCH_IDLE_DROP = HLS_IDLE_DROP
 WATCH_RANGES_MAX = 20  # per report from the page
 WATCH_PENDING_MAX = 50  # held for one ping; older stretches go first
@@ -1734,6 +1735,9 @@ def parse_watch_report(body: dict) -> dict:
         raise ValueError("cmt: a time inside the video")
     if state not in ("playing", "paused"):
         raise ValueError('state: "playing" or "paused"')
+    final = body.get("final", False)
+    if not isinstance(final, bool):
+        raise ValueError("final: true or false")
     ranges = body.get("ranges")
     if not isinstance(ranges, list) or len(ranges) > WATCH_RANGES_MAX:
         raise ValueError(f"ranges: a list of at most {WATCH_RANGES_MAX}")
@@ -1743,7 +1747,8 @@ def parse_watch_report(body: dict) -> dict:
                 or not 0 <= item[0] <= item[1] <= limit):
             raise ValueError("ranges: [start, end] pairs inside the video")
         clean.append((float(item[0]), float(item[1])))
-    out = {"video_id": video_id, "ranges": clean, "cmt": float(cmt), "duration": float(duration), "state": state}
+    out = {"video_id": video_id, "ranges": clean, "cmt": float(cmt), "duration": float(duration), "state": state,
+           "final": final}
     # What the phone itself says about the playback, each optional.
     lact, volume, muted, client = body.get("lact"), body.get("volume"), body.get("muted"), body.get("client")
     if lact is not None:
@@ -1801,7 +1806,7 @@ def ping_summary(url: str) -> str:
     parts = urllib.parse.urlsplit(url)
     query = dict(urllib.parse.parse_qsl(parts.query))
     kind = parts.path.rsplit("/", 1)[-1]
-    return " ".join([kind] + [f"{k}={query[k]}" for k in ("st", "et", "cmt", "len", "state") if k in query])
+    return " ".join([kind] + [f"{k}={query[k]}" for k in ("st", "et", "cmt", "len", "state", "final") if k in query])
 
 
 def seconds(value: float) -> str:
@@ -1820,7 +1825,12 @@ class WatchSession:
         self.cmt = 0.0
         self.duration = 0.0
         self.state = "playing"
+        self.final = False  # the last report ended a viewing: its ping goes soon, with final=1
         self.page: dict = {}  # the last report's lact, volume, muted, client, fmt, afmt
+
+    def gap(self) -> float:
+        """The least time between two pings of this session."""
+        return WATCH_FINAL_GAP if self.final else WATCH_PING_GAP
 
     def context(self, now: float) -> dict:
         """The client context YouTube's web player sends with every ping: the response's client,
@@ -1854,7 +1864,9 @@ class WatchReporter:
     def report(self, report: dict, tracking: dict | None, waiting: bool = False) -> bool:
         """Hold a checked report for the next ping; False when nothing will be sent for it.
         `waiting`: the tracking URLs are still being looked up (set_tracking() brings them), so
-        the stretches wait in the session rather than being lost."""
+        the stretches wait in the session rather than being lost. A final report (a pause, the
+        end, the page hidden or left) has its ping go within WATCH_FINAL_GAP, with final=1; a
+        later report continues the same session, and the last report decides."""
         if self.mode != "on":
             return False
         now = self.clock()
@@ -1872,6 +1884,7 @@ class WatchReporter:
             session.tracking = session.tracking or tracking
             session.pending = merge_ranges(session.pending + report["ranges"])[-WATCH_PENDING_MAX:]
             session.cmt, session.duration, session.state = report["cmt"], report["duration"], report["state"]
+            session.final = report.get("final", False)
             session.page = {k: report[k] for k in ("lact", "volume", "muted", "client", "fmt", "afmt") if k in report}
             if self.thread is None and self.background:
                 self.thread = threading.Thread(target=self.run, daemon=True, name="watch-history")
@@ -1892,7 +1905,7 @@ class WatchReporter:
         out = []
         with self.cond:
             for video_id, s in self.sessions.items():
-                if not s.pending or not s.tracking or now - s.last_ping < WATCH_PING_GAP:
+                if not s.pending or not s.tracking or now - s.last_ping < s.gap():
                     continue
                 context = s.context(now)
                 if not s.announced:
@@ -1912,14 +1925,17 @@ class WatchReporter:
                     watchtime["volume"] = each(str(s.page["volume"]))
                 if "muted" in s.page:
                     watchtime["muted"] = each("1" if s.page["muted"] else "0")
+                if s.final:
+                    watchtime["final"] = "1"
                 out.append((video_id, ping_url(s.tracking["watchtime"], watchtime)))
                 s.pending = []
+                s.final = False
                 s.last_ping = now
         return out
 
     def wait_time(self, now: float) -> float | None:
         """Seconds until the next ping is due; None when nothing waits."""
-        waits = [max(0.0, s.last_ping + WATCH_PING_GAP - now) for s in self.sessions.values() if s.pending and s.tracking]
+        waits = [max(0.0, s.last_ping + s.gap() - now) for s in self.sessions.values() if s.pending and s.tracking]
         return min(waits) if waits else None
 
     def run(self) -> None:

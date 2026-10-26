@@ -374,6 +374,47 @@ def test_one_watchtime_ping_per_ten_seconds_merges_the_stretches():
     assert reporter.due(30.0) == [] and reporter.wait_time(30.0) is None  # nothing new: nothing sent
 
 
+def test_a_final_report_goes_within_two_seconds_with_final_1():
+    clock = [0.0]
+    reporter = portal.WatchReporter("on", send=None, clock=lambda: clock[0])
+    reporter.background = False
+    reporter.report(report([[0, 10]]), CAPTURED)
+    first = reporter.due(0.0)
+    assert len(first) == 2 and "final" not in query(first[1][1])
+    # A pause 1 s later: not before WATCH_FINAL_GAP, then at once, not after the 10 s gap.
+    clock[0] = 1.0
+    reporter.report(report([[10, 11]], state="paused") | {"final": True}, CAPTURED)
+    assert reporter.due(1.0) == [] and reporter.wait_time(1.0) == pytest.approx(1.0)
+    (ping,) = reporter.due(2.0)
+    got = query(ping[1])
+    assert got["final"] == "1" and got["state"] == "paused" and got["st"] == "10.000" and got["et"] == "11.000"
+    assert portal.ping_summary(ping[1]).endswith("state=paused final=1")
+    # Another final at once (the page hidden right after): held to the 2 s limit.
+    clock[0] = 2.5
+    reporter.report(report([[11, 11.5]], state="paused") | {"final": True}, CAPTURED)
+    assert reporter.due(2.5) == [] and reporter.wait_time(2.5) == pytest.approx(1.5)
+    assert query(reporter.due(4.0)[0][1])["final"] == "1"
+    # A later play goes on in the same session, scheduled again, without final.
+    clock[0] = 20.0
+    reporter.report(report([[11.5, 21.5]]), CAPTURED)
+    (later,) = reporter.due(20.0)
+    assert "final" not in query(later[1]) and query(later[1])["cpn"] == got["cpn"]
+    clock[0] = 25.0
+    reporter.report(report([[21.5, 26.5]]), CAPTURED)
+    assert reporter.due(25.0) == []  # a scheduled report keeps the 10 s gap
+
+
+def test_a_final_report_then_more_play_before_its_ping_drops_final():
+    reporter = portal.WatchReporter("on", send=None, clock=lambda: 0.0)
+    reporter.background = False
+    reporter.report(report([[0, 10]]), CAPTURED)
+    reporter.due(0.0)
+    reporter.report(report([[10, 11]], state="paused") | {"final": True}, CAPTURED)
+    reporter.report(report([[11, 15]]), CAPTURED)  # the last report decides
+    (ping,) = reporter.due(10.0)
+    assert "final" not in query(ping[1]) and query(ping[1])["st"] == "10.000"
+
+
 def test_pings_carry_the_authuser_header_through_yt_dlp(monkeypatch):
     opened = []
 
@@ -479,6 +520,8 @@ def test_merge_ranges_keeps_the_order_played():
     {"video_id": VIDEO, "ranges": [[0, 1, 2]], "duration": 600, "cmt": 0, "state": "playing"},
     {"video_id": VIDEO, "ranges": "0-5", "duration": 600, "cmt": 0, "state": "playing"},
     {"video_id": VIDEO, "ranges": None, "duration": 600, "cmt": 0, "state": "playing"},
+    {"video_id": VIDEO, "ranges": [], "duration": 600, "cmt": 0, "state": "paused", "final": "yes"},
+    {"video_id": VIDEO, "ranges": [], "duration": 600, "cmt": 0, "state": "paused", "final": 1},
 ])
 def test_bad_reports_are_refused(body):
     with pytest.raises(ValueError):
@@ -488,7 +531,8 @@ def test_bad_reports_are_refused(body):
 def test_a_good_report():
     got = portal.parse_watch_report({"video_id": VIDEO, "ranges": [[0, 604.5]], "duration": 600, "cmt": 604, "state": "paused",
                                      "url": "https://evil.example/"})
-    assert got == {"video_id": VIDEO, "ranges": [(0.0, 604.5)], "cmt": 604.0, "duration": 600.0, "state": "paused"}
+    assert got == {"video_id": VIDEO, "ranges": [(0.0, 604.5)], "cmt": 604.0, "duration": 600.0, "state": "paused",
+                   "final": False}
 
 
 # ---------------------------------------------------------------- /api/watched over HTTP
@@ -624,7 +668,7 @@ def test_bad_page_context_is_refused(extra):
 
 def test_the_page_context_is_optional():
     got = portal.parse_watch_report({"video_id": VIDEO, "ranges": [], "duration": 600, "cmt": 0, "state": "paused"})
-    assert set(got) == {"video_id", "ranges", "cmt", "duration", "state"}
+    assert set(got) == {"video_id", "ranges", "cmt", "duration", "state", "final"} and got["final"] is False
     assert full_report(client={"os": "X11"})["client"] == {"cos": "X11"}
 
 

@@ -688,7 +688,9 @@
     document.addEventListener(name, () => { lastActivity = Date.now(); }, { capture: true, passive: true });
   }
 
-  function reportWatch() {
+  // final: the viewing ends here (a pause, the end, the page hidden or left): YouTube gets this
+  // report's ping at once, marked final. A later play goes on in the same session.
+  function reportWatch(final = false) {
     if (!state.info) return; // not known yet: the stretches wait
     if (state.info.watch_history !== "on") {
       state.watch = L.newWatchLog();
@@ -706,7 +708,7 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ video_id: state.videoId, ranges, cmt: Math.min(video.currentTime, duration), duration,
-        state: playing ? "playing" : "paused", lact: Date.now() - lastActivity, volume: Math.round(video.volume * 100),
+        state: playing ? "playing" : "paused", final, lact: Date.now() - lastActivity, volume: Math.round(video.volume * 100),
         muted: video.muted, client: L.clientInfo(navigator.userAgent) }),
       keepalive: true,
     }).catch(() => {});
@@ -716,7 +718,7 @@
   // post the same t twice.
   function goHome(alreadySaved = false) {
     if (!alreadySaved) savePosition();
-    reportWatch();
+    reportWatch(true);
     teardownWatch();
     // Opened from the home page: going back pops that entry (and swipe-back keeps working). Opened
     // any other way (a link, the home-screen app's start, a reload), there is no such entry: load home.
@@ -796,12 +798,12 @@
       if (document.visibilityState === "hidden") {
         cancelEndHome();
         savePosition();
-        reportWatch();
+        reportWatch(true);
       }
     });
     window.addEventListener("pagehide", () => {
       savePosition();
-      reportWatch();
+      reportWatch(true);
       teardownWatch();
     });
 
@@ -887,7 +889,7 @@
     for (const name of ["pause", "ended"]) {
       video.addEventListener(name, () => {
         L.watchClose(state.watch);
-        reportWatch();
+        reportWatch(true);
       });
     }
     video.addEventListener("seeked", () => {
@@ -939,7 +941,7 @@
   function useYouTube(reason) {
     if (state.player && state.player.kind === "youtube") return;
     console.log("using YouTube's player:", reason);
-    reportWatch(); // what our own player played until now
+    reportWatch(true); // what our own player played until now
     if (state.player) {
       state.startAt = state.everPlayed ? state.player.getCurrentTime() : state.startAt;
       state.player.destroy();
