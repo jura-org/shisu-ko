@@ -139,6 +139,13 @@ resolved them, so the portal proxies every byte:
 Every resume (Mine, closing the sheet, the toolbar, a tap on the video) calls `play()`
 synchronously inside the tap, for iOS's rule that sound may only start inside a user gesture.
 
+A tap on a word pauses (Settings > Pause when looking up a word) and keeps the playhead of the
+tap. The tap lands a second or more after the words that prompted it, so closing the sheet always
+seeks back before it plays (`lookupResume()`): by default one second before the tap, never before
+the line's start; with Settings > Resume after a lookup > Start of the line, to the line's start.
+The line is the tapped word's when it is the line being said or the one before it, else the line
+being said. Auto-pause skips that line's end once. A sheet opened while paused resumes nothing.
+
 ## The YouTube watch history
 
 Off by default. With `--watch-history on`, a video played in the portal's own player counts on the

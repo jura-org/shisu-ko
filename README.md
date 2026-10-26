@@ -552,7 +552,8 @@ nix run .#portal -- --mode lan      (Nix)
 On the phone, paste a YouTube link. The video plays in the page's own player, streamed through the
 computer; the subtitles below it centre the line being said and light up its words as they are
 spoken. Drag the bar above the buttons to move through the video; the list shows the line you will land
-on. Tap a word for its dictionary entry, tap a definition to pick it, and Mine adds the card
+on. Tap a word for its dictionary entry (the video pauses, and closing the entry plays again from a
+second before the tap, or from the line's start: Settings), tap a definition to pick it, and Mine adds the card
 with that sentence, its audio and a picture of the video. The first Mine asks which deck and note
 type to use, and guesses what each field gets from its name; Settings > Anki changes it. The
 server syncs Anki with AnkiWeb a minute after the card appears (see
