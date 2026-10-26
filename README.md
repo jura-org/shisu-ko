@@ -558,8 +558,8 @@ with that sentence, its audio and a picture of the video. The first Mine asks wh
 type to use, and guesses what each field gets from its name; Settings > Anki changes it. The
 server syncs Anki with AnkiWeb a minute after the card appears (see
 [Sentence mining](#sentence-mining)), and Settings > Anki shows when it last did, or why it could
-not. The list of videos remembers how far you got, on every device; swipe a video left to start it
-over or delete it, and a video watched to its end returns to the list. How it works, and its security model:
+not. The list of videos remembers how far you got, on every device; swipe a video left to mark it
+watched or delete it, and a video watched to its end returns to the list. How it works, and its security model:
 [docs/dev/portal.md](docs/dev/portal.md).
 
 `--watch-history on` (off by default) makes a video you watch in the portal count on your YouTube
