@@ -371,7 +371,10 @@ card setup), each with what to do.
   reader and the mouse.
 - **The end returns home.** A video played to its end (`ended`, or YouTube's player's ended state)
   goes home after 1.5 s, its end saved first so the bar there is full. A touch, a key, a hidden
-  page or an open sheet in that beat keeps the viewer on the video. A live stream never returns,
+  page or an open sheet in that beat keeps the viewer on the video, and a touch or key in it does
+  nothing else (`holdEnd()`): the tap on the video does not restart it, so the end stays saved and
+  the bar at home stays full. The next tap plays it again from the start, a replay whose position
+  is saved as it goes, as on YouTube. A live stream never returns,
   nor does an `ended` more than 2 s short of the duration (`atEnd()`, narrower than finished on
   purpose: an HLS stream may stop a segment early); a scrub to the very end is an end.
 

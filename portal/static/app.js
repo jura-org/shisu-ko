@@ -85,6 +85,8 @@
     tornDown: false,
     endTimer: null,
     endGen: 0, // bumped by every cancel: an endHome() past its await checks it still holds
+    endWaiting: false, // endHome() waits on the end's save: still the beat
+    endHeld: false, // the current touch or key cancelled the beat, so it must not also play
     sheetClosedAt: 0,
     resumeTarget: null,
     resumeLanded: true,
@@ -743,6 +745,14 @@
     state.endTimer = setTimeout(endHome, END_HOME_MS);
   }
 
+  // A touch or key in the beat keeps the viewer here, and that is all it does: the tap on the
+  // video that stops the way home must not also restart the ended video from 0 and save that over
+  // the end. play() swallows it; the viewer's next tap plays. Decided anew by every touch and key.
+  function holdEnd() {
+    state.endHeld = state.endTimer !== null || state.endWaiting;
+    cancelEndHome();
+  }
+
   function cancelEndHome() {
     clearTimeout(state.endTimer);
     state.endTimer = null;
@@ -755,7 +765,9 @@
     // The home list reads the positions as it loads: let the end's position land first (bounded,
     // so a slow computer only delays the way home). goHome() also flushes the watch report.
     const saved = savePosition();
+    state.endWaiting = true;
     if (saved) await Promise.race([saved, new Promise((resolve) => setTimeout(resolve, 1000))]);
+    state.endWaiting = false;
     // A touch, key, seek or play during that wait cancelled the beat: stay.
     if (gen !== state.endGen || state.tornDown || document.visibilityState === "hidden") return;
     goHome(true);
@@ -791,7 +803,7 @@
     setInterval(tick, 250);
     requestAnimationFrame(frame);
     // Any touch, click or key in the beat after the end keeps the viewer here.
-    for (const name of ["pointerdown", "keydown"]) document.addEventListener(name, cancelEndHome, true);
+    for (const name of ["pointerdown", "keydown"]) document.addEventListener(name, holdEnd, true);
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") {
         cancelEndHome();
@@ -1018,6 +1030,10 @@
   // come between the tap and this call.
   function play() {
     if (!state.playerReady) return;
+    if (state.endHeld) {
+      state.endHeld = false; // this tap only kept the viewer here (holdEnd())
+      return;
+    }
     state.player.playVideo();
     setTimeout(() => {
       const ytState = state.player.getPlayerState();
