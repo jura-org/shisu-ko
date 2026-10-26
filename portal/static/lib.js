@@ -678,6 +678,23 @@
     return out;
   }
 
+  // The box a tap at (x, y) falls in, or the nearest one: its index, or -1 for none. Boxes are
+  // {left, top, right, bottom}, one per character of a tapped word.
+  function nearestBox(boxes, x, y) {
+    let best = -1;
+    let bestDistance = Infinity;
+    boxes.forEach((box, i) => {
+      const dx = Math.max(box.left - x, 0, x - box.right);
+      const dy = Math.max(box.top - y, 0, y - box.bottom);
+      const distance = dx * dx + dy * dy;
+      if (distance < bestDistance) {
+        best = i;
+        bestDistance = distance;
+      }
+    });
+    return best;
+  }
+
   function hasKanji(text) {
     return /[㐀-鿿豈-﫿々]/.test(String(text || ""));
   }
@@ -689,7 +706,7 @@
     SCHEDULES, backoffDelay, isTransient, withRetry, retryLeft,
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
-    ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs,
+    ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs, nearestBox,
     watchHistoryText, newWatchLog, watchAt, watchClose, watchDrain,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;

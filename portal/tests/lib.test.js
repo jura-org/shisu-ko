@@ -399,3 +399,15 @@ test("a report holds at most twenty stretches; the rest wait for the next", () =
   assert.equal(L.watchDrain(log, 0, false).length, 20);
   assert.deepEqual(L.watchDrain(log, 0, false), [[200, 201], [210, 211], [220, 221], [230, 231], [240, 241]]);
 });
+
+test("nearestBox finds the character a tap falls in, else the nearest one", () => {
+  // Three 10-px characters in a row, as a tapped word's glyphs.
+  const boxes = [0, 10, 20].map((left) => ({ left, right: left + 10, top: 0, bottom: 20 }));
+  assert.equal(L.nearestBox(boxes, 15, 10), 1);
+  assert.equal(L.nearestBox(boxes, 19.5, 10), 1); // the right half of a glyph is still that glyph
+  assert.equal(L.nearestBox(boxes, 10, 10), 0); // a shared edge goes to the first
+  assert.equal(L.nearestBox(boxes, -4, 10), 0); // the word's padding
+  assert.equal(L.nearestBox(boxes, 34, 10), 2);
+  assert.equal(L.nearestBox(boxes, 26, -8), 2); // furigana above the last glyph
+  assert.equal(L.nearestBox([], 5, 5), -1);
+});

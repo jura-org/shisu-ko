@@ -273,6 +273,7 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 .cue .wc[data-status="new"] { text-decoration-color: rgba(255, 69, 58, 0.9); }
 .word:active { background: var(--fill); }
 .tok.picked { background: rgba(255, 255, 255, 0.14); color: var(--label); }
+::highlight(picked) { background-color: rgba(255, 255, 255, 0.14); color: var(--label); }
 rt { font-size: 0.45em; color: var(--label-2); font-weight: 400; }
 
 .toolbar {

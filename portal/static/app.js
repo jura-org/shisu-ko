@@ -1281,7 +1281,11 @@
       if (!cue) return;
       const word = ev.target.closest(".word");
       if (word) {
-        openSheet(cue, [Number(word.dataset.start), Number(word.dataset.end)], !!word.dataset.scan);
+        // Japanese looks up from the character under the finger, as Yomitan's scan does, so a
+        // token the parser started early (a particle glued on) cannot shift the word.
+        const scan = isJa() || !!word.dataset.scan;
+        const from = scan ? tappedIndex(word, ev.target, ev.clientX, ev.clientY) : Number(word.dataset.start);
+        openSheet(cue, [from, Number(word.dataset.end)], scan);
       } else if (!row.classList.contains("active")) {
         exitBrowse();
         seek(cue.start, state.playing || state.pauseCause !== "user");
@@ -1352,15 +1356,69 @@
     $("sheet").style.maxHeight = `${Math.max(240, room)}px`;
   }
 
+  // A token's text nodes with the cue offset each starts at. Furigana (<rt>) is not cue text.
+  function* tokenText(tok) {
+    let at = Number(tok.dataset.start);
+    const walk = document.createTreeWalker(tok, NodeFilter.SHOW_TEXT);
+    while (walk.nextNode()) {
+      const node = walk.currentNode;
+      if (node.parentElement.closest("rt")) continue;
+      yield { node, at };
+      at += node.data.length;
+    }
+  }
+
+  // The cue offset of the character under a tap on a word: the glyph whose box holds the point,
+  // or the nearest one; a tap on furigana picks among its ruby base. Glyph boxes, not
+  // caretPositionFromPoint(): a caret is the nearest boundary, so the right half of a glyph would
+  // answer the next one.
+  function tappedIndex(tok, target, x, y) {
+    const rt = target.closest("rt");
+    const scope = rt && tok.contains(rt) ? rt.parentElement : tok;
+    const offsets = [];
+    const boxes = [];
+    const range = document.createRange();
+    for (const { node, at } of tokenText(tok)) {
+      if (!scope.contains(node)) continue;
+      let i = 0;
+      for (const ch of node.data) {
+        range.setStart(node, i);
+        range.setEnd(node, i + ch.length);
+        offsets.push(at + i);
+        boxes.push(range.getBoundingClientRect());
+        i += ch.length;
+      }
+    }
+    const pick = L.nearestBox(boxes, x, y);
+    return pick < 0 ? Number(tok.dataset.start) : offsets[pick];
+  }
+
+  // Lights the span's characters exactly (a scan from inside a token covers part of it), or,
+  // without the CSS Highlight API, every unit the span touches.
   function markPicked(cue, span) {
     document.querySelectorAll("#lyrics .picked").forEach((el) => el.classList.remove("picked"));
+    const exact = typeof Highlight === "function" && window.CSS && CSS.highlights;
+    if (exact) CSS.highlights.delete("picked");
     const row = cue && state.rowById.get(cue.id);
     if (!row) return;
-    // Every unit inside the span: one token, or the characters a scan matched.
+    const ranges = [];
     for (const tok of row.querySelectorAll(".tok")) {
-      const at = Number(tok.dataset.start);
-      if (at >= span[0] && at < span[1]) tok.classList.add("picked");
+      if (Number(tok.dataset.start) >= span[1] || Number(tok.dataset.end) <= span[0]) continue;
+      if (!exact) {
+        tok.classList.add("picked");
+        continue;
+      }
+      for (const { node, at } of tokenText(tok)) {
+        const from = Math.max(span[0], at) - at;
+        const to = Math.min(span[1], at + node.data.length) - at;
+        if (from >= to) continue;
+        const range = document.createRange();
+        range.setStart(node, from);
+        range.setEnd(node, to);
+        ranges.push(range);
+      }
     }
+    if (exact && ranges.length) CSS.highlights.set("picked", new Highlight(...ranges));
   }
 
   async function openSheet(cue, span, scan = false) {
@@ -1386,10 +1444,10 @@
     sheet.style.transform = "";
     sheet.classList.add("open");
     sheet.setAttribute("aria-hidden", "false");
-    // A per-character tap (no tokens) looks up the text from there on, like Yomitan's scan; the
-    // longest match then becomes the span.
+    // A scan looks up the text from the tapped character on, like Yomitan's; the longest match
+    // then becomes the span.
     const surface = scan ? cue.text.slice(span[0], span[0] + 12) : cue.text.slice(span[0], span[1]);
-    $("sheet-headword").textContent = surface;
+    $("sheet-headword").textContent = cue.text.slice(span[0], span[1]);
     $("sheet-reading").replaceChildren();
     $("sheet-freq").textContent = "";
     $("sheet-audio").hidden = true;
