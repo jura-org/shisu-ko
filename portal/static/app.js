@@ -411,7 +411,7 @@
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   // open: the row whose actions show. drag: the gesture under way. eat: the click this gesture would
   // make is swallowed (it closed a row, or it was a swipe).
-  const swipe = { open: null, drag: null, eat: false, gesture: 0, rows: new WeakMap() };
+  const swipe = { open: null, openScrollY: 0, drag: null, eat: false, gesture: 0, rows: new WeakMap() };
 
   function setShift(li, shift) {
     li.querySelector(".row-front").style.transform = shift ? `translateX(${-shift}px)` : "";
@@ -423,6 +423,7 @@
   function openRow(li) {
     if (swipe.open && swipe.open !== li) closeRow();
     swipe.open = li;
+    swipe.openScrollY = window.scrollY;
     li.querySelector(".row-actions").inert = false;
     setShift(li, ACTIONS_W);
   }
@@ -475,7 +476,10 @@
       ev.stopPropagation();
     }, true);
     document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeRow(); });
-    window.addEventListener("scroll", closeRow, { passive: true });
+    // A scroll closes the open row; a few px of jitter (a rubber band settling) does not.
+    window.addEventListener("scroll", () => {
+      if (swipe.open && Math.abs(window.scrollY - swipe.openScrollY) > L.SWIPE.SLOP) closeRow();
+    }, { passive: true });
 
     ul.addEventListener("pointerdown", (ev) => {
       if (!ev.isPrimary || ev.button > 0 || swipe.eat) return;
