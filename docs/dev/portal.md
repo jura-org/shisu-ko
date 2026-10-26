@@ -370,7 +370,9 @@ card setup), each with what to do.
   (`/api/position/delete`). Edit's red minus opens the same actions, for the keyboard, a screen
   reader and the mouse.
 - **The end returns home.** A video played to its end (`ended`, or YouTube's player's ended state)
-  goes home after 1.5 s, its end saved first so the bar there is full. A touch, a key, a hidden
+  goes home after 1.5 s, its end saved first so the bar there is full. The end is posted once:
+  `pause`, `ended` and the way home all save it, and a save of the position posted less than 5 s
+  before is skipped (`repeatsSave()`), unless that post failed. A touch, a key, a hidden
   page or an open sheet in that beat keeps the viewer on the video, and a touch or key in it does
   nothing else (`holdEnd()`): the tap on the video does not restart it, so the end stays saved and
   the bar at home stays full. The next tap plays it again from the start, a replay whose position

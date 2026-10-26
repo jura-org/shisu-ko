@@ -462,6 +462,17 @@
     return Math.abs(t - resumeTarget) <= 2;
   }
 
+  // Whether a position save would post what the last one posted a moment ago: the same video, the
+  // same time within SAVE_SAME_S, sent less than SAVE_REPEAT_MS before. A video's end fires pause,
+  // then ended, then the way home saves: one post is enough. last is null after a failed post, so a
+  // save the server never received is never skipped; after the window a save goes out again, in
+  // case another device moved the position meanwhile.
+  const SAVE_SAME_S = 0.05;
+  const SAVE_REPEAT_MS = 5000;
+  function repeatsSave(last, videoId, t, now) {
+    return !!last && last.videoId === videoId && Math.abs(last.t - t) <= SAVE_SAME_S && now - last.at < SAVE_REPEAT_MS;
+  }
+
   // The one rule for a watched video, read by the home bar (full), Mark as watched / unwatched and
   // the resume (start over): the last tenth of it, never less than END_SLOP_S and never more than
   // FINISHED_S. So a long video is finished in its last 30 s (the credits, an outro), a 2-minute
@@ -878,7 +889,7 @@
   const api = {
     parseVideoInput, parseStart, activeCueIndex, formatTime, coveredUntil, statusText, tokenOffsets,
     morae, pitchPattern, splitFurigana, hasKanji, VIDEO_ID_RE, watchStatus, freqLabel,
-    STRINGS, resumeTime, saveAllowed, dismissAction, GHOST_CLICK_MS, watchedFraction, finished, FINISHED_S, atEnd, END_SLOP_S,
+    STRINGS, resumeTime, saveAllowed, repeatsSave, SAVE_REPEAT_MS, dismissAction, GHOST_CLICK_MS, watchedFraction, finished, FINISHED_S, atEnd, END_SLOP_S,
     watchedToggle, SWIPE, swipeAxis, swipeSettle, swipeShift, swipeVelocity, actionOffsets, formatClock, spokenTime,
     SCHEDULES, backoffDelay, isTransient, withRetry, retryLeft,
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,

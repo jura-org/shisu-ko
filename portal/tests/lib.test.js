@@ -364,6 +364,16 @@ test("the position saver waits for a resume to land", () => {
   assert.equal(L.saveAllowed(5.4, null, false), true); // no resume at all
 });
 
+test("repeatsSave skips only the same position posted a moment ago", () => {
+  const last = { videoId: "AbCdEfGhIjK", t: 227.594, at: 10000 };
+  assert.equal(L.repeatsSave(last, "AbCdEfGhIjK", 227.594, 10010), true); // the end's pause, then ended
+  assert.equal(L.repeatsSave(last, "AbCdEfGhIjK", 227.63, 10010), true); // within 0.05 s
+  assert.equal(L.repeatsSave(last, "AbCdEfGhIjK", 227.7, 10010), false); // moved: post it
+  assert.equal(L.repeatsSave(last, "ZyXwVuTsRqP", 227.594, 10010), false); // another video
+  assert.equal(L.repeatsSave(last, "AbCdEfGhIjK", 227.594, 10000 + L.SAVE_REPEAT_MS), false); // a while later
+  assert.equal(L.repeatsSave(null, "AbCdEfGhIjK", 227.594, 10010), false); // nothing sent, or it failed
+});
+
 test("closing the dictionary sheet never does anything else", () => {
   const open = { sheetOpen: true, inSheet: false, sheetCue: 7, sinceCloseMs: 99999 };
   assert.equal(L.dismissAction({ ...open, wordCue: 8 }), "dismiss"); // (a) the next cue's text

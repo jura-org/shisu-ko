@@ -84,6 +84,7 @@
     glideUntil: 0,
     tornDown: false,
     endTimer: null,
+    lastSave: null, // the last position posted: { videoId, t, at, request }
     endGen: 0, // bumped by every cancel: an endHome() past its await checks it still holds
     endWaiting: false, // endHome() waits on the end's save: still the beat
     endHeld: false, // the current touch or key cancelled the beat, so it must not also play
@@ -673,12 +674,23 @@
     if (!L.saveAllowed(t, state.resumeTarget, state.resumeLanded)) return null; // the resume has not landed yet
     state.t = t;
     remember();
-    return fetch("/api/position", {
+    // The same position again (the end's pause, ended and the way home): the post already sent,
+    // which endHome() can still wait on.
+    const now = Date.now();
+    if (L.repeatsSave(state.lastSave, state.videoId, t, now)) return state.lastSave.request;
+    const sent = { videoId: state.videoId, t, at: now, request: null };
+    sent.request = fetch("/api/position", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ video_id: state.videoId, t, duration: playerDuration(), title: state.title || null }),
       keepalive: true,
-    }).catch(() => {});
+    }).then((r) => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    }).catch(() => {
+      if (state.lastSave === sent) state.lastSave = null; // not received: the next save posts it again
+    });
+    state.lastSave = sent;
+    return sent.request;
   }
 
   // The portal's --watch-history: what our own player played goes to /api/watched, which reports
@@ -714,10 +726,8 @@
     }).catch(() => {});
   }
 
-  // alreadySaved: the caller has just saved this very position (endHome()); saving again would
-  // post the same t twice.
-  function goHome(alreadySaved = false) {
-    if (!alreadySaved) savePosition();
+  function goHome() {
+    savePosition(); // after endHome()'s save, the same position: nothing posted again (repeatsSave())
     reportWatch();
     teardownWatch();
     // Opened from the home page: going back pops that entry (and swipe-back keeps working). Opened
@@ -770,7 +780,7 @@
     state.endWaiting = false;
     // A touch, key, seek or play during that wait cancelled the beat: stay.
     if (gen !== state.endGen || state.tornDown || document.visibilityState === "hidden") return;
-    goHome(true);
+    goHome();
   }
 
   // Leaving the video: stop it and let go of its stream, so a page kept in the back-forward cache
