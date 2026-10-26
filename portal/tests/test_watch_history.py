@@ -429,3 +429,9 @@ def test_api_watched_needs_a_paired_device_off_loopback(server, monkeypatch):
     status, answer = post(server.port, GOOD)
     assert status == 401 and answer.get("pair")
     assert server.services.watch.sessions == {}
+
+
+def test_ping_summary_names_the_ping_and_its_times_only():
+    url = ("https://s.youtube.com/api/stats/watchtime?ns=yt&docid=x&cpn=abc&ei=e&st=0.000,30.000"
+           "&et=10.000,45.000&cmt=45.000&len=228&state=paused")
+    assert portal.ping_summary(url) == "watchtime st=0.000,30.000 et=10.000,45.000 cmt=45.000 len=228 state=paused"

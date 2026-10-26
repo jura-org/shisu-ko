@@ -1711,6 +1711,14 @@ def ping_url(base: str, params: dict) -> str:
     return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query, safe=",")))
 
 
+def ping_summary(url: str) -> str:
+    """A sent ping for the log: which one and the times it carried, nothing that names the viewer."""
+    parts = urllib.parse.urlsplit(url)
+    query = dict(urllib.parse.parse_qsl(parts.query))
+    kind = parts.path.rsplit("/", 1)[-1]
+    return " ".join([kind] + [f"{k}={query[k]}" for k in ("st", "et", "cmt", "len", "state") if k in query])
+
+
 def seconds(value: float) -> str:
     return f"{value:.3f}"
 
@@ -1813,14 +1821,15 @@ class WatchReporter:
                     continue
             for video_id, url in self.due(self.clock()):
                 try:
-                    self.send(url)
+                    status = self.send(url)
                     self.failed.discard(video_id)
+                    log.info("[%s] watch history: %s -> %s", video_id, ping_summary(url), status)
                 except Exception as exc:  # noqa: BLE001 - a lost ping costs a line of history, never playback
                     if video_id not in self.failed:
                         self.failed.add(video_id)
                         log.warning("[%s] watch history: YouTube refused the report (%s)", video_id, exc)
 
-    def youtube_get(self, url: str) -> None:
+    def youtube_get(self, url: str) -> int:
         """GET a tracking URL with the cookies yt-dlp reads from the server's browser; one
         YoutubeDL serves an hour of pings, so the browser's cookie store is not read for each."""
         if self.ydl is None or self.clock() - self.ydl_at > WATCH_YDL_TTL:
@@ -1831,6 +1840,7 @@ class WatchReporter:
         response = self.ydl.urlopen(url)
         try:
             response.read()
+            return response.status
         finally:
             response.close()
 
