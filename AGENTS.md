@@ -248,7 +248,7 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   client names: video streams are resolved by yt-dlp on the computer and reach the page only as
   opaque, expiring `/api/hls/<token>/` paths. Its only requests to YouTube under the viewer's account
   beyond yt-dlp's are the watch-history pings (`WatchReporter`), sent only with `--watch-history on`
-  and built from the player response's own tracking URLs, never from yt-dlp's `mark_watched`. It talks to the server only through `/sync`, `/clip`
+  and built from a signed-in player response's own tracking URLs, never from yt-dlp's `mark_watched`. It talks to the server only through `/sync`, `/clip`
   and `/health`, using `/sync`'s opt-in `words` and `deck` and its `retrying` / `retry_in` fields,
   and works without them. The page's word colours run the extension's own `addon/words.js`, which
   `portal.py` serves from the checkout (`WORDS_JS`), never a copy. It has no built-in card setup: a deck, note type and fields come from the

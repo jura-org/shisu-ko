@@ -149,11 +149,16 @@ container (`SHISUKO_CONTAINER`), the switch does nothing and the log says why at
 `/api/info`'s `watch_history` tells the page `"on"`, `"off"` or `"no-cookies"`, and Settings >
 Server says it in one line (`watchHistoryText()`).
 
-- **What is captured.** At resolve, `capture_tracking()` replaces `mark_watched` on that
-  `YoutubeDL`'s own YouTube extractor instance. yt-dlp calls it with the player responses it
-  fetched; the override keeps the first response's `playbackTracking` base URLs
-  (`videostatsPlaybackUrl`, `videostatsWatchtimeUrl`; `https` on a YouTube host only,
-  `tracking_urls()`) on the `HlsVideo` and sends nothing.
+- **What is captured.** The tracking URLs must come from a signed-in player response: that is
+  what ties a ping to the account. The stream resolves anonymously (above), so after it
+  `start_tracking()` runs one signed-in extraction per video on a thread of its own
+  (`fetch_tracking()`, `process=False`; never two at once, and none when the resolve itself went
+  signed in). `capture_tracking()` replaces `mark_watched` on that `YoutubeDL`'s own YouTube
+  extractor instance; yt-dlp calls it with the player responses it fetched, and the override keeps
+  the first response's `playbackTracking` base URLs (`videostatsPlaybackUrl`,
+  `videostatsWatchtimeUrl`; `https` on a YouTube host only, `tracking_urls()`) on the `HlsVideo`
+  and sends nothing. Playback never waits for it; a failure is logged once and leaves the video
+  without tracking URLs.
 - **What the page sends.** Our own `<video>` keeps the stretches it played (`newWatchLog()`,
   `watchAt()`, `watchClose()`, `watchDrain()` in `lib.js`): a seek, pause, rate change, the end or
   a jump of over 3 s closes one. `POST /api/watched` carries `{video_id, ranges: [[st, et], ...],
@@ -169,8 +174,9 @@ Server says it in one line (`watchHistoryText()`).
   `state` and `rt` (seconds since the session began). The base URL's own parameters stay. The
   pings run on a thread of their own through a `YoutubeDL`'s `urlopen` with the server's cookies
   (one `YoutubeDL` an hour, so the browser's cookie store is not read for every ping); a failure is
-  logged once per video and never touches playback. A video with no tracking URLs (resolved before
-  the switch, or none in the response) reports nothing.
+  logged once per video and never touches playback. Stretches reported while the signed-in look-up
+  runs wait in the session and go with the first ping after it (`set_tracking()`). A video with
+  no tracking URLs (resolved before the switch, a failed look-up) reports nothing.
 - **Why not yt-dlp's `mark_watched`.** It sends both pings at resolve, the watch-time one with
   `st=0` and `et` at the end: a whole video claimed watched the moment a link opens. The history
   would fill with videos opened and closed, and the recommendations would learn from time never

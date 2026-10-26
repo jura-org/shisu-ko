@@ -100,7 +100,8 @@ def test_info_tells_the_page(home, monkeypatch):
 
 class FakeExtractor:
     def mark_watched(self, video_id, player_responses):
-        raise AssertionError("yt-dlp's own mark_watched ran")
+        # yt-dlp's own: without its mark_watched option it sends nothing; this one notes it ran.
+        self.own_ran = True
 
 
 ORIGINAL_MARK_WATCHED = FakeExtractor.mark_watched
@@ -126,8 +127,16 @@ class FakeYoutubeDL:
         return self.extractor
 
     anonymous_hls = True
+    gate = None  # a threading.Event a signed-in extraction waits for
+    signed_in_error = None
 
     def extract_info(self, url, download, **kwargs):
+        self.kwargs = kwargs
+        signed_in = "cookiesfrombrowser" in self.options
+        if signed_in and FakeYoutubeDL.gate is not None:
+            assert FakeYoutubeDL.gate.wait(5)
+        if signed_in and FakeYoutubeDL.signed_in_error:
+            raise FakeYoutubeDL.signed_in_error
         # Where yt-dlp's YouTube extractor calls self.mark_watched(video_id, player_responses).
         self.extractor.mark_watched(VIDEO, RESPONSES)
         if "cookiesfrombrowser" not in self.options and not FakeYoutubeDL.anonymous_hls:
@@ -139,6 +148,8 @@ class FakeYoutubeDL:
 def fake_ytdlp(monkeypatch):
     FakeYoutubeDL.anonymous_hls = True
     FakeYoutubeDL.made = []
+    FakeYoutubeDL.gate = None
+    FakeYoutubeDL.signed_in_error = None
     monkeypatch.setattr(portal, "import_ytdlp", lambda: SimpleNamespace(YoutubeDL=FakeYoutubeDL))
     monkeypatch.setattr(portal, "http_open", lambda url, headers=None, timeout=20.0: SimpleNamespace(read=lambda: b"#EXTM3U"))
     monkeypatch.setattr(portal, "rewrite_master", lambda text, prefix: ("#EXTM3U", {"v1": "u"}, {"v1": 720}))
@@ -155,11 +166,68 @@ def test_resolve_keeps_the_first_player_responses_tracking_urls_and_sends_nothin
     assert FakeExtractor.mark_watched is ORIGINAL_MARK_WATCHED
 
 
-def test_resolve_without_the_switch_captures_nothing(home, fake_ytdlp):
+def wait_for(condition, seconds=5):
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.01)
+
+
+def test_an_anonymous_resolve_looks_the_tracking_up_signed_in_without_waiting_for_it(home, fake_ytdlp):
+    with_cookies(home)
+    FakeYoutubeDL.gate = threading.Event()
+    found = []
+    hls = portal.HlsProxy(capture_tracking=True, on_tracking=lambda vid, tracking: found.append((vid, tracking)))
     video = portal.HlsVideo(VIDEO)
-    with pytest.raises(AssertionError, match="own mark_watched ran"):
-        portal.HlsProxy().resolve(video)  # the fake's own method stands for yt-dlp's: untouched
+    hls.resolve(video)  # returns while the signed-in look-up still waits
+    assert video.master and video.tracking is None and video.tracking_busy
+    wait_for(lambda: len(FakeYoutubeDL.made) == 2)
+    anonymous, signed_in = FakeYoutubeDL.made
+    assert "cookiesfrombrowser" not in anonymous.options and "mark_watched" not in vars(anonymous.extractor)
+    assert signed_in.options["cookiesfrombrowser"] == ("firefox",)
+    hls.start_tracking(video)  # one look-up at a time
+    assert len(FakeYoutubeDL.made) == 2
+    FakeYoutubeDL.gate.set()
+    wait_for(lambda: not video.tracking_busy)
+    assert video.tracking == TRACKING and found == [(VIDEO, TRACKING)]
+    assert signed_in.kwargs == {"process": False}
+    hls.resolve(video)  # a re-resolve (a 403) keeps them and looks nothing up again
+    assert len(FakeYoutubeDL.made) == 3
+
+
+def test_a_failed_look_up_leaves_no_tracking_and_is_logged_once(home, fake_ytdlp, caplog):
+    with_cookies(home)
+    FakeYoutubeDL.signed_in_error = RuntimeError("bot check")
+    hls = portal.HlsProxy(capture_tracking=True)
+    video = portal.HlsVideo(VIDEO)
+    with caplog.at_level("WARNING", logger="portal"):
+        for _ in range(2):
+            hls.resolve(video)
+            wait_for(lambda: not video.tracking_busy)
     assert video.tracking is None
+    assert len([r for r in caplog.records if "signed-in look-up failed" in r.getMessage()]) == 1
+
+
+def test_reports_wait_for_the_tracking_urls_and_go_when_they_come():
+    reporter = portal.WatchReporter("on", send=None, clock=lambda: 0.0)
+    reporter.background = False
+    assert reporter.report(report([[0, 12]]), None, waiting=True)
+    assert reporter.report(report([[12, 20]]), None, waiting=True)
+    assert reporter.due(0.0) == [] and reporter.wait_time(0.0) is None
+    reporter.set_tracking(VIDEO, TRACKING)
+    playback, watchtime = reporter.due(0.0)
+    assert query(playback[1])["cmt"] == "0.000" and query(watchtime[1])["et"] == "20.000"
+    assert reporter.report(report([[20, 30]]), None) is True  # the session keeps its URLs
+    assert reporter.report({**report([[0, 5]]), "video_id": "ZyXwVuTsRqP"}, None) is False
+
+
+def test_resolve_without_the_switch_captures_nothing(home, fake_ytdlp):
+    with_cookies(home)
+    FakeYoutubeDL.anonymous_hls = False  # resolved signed in, yet the switch is off
+    video = portal.HlsVideo(VIDEO)
+    portal.HlsProxy().resolve(video)
+    assert video.tracking is None and len(FakeYoutubeDL.made) == 2
+    assert all(ydl.extractor.own_ran for ydl in FakeYoutubeDL.made)  # yt-dlp's own, untouched
 
 
 def test_tracking_urls_takes_youtube_https_urls_only():

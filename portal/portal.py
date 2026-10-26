@@ -615,7 +615,7 @@ class Services:
         self.audio_cache: dict[tuple, dict] = {}
         self.pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mine")
         self.watch = WatchReporter(watch_history_state(getattr(args, "watch_history", "off"))[0])
-        self.hls = HlsProxy(capture_tracking=self.watch.mode == "on")
+        self.hls = HlsProxy(capture_tracking=self.watch.mode == "on", on_tracking=self.watch.set_tracking)
         self.state = PortalState()
         self.positions = self.state
         self.card_file = None  # portal.json's keys, read at start
@@ -1074,10 +1074,12 @@ class Services:
 
     def watched(self, report: dict) -> bool:
         """A checked /api/watched report: held for YouTube when the video streamed through the
-        portal with its tracking URLs, else dropped."""
+        portal with its tracking URLs (or while they are looked up), else dropped."""
         with self.hls.lock:
             video = self.hls.videos.get(report["video_id"])
-        return self.watch.report(report, video.tracking if video else None)
+        if video is None:
+            return False
+        return self.watch.report(report, video.tracking, waiting=video.tracking_busy)
 
     def card_info(self) -> dict:
         return {"ok": True, "card": self.card(), "saved": self.state.card(),
@@ -1366,11 +1368,14 @@ class HlsVideo:
         self.duration = None
         self.title = None
         self.tracking = None  # YouTube's own watch-tracking URLs, kept only with --watch-history on
+        self.tracking_busy = False  # the signed-in extraction that finds them is running
+        self.tracking_failed = False
 
 
 class HlsProxy:
-    def __init__(self, capture_tracking: bool = False):
+    def __init__(self, capture_tracking: bool = False, on_tracking=None):
         self.capture_tracking = capture_tracking
+        self.on_tracking = on_tracking  # called with (video id, tracking URLs) once they are found
         self.lock = threading.Lock()
         self.videos: dict[str, HlsVideo] = {}
         self.by_token: dict[str, HlsVideo] = {}
@@ -1420,6 +1425,40 @@ class HlsProxy:
         video.title = info.get("title")
         video.tracking = tracking or video.tracking
         video.created = time.time()
+        if self.capture_tracking and not video.tracking:
+            self.start_tracking(video)
+
+    def start_tracking(self, video: HlsVideo) -> None:
+        """Find the tracking URLs of an anonymously resolved video in a signed-in player response,
+        on a thread of its own: playback never waits for it. One at a time per video."""
+        if not cookies_browser():
+            return
+        with self.lock:
+            if video.tracking or video.tracking_busy:
+                return
+            video.tracking_busy = True
+        threading.Thread(target=self.fetch_tracking, args=(video,), daemon=True,
+                         name=f"tracking-{video.video_id}").start()
+
+    def fetch_tracking(self, video: HlsVideo) -> None:
+        # The signed-in response's URLs tie the pings to the account, as yt-dlp's own mark_watched
+        # does; the anonymous one's would count for nobody. process=False: no format is chosen.
+        tracking = {}
+        try:
+            with import_ytdlp().YoutubeDL(ydl_options()) as ydl:
+                capture_tracking(ydl, tracking)
+                ydl.extract_info(f"https://www.youtube.com/watch?v={video.video_id}", download=False, process=False)
+            if not tracking:
+                raise UpstreamError("no tracking URLs in YouTube's answer")
+            video.tracking = tracking
+            if self.on_tracking:
+                self.on_tracking(video.video_id, tracking)
+        except Exception as exc:  # noqa: BLE001 - the history misses this video; playback goes on
+            if not video.tracking_failed:
+                video.tracking_failed = True
+                log.warning("[%s] watch history: the signed-in look-up failed (%s)", video.video_id, exc)
+        finally:
+            video.tracking_busy = False
 
     def get(self, video_id: str) -> HlsVideo:
         """The resolved video, resolving it (or again, after HLS_TOKEN_TTL) as needed."""
@@ -1705,12 +1744,17 @@ class WatchReporter:
         self.ydl = None
         self.ydl_at = 0.0
 
-    def report(self, report: dict, tracking: dict | None) -> bool:
-        """Hold a checked report for the next ping; False when nothing will be sent for it."""
-        if self.mode != "on" or not tracking:
+    def report(self, report: dict, tracking: dict | None, waiting: bool = False) -> bool:
+        """Hold a checked report for the next ping; False when nothing will be sent for it.
+        `waiting`: the tracking URLs are still being looked up (set_tracking() brings them), so
+        the stretches wait in the session rather than being lost."""
+        if self.mode != "on":
             return False
         now = self.clock()
         with self.cond:
+            known = self.sessions.get(report["video_id"])
+            if not (tracking or waiting or (known and known.tracking)):
+                return False
             for video_id, old in list(self.sessions.items()):
                 if now - old.used > WATCH_IDLE_DROP:
                     del self.sessions[video_id]
@@ -1718,6 +1762,7 @@ class WatchReporter:
             if session is None:
                 session = self.sessions[report["video_id"]] = WatchSession(tracking, now)
             session.used = now
+            session.tracking = session.tracking or tracking
             session.pending = merge_ranges(session.pending + report["ranges"])[-WATCH_PENDING_MAX:]
             session.cmt, session.duration, session.state = report["cmt"], report["duration"], report["state"]
             if self.thread is None and self.background:
@@ -1726,12 +1771,20 @@ class WatchReporter:
             self.cond.notify()
         return True
 
+    def set_tracking(self, video_id: str, tracking: dict) -> None:
+        """The tracking URLs a held session waited for: its stretches go with the next ping."""
+        with self.cond:
+            session = self.sessions.get(video_id)
+            if session is not None and not session.tracking:
+                session.tracking = tracking
+                self.cond.notify()
+
     def due(self, now: float) -> list[tuple[str, str]]:
         """The pings due at `now` as (video id, URL), taken off their sessions."""
         out = []
         with self.cond:
             for video_id, s in self.sessions.items():
-                if not s.pending or now - s.last_ping < WATCH_PING_GAP:
+                if not s.pending or not s.tracking or now - s.last_ping < WATCH_PING_GAP:
                     continue
                 if not s.announced:
                     s.announced = True
@@ -1748,7 +1801,7 @@ class WatchReporter:
 
     def wait_time(self, now: float) -> float | None:
         """Seconds until the next ping is due; None when nothing waits."""
-        waits = [max(0.0, s.last_ping + WATCH_PING_GAP - now) for s in self.sessions.values() if s.pending]
+        waits = [max(0.0, s.last_ping + WATCH_PING_GAP - now) for s in self.sessions.values() if s.pending and s.tracking]
         return min(waits) if waits else None
 
     def run(self) -> None:
