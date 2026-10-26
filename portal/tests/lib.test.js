@@ -239,10 +239,12 @@ test("resumeTime: ?t= wins, near start and near end start over", () => {
   assert.equal(L.resumeTime({ saved: null, urlT: null }), 0);
 });
 
-test("watchedFraction: the position over the duration, the last 2 s finished", () => {
+test("watchedFraction: the position over the duration, a finished video full", () => {
   assert.equal(L.watchedFraction({ t: 250, duration: 1000 }), 0.25);
-  assert.equal(L.watchedFraction({ t: 990, duration: 1000 }), 0.99); // 10 s left: not finished
-  assert.equal(L.watchedFraction({ t: 998, duration: 1000 }), 1);
+  assert.equal(L.watchedFraction({ t: 960, duration: 1000 }), 0.96); // 40 s left: not finished
+  assert.equal(L.watchedFraction({ t: 970, duration: 1000 }), 1); // 30 s left: finished
+  assert.equal(L.watchedFraction({ t: 107, duration: 120 }), 107 / 120); // 13 s of 2 min left
+  assert.equal(L.watchedFraction({ t: 108, duration: 120 }), 1); // the last tenth
   assert.equal(L.watchedFraction({ t: 1000, duration: 1000 }), 1);
   assert.equal(L.watchedFraction({ t: 1200, duration: 1000 }), 1); // past the end
   assert.equal(L.watchedFraction({ t: 0.4, duration: 3600 }) > 0, true); // a sliver still shows
@@ -254,13 +256,35 @@ test("watchedFraction: the position over the duration, the last 2 s finished", (
   assert.equal(L.watchedFraction(null), 0);
 });
 
-test("finished: within 2 s of a known end", () => {
-  assert.equal(L.finished(98, 100), true);
-  assert.equal(L.finished(97.9, 100), false);
+test("finished: the last tenth, at least 2 s and at most 30 s", () => {
+  assert.equal(L.finished(970, 1000), true); // long: the last 30 s
+  assert.equal(L.finished(969.9, 1000), false);
+  assert.equal(L.finished(108, 120), true); // 2 minutes: the last 12 s
+  assert.equal(L.finished(107.9, 120), false);
+  assert.equal(L.finished(13, 15), true); // a clip: the last 2 s, not a tenth of it
+  assert.equal(L.finished(12.9, 15), false);
   assert.equal(L.finished(150, 100), true);
   assert.equal(L.finished(98, 0), false);
   assert.equal(L.finished(98, NaN), false);
   assert.equal(L.finished(Infinity, Infinity), false); // a live stream never finishes
+});
+
+test("finished is one rule: the bar's full state, the toggle and the resume agree", () => {
+  for (const duration of [15, 45, 120, 600, 3600]) {
+    for (let t = 10; t <= duration; t += 0.5) {
+      const done = L.finished(t, duration);
+      assert.equal(L.watchedFraction({ t, duration }) === 1, done, `bar ${t}/${duration}`);
+      assert.equal(L.watchedToggle({ t, duration }) === 0, done, `toggle ${t}/${duration}`);
+      assert.equal(L.resumeTime({ saved: { t, duration }, urlT: null }) === 0, done, `resume ${t}/${duration}`);
+    }
+  }
+});
+
+test("atEnd: an ended within 2 s of the end is the end, one further short is not", () => {
+  assert.equal(L.atEnd(998, 1000), true);
+  assert.equal(L.atEnd(980, 1000), false); // finished, yet not where the player stops
+  assert.equal(L.finished(980, 1000), true);
+  assert.equal(L.atEnd(Infinity, Infinity), false);
 });
 
 test("other languages: even timing by letters, words from Intl.Segmenter", () => {

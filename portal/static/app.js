@@ -451,7 +451,7 @@
   }
 
   // Mark as watched sets the position to the end, here and on the PC, so the bar reads full and the
-  // next open starts at 0 (resumeTime() starts the last 30 s over); on a finished video it marks it
+  // next open starts at 0 (resumeTime() starts a finished() video over); on a finished video it marks it
   // unwatched: 0, the bar gone. The button then offers the other.
   async function markWatched(li, r) {
     const t = L.watchedToggle(r);
@@ -732,12 +732,12 @@
   // A video that played to its end goes home after a beat, its position the end, so its bar there
   // is full. Anything the viewer does in the beat keeps them here (cancelEndHome()), and so does a
   // sheet already open. Not for a live stream, and not for an "ended" short of the end (an HLS
-  // stream may end a segment early): only the last FINISHED_S counts. A scrub to the very end is an
-  // end like any other.
+  // stream may end a segment early): only the last END_SLOP_S counts (atEnd()). A scrub to the very
+  // end is an end like any other.
   function scheduleEndHome() {
     cancelEndHome();
     if (!state.playerReady || (state.syncData && state.syncData.live)) return;
-    if (!L.finished(state.player.getCurrentTime(), playerDuration())) return;
+    if (!L.atEnd(state.player.getCurrentTime(), playerDuration())) return;
     if (state.sheet.open || $("settings").classList.contains("open") || document.visibilityState === "hidden") return;
     state.endTimer = setTimeout(endHome, END_HOME_MS);
   }

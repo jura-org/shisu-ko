@@ -331,15 +331,19 @@ Yomitan's tokens. The page sends a token only; the deck is the portal's choice. 
 Where each video was left is kept in `portal-state.json` (`positions`), shared by every device:
 saved every 5 s while playing, on pause, seek, hide and leaving (never by a torn-down player, which
 reads 0). Reopening resumes 2 s before it;
-under 10 s, or within 30 s of the end, starts from 0; a `?t=` in the link wins (`resumeTime()`).
+under 10 s, or finished, starts from 0; a `?t=` in the link wins (`resumeTime()`).
+
+**Finished** has one rule, `finished()` in `lib.js`, read by the bar, Mark as watched / unwatched and
+the resume: the last tenth of the video, never less than 2 s and never more than 30 s. A long video
+is finished in its last 30 s (credits, an outro), a 2-minute one in its last 12 s, a 15-second clip
+in its last 2 s rather than a third of it.
 The home screen lists them with thumbnails (`/api/thumb/<id>`, cached on the computer) and shows
 what is still missing (`/api/health`: the server, Yomitan API, AnkiConnect, yt-dlp, PyAV, and the
 card setup), each with what to do.
 
 - **The watch bar** is YouTube's: a translucent grey track flush with the thumbnail's bottom edge,
   3 px here, and the watched part in YouTube's brand red, `#ff0033`, at least 3 px wide. Its length
-  is `watchedFraction()`, the position over the duration; within 2 s of the end the video is
-  finished (`finished()`, `FINISHED_S`) and the bar full. No duration, or a position of 0: no bar.
+  is `watchedFraction()`, the position over the duration; a finished video's bar is full. No duration, or a position of 0: no bar.
 - **Swipe actions**, as in iOS Mail: a row slides left off Mark as watched and Delete, 80 px a
   slot. Pointer events, so a mouse drags too. A gesture picks its axis after 10 px (`swipeAxis()`);
   the rows are `touch-action: pan-y`, so a vertical one stays the browser's scroll. From there the
@@ -362,7 +366,8 @@ card setup), each with what to do.
 - **The end returns home.** A video played to its end (`ended`, or YouTube's player's ended state)
   goes home after 1.5 s, its end saved first so the bar there is full. A touch, a key, a hidden
   page or an open sheet in that beat keeps the viewer on the video. A live stream never returns,
-  nor does an `ended` more than 2 s short of the duration; a scrub to the very end is an end.
+  nor does an `ended` more than 2 s short of the duration (`atEnd()`, narrower than finished on
+  purpose: an HLS stream may stop a segment early); a scrub to the very end is an end.
 
 `portal-state.json` is written atomically (a temporary file and a rename).
 

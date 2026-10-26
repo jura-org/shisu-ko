@@ -428,13 +428,13 @@
   // ---- resuming
 
   // Where to start a video: a ?t= in the link wins; else the saved position minus 2 s, except near
-  // the start (under 10 s: start over) or near the end (within 30 s: it was finished, start over).
+  // the start (under 10 s: start over) or once finished() (it was watched: start over).
   function resumeTime({ saved, duration, urlT }) {
     if (urlT !== null && urlT !== undefined && Number.isFinite(urlT)) return Math.max(0, urlT);
     if (!saved || !Number.isFinite(saved.t)) return 0;
     const d = Number(saved.duration) || Number(duration) || 0;
     if (saved.t < 10) return 0;
-    if (d && saved.t >= d - 30) return 0;
+    if (finished(saved.t, d)) return 0;
     return Math.max(0, saved.t - 2);
   }
 
@@ -462,11 +462,25 @@
     return Math.abs(t - resumeTarget) <= 2;
   }
 
-  // A position this close to the end is the end: players stop a frame or a segment short.
-  const FINISHED_S = 2;
+  // The one rule for a watched video, read by the home bar (full), Mark as watched / unwatched and
+  // the resume (start over): the last tenth of it, never less than END_SLOP_S and never more than
+  // FINISHED_S. So a long video is finished in its last 30 s (the credits, an outro), a 2-minute
+  // one in its last 12 s, and a short clip in its last 2 s, not a third of it.
+  const FINISHED_S = 30;
+  const FINISHED_SHARE = 0.1;
+  // A playhead this close to the end is at the end: players stop a frame or a segment short.
+  const END_SLOP_S = 2;
 
   function finished(t, duration) {
-    return Number.isFinite(duration) && duration > 0 && Number.isFinite(t) && t >= duration - FINISHED_S;
+    if (!(Number.isFinite(duration) && duration > 0 && Number.isFinite(t))) return false;
+    return t >= duration - Math.min(FINISHED_S, Math.max(END_SLOP_S, duration * FINISHED_SHARE));
+  }
+
+  // Whether an "ended" is the real end, for the way home: an HLS stream may stop a segment early,
+  // and that must not count. Narrower than finished(), on purpose: it asks where the player
+  // stopped, not whether the viewer has seen the video.
+  function atEnd(t, duration) {
+    return Number.isFinite(duration) && duration > 0 && Number.isFinite(t) && t >= duration - END_SLOP_S;
   }
 
   // How far in, 0..1, for the bar under a thumbnail: the position over the duration, a finished
@@ -863,7 +877,7 @@
   const api = {
     parseVideoInput, parseStart, activeCueIndex, formatTime, coveredUntil, statusText, tokenOffsets,
     morae, pitchPattern, splitFurigana, hasKanji, VIDEO_ID_RE, watchStatus, freqLabel,
-    STRINGS, resumeTime, saveAllowed, dismissAction, GHOST_CLICK_MS, watchedFraction, finished, FINISHED_S,
+    STRINGS, resumeTime, saveAllowed, dismissAction, GHOST_CLICK_MS, watchedFraction, finished, FINISHED_S, atEnd, END_SLOP_S,
     watchedToggle, SWIPE, swipeAxis, swipeSettle, swipeShift, swipeVelocity, actionOffsets, formatClock, spokenTime,
     SCHEDULES, backoffDelay, isTransient, withRetry, retryLeft,
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
