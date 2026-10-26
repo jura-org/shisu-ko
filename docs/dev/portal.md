@@ -146,7 +146,9 @@ the line's start; with Settings > Resume after a lookup > Start of the line, to 
 The line is the tapped word's when it is the line being said or the one before it, else the line
 being said. Before the first line (an intro, or a tap on the line still to come) there is no line:
 both settings resume one second before the tap, never at 0:00 unless the tap was within that
-second. Auto-pause skips that line's end once. A sheet opened while paused resumes nothing.
+second. Auto-pause skips that line's end once. A sheet opened while paused resumes nothing, and one closed
+without resuming (the Anki setup opening over it) leaves the playhead where it paused; a resume
+already at its target does not seek.
 
 ## The YouTube watch history
 

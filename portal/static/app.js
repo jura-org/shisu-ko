@@ -2123,8 +2123,11 @@
     if (s.pausedIt) {
       s.pausedIt = false;
       // Back to just before the tap, or the line's start (Settings): never on from where it paused.
+      // Only when playback resumes: a sheet closed for something else (the Anki setup) leaves the
+      // playhead where it paused, and a seek to where the playhead already is would cost a saved
+      // position and a /sync for nothing.
       const { t, cue } = L.lookupResume(state.cues, s.openedAt, s.cue && s.cue.id, settings.lookupResume);
-      if (Number.isFinite(t)) seek(t, false);
+      if (resume && Number.isFinite(t) && Math.abs(t - state.player.getCurrentTime()) > 0.05) seek(t, false);
       // The line looked up may have ended while the sheet was open; auto-pause must not fire for it again.
       state.autoPausedFor = cue ? cue.id : null;
       if (resume) play(); // still inside the gesture that closed the sheet
