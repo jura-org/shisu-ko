@@ -342,3 +342,60 @@ test("the server's rows mark a line through words.js, cut into the tokens Yomita
   const verb = { start: 2, end: 5, segs: [["食", "た"], ["べる", ""]] };
   assert.deepEqual(L.markedSegs(verb, marks), [{ text: "食", reading: "た", status: "learned" }, { text: "べる", reading: "", status: "learned" }]);
 });
+
+// ------------------------------------------------------------ the YouTube watch history
+
+test("watchHistoryText says what the portal's --watch-history is", () => {
+  assert.match(L.watchHistoryText("on"), /^YouTube history: on/);
+  assert.match(L.watchHistoryText("off"), /--watch-history on/);
+  assert.match(L.watchHistoryText("no-cookies"), /--save-cookies-from-browser/);
+  assert.equal(L.watchHistoryText(undefined), "", "a portal from before it says nothing");
+});
+
+test("the watch log grows a stretch while playing and a seek closes it", () => {
+  const log = L.newWatchLog();
+  for (const t of [10, 10.25, 10.5, 11, 12]) L.watchAt(log, t);
+  assert.deepEqual(log.open, [10, 12]);
+  L.watchClose(log); // seeking
+  for (const t of [100, 100.3, 101]) L.watchAt(log, t);
+  // A jump the events missed closes the stretch too, backwards or forwards.
+  L.watchAt(log, 50);
+  L.watchAt(log, 51);
+  L.watchAt(log, 80);
+  L.watchAt(log, 80.25);
+  assert.deepEqual(log.closed, [[10, 12], [100, 101], [50, 51]]);
+  assert.deepEqual(log.open, [80, 80.25]);
+});
+
+test("a pause closes the stretch, an empty one is dropped, and a report drains what is closed", () => {
+  const log = L.newWatchLog();
+  L.watchAt(log, 5);
+  L.watchClose(log); // paused at once: nothing played
+  assert.deepEqual(log.closed, []);
+  L.watchAt(log, 5);
+  L.watchAt(log, 7.12345);
+  L.watchClose(log);
+  assert.deepEqual(L.watchDrain(log, 7.12345, false), [[5, 7.123]]);
+  assert.deepEqual(L.watchDrain(log, 7.12345, false), [], "drained once");
+});
+
+test("a report while playing cuts the open stretch there and carries on from it", () => {
+  const log = L.newWatchLog();
+  for (let t = 0; t < 30; t += 0.25) L.watchAt(log, t);
+  assert.deepEqual(L.watchDrain(log, 30, true), [[0, 30]]);
+  assert.deepEqual(log.open, [30, 30]);
+  for (let t = 30; t <= 60; t += 0.25) L.watchAt(log, t);
+  assert.deepEqual(L.watchDrain(log, 60, false), [[30, 60]]);
+  assert.equal(log.open, null);
+});
+
+test("a report holds at most twenty stretches; the rest wait for the next", () => {
+  const log = L.newWatchLog();
+  for (let i = 0; i < 25; i++) {
+    L.watchAt(log, i * 10);
+    L.watchAt(log, i * 10 + 1);
+    L.watchClose(log);
+  }
+  assert.equal(L.watchDrain(log, 0, false).length, 20);
+  assert.deepEqual(L.watchDrain(log, 0, false), [[200, 201], [210, 211], [220, 221], [230, 231], [240, 241]]);
+});

@@ -19,6 +19,8 @@
   const GLIDE_MS = 400; // the list's transition (app.css .lyrics-track)
   const DOUBLE_TAP_MS = 300;
   const TOAST_MS = 2000;
+  const WATCH_FIRST_MS = 10000; // the first /api/watched report after play starts, then one every
+  const WATCH_REPORT_MS = 30000; // WATCH_REPORT_MS while playing, and at every pause, end and leave
   // YT.PlayerState values, usable before the API has loaded.
   const YT_ENDED = 0;
   const YT_PLAYING = 1;
@@ -93,6 +95,8 @@
     renderedCount: 0,
     title: null,
     lastSavedAt: 0,
+    watch: L.newWatchLog(), // the stretches our own player played, for /api/watched
+    watchSentAt: 0,
     lastShieldTap: null,
     inDeck: new Map(), // term -> boolean, from /api/canadd
     // The word colours: the deck's rows as the server sent them (L.applyDeck), and the words.js
@@ -359,8 +363,35 @@
     }).catch(() => {});
   }
 
+  // The portal's --watch-history: what our own player played goes to /api/watched, which reports
+  // it to the viewer's YouTube history. YouTube's iframe player reports its own watches: nothing
+  // from it. keepalive, as for the position.
+  function reportWatch() {
+    if (!state.info) return; // not known yet: the stretches wait
+    if (state.info.watch_history !== "on") {
+      state.watch = L.newWatchLog();
+      return;
+    }
+    if (!state.player || state.player.kind !== "native") return;
+    const video = state.player.video;
+    const duration = playerDuration();
+    if (!duration) return;
+    const playing = !video.paused && !video.ended;
+    const ranges = L.watchDrain(state.watch, video.currentTime, playing);
+    if (!ranges.length) return;
+    state.watchSentAt = Date.now();
+    fetch("/api/watched", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ video_id: state.videoId, ranges, cmt: Math.min(video.currentTime, duration), duration,
+        state: playing ? "playing" : "paused" }),
+      keepalive: true,
+    }).catch(() => {});
+  }
+
   function goHome() {
     savePosition();
+    reportWatch();
     teardownWatch();
     // Opened from the home page: going back pops that entry (and swipe-back keeps working). Opened
     // any other way (a link, the home-screen app's start, a reload), there is no such entry: load home.
@@ -402,9 +433,15 @@
     bindSettings();
     setInterval(tick, 250);
     requestAnimationFrame(frame);
-    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") savePosition(); });
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        savePosition();
+        reportWatch();
+      }
+    });
     window.addEventListener("pagehide", () => {
       savePosition();
+      reportWatch();
       teardownWatch();
     });
 
@@ -477,9 +514,22 @@
         } else {
           state.resumeLanded = true;
         }
+        state.watchSentAt = Date.now() - WATCH_REPORT_MS + WATCH_FIRST_MS;
       }
       emit(YT_PLAYING);
     });
+    // The played stretches, once the resume has landed (before it the element may still say 0).
+    video.addEventListener("timeupdate", () => {
+      if (state.resumeLanded && !video.paused && !video.seeking) L.watchAt(state.watch, video.currentTime);
+    });
+    video.addEventListener("seeking", () => L.watchClose(state.watch));
+    video.addEventListener("ratechange", () => L.watchClose(state.watch));
+    for (const name of ["pause", "ended"]) {
+      video.addEventListener(name, () => {
+        L.watchClose(state.watch);
+        reportWatch();
+      });
+    }
     video.addEventListener("seeked", () => {
       if (!state.resumeLanded && state.resumeTarget !== null && Math.abs(video.currentTime - state.resumeTarget) <= 1.5) state.resumeLanded = true;
     });
@@ -529,6 +579,7 @@
   function useYouTube(reason) {
     if (state.player && state.player.kind === "youtube") return;
     console.log("using YouTube's player:", reason);
+    reportWatch(); // what our own player played until now
     if (state.player) {
       state.startAt = state.everPlayed ? state.player.getCurrentTime() : state.startAt;
       state.player.destroy();
@@ -1161,6 +1212,7 @@
       state.lastSavedAt = Date.now();
       savePosition();
     }
+    if (state.playing && Date.now() - state.watchSentAt >= WATCH_REPORT_MS) reportWatch();
   }
 
   // ------------------------------------------------------------ line navigation
@@ -1742,6 +1794,7 @@
     renderDevices();
     renderAnkiRow();
     renderAnkiSync();
+    renderWatchHistory();
     closeSheet();
     renderServerStatus();
     $("settings").classList.add("open");
@@ -2083,6 +2136,14 @@
     const text = L.ankiSyncText(sync);
     $("set-anki-sync-status").textContent = text;
     $("set-anki-sync-status").hidden = !text;
+  }
+
+  // ---- Settings > Server: the portal's --watch-history
+
+  function renderWatchHistory() {
+    const text = L.watchHistoryText(state.info && state.info.watch_history);
+    $("set-watch-history").textContent = text;
+    $("set-watch-history").hidden = !text;
   }
 
   // ---- Settings > Paired devices (lan mode, or a device paired in tailscale mode)

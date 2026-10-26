@@ -161,6 +161,9 @@
     deviceSeen: (when) => `last seen ${when}`,
     notPaired: "This device is no longer paired.",
     usingYouTube: "Using YouTube's player",
+    watchHistoryOn: "YouTube history: on, what you watch here counts on your YouTube account",
+    watchHistoryOff: "YouTube history: off (start the portal with --watch-history on)",
+    watchHistoryNoCookies: "YouTube history: needs the server's YouTube cookies (--save-cookies-from-browser)",
     position: "Position",
     positionOf: (at, total) => `${at} of ${total}`,
     live: "LIVE",
@@ -565,6 +568,54 @@
     return S.ankiSyncWaiting;
   }
 
+  // Settings' line on the portal's --watch-history (/api/info watch_history); "" from a portal without it.
+  function watchHistoryText(mode) {
+    const S = STRINGS;
+    return { on: S.watchHistoryOn, off: S.watchHistoryOff, "no-cookies": S.watchHistoryNoCookies }[mode] || "";
+  }
+
+  // ------------------------------------------------------------ the YouTube watch history
+  //
+  // The stretches of media time our own player played, [start, end] each, which the page reports
+  // to /api/watched when the portal runs with --watch-history on. A seek, pause, rate change or
+  // the end closes a stretch (watchClose()); so does a jump the events missed.
+
+  const WATCH_JUMP_S = 3; // further than playback moves between two timeupdates: a seek
+
+  function newWatchLog() {
+    return { open: null, closed: [] };
+  }
+
+  // While playing: the open stretch runs on to t, or a new one starts at t.
+  function watchAt(log, t) {
+    if (!Number.isFinite(t) || t < 0) return;
+    const open = log.open;
+    if (open && t >= open[1] - 0.25 && t - open[1] <= WATCH_JUMP_S) {
+      open[1] = Math.max(open[1], t);
+      return;
+    }
+    watchClose(log);
+    log.open = [t, t];
+  }
+
+  function watchClose(log) {
+    if (log.open && log.open[1] > log.open[0]) log.closed.push(log.open);
+    log.open = null;
+  }
+
+  // One report's stretches, at most `max` (the rest wait for the next), rounded to the
+  // millisecond. The open stretch closes at t; while playing, the next one starts there.
+  function watchDrain(log, t, playing, max = 20) {
+    if (log.open) {
+      watchAt(log, t);
+      const end = log.open[1];
+      watchClose(log);
+      if (playing) log.open = [end, end];
+    }
+    const ms = (x) => Math.round(x * 1000) / 1000;
+    return log.closed.splice(0, max).map(([a, b]) => [ms(a), ms(b)]);
+  }
+
   // ------------------------------------------------------------ word colours
   //
   // The server reads the Anki deck and sends its rows with /sync (`deck`), [id, word, reading,
@@ -639,6 +690,7 @@
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
     ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs,
+    watchHistoryText, newWatchLog, watchAt, watchClose, watchDrain,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.PortalLib = api;
