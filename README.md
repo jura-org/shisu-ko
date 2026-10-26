@@ -560,6 +560,13 @@ server syncs Anki with AnkiWeb a minute after the card appears (see
 not. The list of videos remembers how far you got, on every device. How it works, and its security model:
 [docs/dev/portal.md](docs/dev/portal.md).
 
+`--watch-history on` (off by default) makes a video you watch in the portal count on your YouTube
+account, as if watched on YouTube: it lands in your watch history, and your recommendations see the
+time you actually watched. It reports through the YouTube cookies of the browser the server sends
+(`--save-cookies-from-browser firefox`; on Windows Chrome and Edge lock their cookies away) and
+does nothing without them. It sends YouTube which stretches of the video played, nothing else, and
+only for the portal's own player; YouTube's player, the fallback, records its own.
+
 ## Settings
 
 ![Popup, dark theme](docs/images/popup-dark.png)

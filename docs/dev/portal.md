@@ -12,6 +12,7 @@ phone browser ──HTTP──► portal/portal.py (127.0.0.1 / LAN / Tailscale,
                           ├─► Yomitan API      127.0.0.1:19633 /tokenize, /termEntries, /ankiFields (fields, word audio)
                           ├─► AnkiConnect      127.0.0.1:8765  deckNames, modelNames, modelFieldNames, canAddNotes, storeMediaFile, addNote, sync
                           ├─► yt-dlp (in-process)              YouTube's HLS stream, proxied
+                          ├─► YouTube (--watch-history on)     playback and watch-time pings, the viewer's cookies
                           └─► PyAV (in-process)                the card's picture, cut from an HLS segment
 ```
 
@@ -64,7 +65,8 @@ against other people on a shared tailnet (tailscale mode: owner check), and agai
 phone visits (Host, Origin, JSON-only, SameSite). Traffic is plain HTTP: on a LAN anyone who can
 read the network can read the pages and steal a device token; Tailscale encrypts its traffic. The
 portal never proxies a URL a client names: video URLs are resolved on the computer by yt-dlp, and
-the client only ever sees opaque tokens (below). Video IDs are checked against
+the client only ever sees opaque tokens (below); the watch-history pings go only to the tracking
+URLs in YouTube's own player response. Video IDs are checked against
 `^[A-Za-z0-9_-]{6,20}$`; request bodies are capped at 64 KB; every upstream call has a timeout.
 
 ## The card
@@ -131,6 +133,43 @@ resolved them, so the portal proxies every byte:
 
 Every resume (Mine, closing the sheet, the toolbar, a tap on the video) calls `play()`
 synchronously inside the tap, for iOS's rule that sound may only start inside a user gesture.
+
+## The YouTube watch history
+
+Off by default. With `--watch-history on`, a video played in the portal's own player counts on the
+viewer's YouTube account: it lands in the watch history, and the recommendations see the time
+actually watched. The account is the one signed in to the browser whose cookies the server sends
+(`cookies_from_browser` in `config.json`, `cookies_browser()`). Without such a browser, or in the
+container (`SHISUKO_CONTAINER`), the switch does nothing and the log says why at start;
+`/api/info`'s `watch_history` tells the page `"on"`, `"off"` or `"no-cookies"`, and Settings >
+Server says it in one line (`watchHistoryText()`).
+
+- **What is captured.** At resolve, `capture_tracking()` replaces `mark_watched` on that
+  `YoutubeDL`'s own YouTube extractor instance. yt-dlp calls it with the player responses it
+  fetched; the override keeps the first response's `playbackTracking` base URLs
+  (`videostatsPlaybackUrl`, `videostatsWatchtimeUrl`; `https` on a YouTube host only,
+  `tracking_urls()`) on the `HlsVideo` and sends nothing.
+- **What the page sends.** Our own `<video>` keeps the stretches it played (`newWatchLog()`,
+  `watchAt()`, `watchClose()`, `watchDrain()` in `lib.js`): a seek, pause, rate change, the end or
+  a jump of over 3 s closes one. `POST /api/watched` carries `{video_id, ranges: [[st, et], ...],
+  cmt, duration, state: "playing" | "paused"}` 10 s after play starts, every 30 s while playing,
+  and at pause, end, hide and leave (keepalive). YouTube's iframe player records its own watches,
+  so the page sends nothing from it. `parse_watch_report()` refuses (400) a bad video id, more
+  than 20 ranges, a number that is not finite, and any time outside 0..duration + 5 s.
+- **What goes to YouTube.** `WatchReporter` keeps one session per video (a random 16-character
+  `cpn`, dropped after 2 idle hours). The first played time sends the playback ping once (`ver=2`,
+  `cpn`, `cmt`, `el=detailpage`), which adds the video to the history. Then a watch-time ping per
+  report, at most one per video every 10 s, the stretches in between merged: `st` and `et` as
+  comma-separated lists with 3 decimals, as YouTube's own player sends them, plus `cmt`, `len`,
+  `state` and `rt` (seconds since the session began). The base URL's own parameters stay. The
+  pings run on a thread of their own through a `YoutubeDL`'s `urlopen` with the server's cookies
+  (one `YoutubeDL` an hour, so the browser's cookie store is not read for every ping); a failure is
+  logged once per video and never touches playback. A video with no tracking URLs (resolved before
+  the switch, or none in the response) reports nothing.
+- **Why not yt-dlp's `mark_watched`.** It sends both pings at resolve, the watch-time one with
+  `st=0` and `et` at the end: a whole video claimed watched the moment a link opens. The history
+  would fill with videos opened and closed, and the recommendations would learn from time never
+  watched.
 
 ## Cues, timing and language
 

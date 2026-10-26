@@ -16,6 +16,7 @@ Options (`portal.py --help`):
 | `--port N` | `$PORTAL_PORT`, else 8791 | |
 | `--host-name NAME` | | another name the page may be reached by (repeatable) |
 | `--forget-devices` | | revoke every paired device, then exit |
+| `--watch-history on\|off` | `off` | report what you watch in the portal's own player to your YouTube history, through the server's YouTube cookies |
 | `--config PATH` | `~/.shisu-ko/portal.json` | card settings that override the page's (optional) |
 | `--server`, `--yomitan`, `--anki` | `127.0.0.1:8790`, `:19633`, `:8765` | where the services are |
 
