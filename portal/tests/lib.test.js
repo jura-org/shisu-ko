@@ -434,3 +434,23 @@ test("nearestBox finds the character a tap falls in, else the nearest one", () =
   assert.equal(L.nearestBox(boxes, 26, -8), 2); // furigana above the last glyph
   assert.equal(L.nearestBox([], 5, 5), -1);
 });
+
+test("clientInfo names the browser and system as YouTube's pings do, and nothing it cannot read", () => {
+  const cases = [
+    ["Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+      { os: "iPhone", os_version: "17_5", browser: "Safari", browser_version: "17.5" }],
+    ["Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/130.0.6723.90 Mobile/15E148 Safari/604.1",
+      { os: "iPad", os_version: "18_0", browser: "Chrome", browser_version: "130.0.6723.90" }],
+    ["Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+      { os: "Android", os_version: "14", browser: "Chrome", browser_version: "131.0.0.0" }],
+    ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
+      { os: "Windows", os_version: "10.0", browser: "Edge", browser_version: "131.0.0.0" }],
+    ["Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:132.0) Gecko/20100101 Firefox/132.0",
+      { os: "Macintosh", os_version: "10.15", browser: "Firefox", browser_version: "132.0" }],
+    ["Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0",
+      { os: "X11", browser: "Firefox", browser_version: "132.0" }],
+  ];
+  for (const [ua, want] of cases) assert.deepEqual(L.clientInfo(ua), want, ua);
+  assert.deepEqual(L.clientInfo(""), {});
+  assert.deepEqual(L.clientInfo("curl/8.0"), {});
+});

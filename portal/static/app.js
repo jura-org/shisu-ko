@@ -367,6 +367,12 @@
   // The portal's --watch-history: what our own player played goes to /api/watched, which reports
   // it to the viewer's YouTube history. YouTube's iframe player reports its own watches: nothing
   // from it. keepalive, as for the position.
+  // The last touch or key on the page: YouTube's pings say how long ago it was (lact).
+  let lastActivity = Date.now();
+  for (const name of ["pointerdown", "keydown"]) {
+    document.addEventListener(name, () => { lastActivity = Date.now(); }, { capture: true, passive: true });
+  }
+
   function reportWatch() {
     if (!state.info) return; // not known yet: the stretches wait
     if (state.info.watch_history !== "on") {
@@ -385,7 +391,8 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ video_id: state.videoId, ranges, cmt: Math.min(video.currentTime, duration), duration,
-        state: playing ? "playing" : "paused" }),
+        state: playing ? "playing" : "paused", lact: Date.now() - lastActivity, volume: Math.round(video.volume * 100),
+        muted: video.muted, client: L.clientInfo(navigator.userAgent) }),
       keepalive: true,
     }).catch(() => {});
   }

@@ -634,6 +634,43 @@
     return log.closed.splice(0, max).map(([a, b]) => [ms(a), ms(b)]);
   }
 
+  // The browser and system a User-Agent names, as YouTube's pings name them (cbr, cbrver, cos,
+  // cosver): {browser, browser_version, os, os_version}, only the parts it names plainly. The
+  // version keeps the User-Agent's own spelling (iOS "17_5").
+  function clientInfo(ua) {
+    const text = String(ua || "");
+    const out = {};
+    const os = [
+      [/\b(iPhone|iPad|iPod)\b.*?\bOS (\d+(?:_\d+)*)/, (m) => [m[1], m[2]]],
+      [/\bAndroid (\d+(?:\.\d+)*)/, (m) => ["Android", m[1]]],
+      [/\bWindows NT (\d+\.\d+)/, (m) => ["Windows", m[1]]],
+      [/\bMac OS X (\d+(?:[_.]\d+)*)/, (m) => ["Macintosh", m[1]]],
+      [/\bCrOS\b/, () => ["CrOS", ""]],
+      [/\b(X11|Linux)\b/, () => ["X11", ""]],
+    ];
+    for (const [re, take] of os) {
+      const m = re.exec(text);
+      if (!m) continue;
+      [out.os, out.os_version] = take(m);
+      break;
+    }
+    const browsers = [
+      [/\bEdg(?:e|A|iOS)?\/(\d+(?:\.\d+)*)/, "Edge"],
+      [/\b(?:Firefox|FxiOS)\/(\d+(?:\.\d+)*)/, "Firefox"],
+      [/\b(?:CriOS|Chrome)\/(\d+(?:\.\d+)*)/, "Chrome"],
+      [/\bVersion\/(\d+(?:\.\d+)*).*\bSafari\//, "Safari"],
+    ];
+    for (const [re, name] of browsers) {
+      const m = re.exec(text);
+      if (!m) continue;
+      out.browser = name;
+      out.browser_version = m[1];
+      break;
+    }
+    for (const key of Object.keys(out)) if (!/^[A-Za-z0-9._ -]{1,32}$/.test(out[key])) delete out[key];
+    return out;
+  }
+
   // ------------------------------------------------------------ word colours
   //
   // The server reads the Anki deck and sends its rows with /sync (`deck`), [id, word, reading,
@@ -725,7 +762,7 @@
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
     ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs, nearestBox, lookupResume, LOOKUP_LEAD_S,
-    watchHistoryText, newWatchLog, watchAt, watchClose, watchDrain,
+    watchHistoryText, newWatchLog, watchAt, watchClose, watchDrain, clientInfo,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.PortalLib = api;
