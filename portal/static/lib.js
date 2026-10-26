@@ -138,7 +138,7 @@
     transcribing: "Transcribing…",
     // the page
     notALink: "That isn't a YouTube link or video ID.",
-    rowActions: (name) => `Delete or start over: ${name}`,
+    rowActions: (name) => `Actions for ${name}`, // the edit minus: Mark as watched (with a duration) and Delete
     deleteVideo: (name) => `Delete ${name}`,
     markWatchedVideo: (name) => `Mark as watched: ${name}`,
     markUnwatchedVideo: (name) => `Mark as unwatched: ${name}`,
