@@ -303,68 +303,107 @@
     return img;
   }
 
-  // Each row: the actions (Start over, Delete) behind, and in front the row itself, which a swipe
-  // to the left slides off them. Edit mode's red minus opens the same actions.
+  // Each row: the actions behind it (actionsFor()), and in front the row itself, which a swipe to
+  // the left slides off them. Edit mode's red minus opens the same actions.
   function renderRecent(list) {
     const ul = $("recent");
     swipe.open = null;
     swipe.drag = null;
     ul.replaceChildren();
-    for (const r of list) {
-      const name = r.title || r.id;
-      const li = document.createElement("li");
-      const actions = document.createElement("div");
-      actions.className = "row-actions";
-      actions.inert = true;
-      const again = document.createElement("button");
-      again.className = "start-over";
-      again.textContent = S.startOver;
-      again.setAttribute("aria-label", S.startOverVideo(name));
-      again.addEventListener("click", () => startOver(li, r));
-      const del = document.createElement("button");
-      del.className = "delete";
-      del.textContent = S.delete;
-      del.setAttribute("aria-label", S.deleteVideo(name));
-      del.addEventListener("click", () => deleteRow(li, r));
-      swipe.rows.set(li, r);
-      actions.append(again, del);
-
-      const front = document.createElement("div");
-      front.className = "row-front";
-      const a = document.createElement("a");
-      a.href = `?v=${encodeURIComponent(r.id)}`;
-      a.draggable = false; // a mouse drag swipes; it never drags the link away
-      const thumb = document.createElement("div");
-      thumb.className = "thumb";
-      thumb.append(thumbImage(r.id));
-      const fraction = L.watchedFraction(r);
-      if (fraction > 0) {
-        const bar = document.createElement("div");
-        bar.className = "progress";
-        const fill = document.createElement("span");
-        fill.style.width = `${(fraction * 100).toFixed(1)}%`;
-        bar.append(fill);
-        thumb.append(bar);
-      }
-      const title = document.createElement("div");
-      title.className = "title";
-      title.textContent = name;
-      a.append(thumb, title);
-      const remove = document.createElement("button");
-      remove.className = "remove";
-      remove.setAttribute("aria-label", S.rowActions(name));
-      remove.addEventListener("click", () => {
-        if (swipe.open === li) closeRow();
-        else {
-          openRow(li);
-          again.focus({ preventScroll: true });
-        }
-      });
-      front.append(remove, a);
-      li.append(actions, front);
-      ul.append(li);
-    }
+    for (const r of list) ul.append(recentRow(r));
     listChanged();
+  }
+
+  function recentRow(r) {
+    const name = r.title || r.id;
+    const li = document.createElement("li");
+    const actions = document.createElement("div");
+    actions.className = "row-actions";
+    actions.inert = true;
+    const buttons = actionsFor(r).map((spec) => {
+      const button = document.createElement("button");
+      button.className = spec.className;
+      const face = document.createElement("span");
+      face.className = "act-face";
+      const label = document.createElement("span");
+      label.textContent = spec.label;
+      face.append(icon(spec.icon), label);
+      button.append(face);
+      button.setAttribute("aria-label", spec.aria(name));
+      button.addEventListener("click", () => spec.run(li, r));
+      return button;
+    });
+    actions.append(...buttons);
+    swipe.rows.set(li, { r, buttons, width: buttons.length * ACTION_W });
+
+    const front = document.createElement("div");
+    front.className = "row-front";
+    const a = document.createElement("a");
+    a.href = `?v=${encodeURIComponent(r.id)}`;
+    a.draggable = false; // a mouse drag swipes; it never drags the link away
+    const thumb = document.createElement("div");
+    thumb.className = "thumb";
+    thumb.append(thumbImage(r.id));
+    const title = document.createElement("div");
+    title.className = "title";
+    title.textContent = name;
+    a.append(thumb, title);
+    const remove = document.createElement("button");
+    remove.className = "remove";
+    remove.setAttribute("aria-label", S.rowActions(name));
+    remove.addEventListener("click", () => {
+      if (swipe.open === li) closeRow();
+      else {
+        openRow(li);
+        buttons[0].focus({ preventScroll: true });
+      }
+    });
+    front.append(remove, a);
+    li.append(actions, front);
+    drawBar(li, r);
+    return li;
+  }
+
+  // The watch bar under the thumbnail, drawn again whenever the position changes.
+  function drawBar(li, r) {
+    const thumb = li.querySelector(".thumb");
+    const old = thumb.querySelector(".progress");
+    if (old) old.remove();
+    const fraction = L.watchedFraction(r);
+    if (fraction <= 0) return;
+    const bar = document.createElement("div");
+    bar.className = "progress";
+    const fill = document.createElement("span");
+    fill.style.width = `${(fraction * 100).toFixed(1)}%`;
+    bar.append(fill);
+    thumb.append(bar);
+  }
+
+  // Line icons in the page's own SVG style (app.css svg), from path data.
+  const ICONS = {
+    trash: ["M4 7h16", "M9.5 7V4.5h5V7", "M6.5 7l1 12.5h9l1-12.5", "M10 11v5", "M14 11v5"],
+    restart: ["M4 5v5h5", "M5.2 14.5a7.2 7.2 0 1 0 1.7-7.4L4 10"],
+  };
+
+  function icon(name) {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    for (const d of ICONS[name]) {
+      const path = document.createElementNS(NS, "path");
+      path.setAttribute("d", d);
+      svg.append(path);
+    }
+    return svg;
+  }
+
+  // The swipe's actions, left to right; Delete is always last (a full swipe runs it).
+  function actionsFor() {
+    return [
+      { className: "start-over", icon: "restart", label: S.startOver, aria: S.startOverVideo, run: startOver },
+      { className: "delete", icon: "trash", label: S.delete, aria: S.deleteVideo, run: deleteRow },
+    ];
   }
 
   function listChanged() {
@@ -394,8 +433,7 @@
   async function startOver(li, r) {
     closeRow();
     r.t = 0;
-    const bar = li.querySelector(".progress");
-    if (bar) bar.remove();
+    drawBar(li, r);
     localStorage.setItem(RECENT_KEY, JSON.stringify(recentList().map((x) => (x.id === r.id ? { ...x, t: 0 } : x))));
     try {
       await api("/api/position", { video_id: r.id, t: 0 });
@@ -406,18 +444,50 @@
 
   // ------------------------------------------------------------ swiping a home row
 
-  const ACTIONS_W = 160; // the two action buttons (app.css .row-actions button)
+  // How it stays smooth: during a drag only transforms change (the row, and each button sliding in
+  // from the right edge), written once per frame; nothing is measured but the row's width, read at
+  // the touch. Released, the row springs to where swipeSettle() sends it (the finger's speed
+  // included) on a CSS transition; li.live holds will-change while a row moves.
+  const ACTION_W = 80; // one action button's share of an open row
+  const SETTLE_MS = 300; // app.css .recent .row-front transition
+  const EXPAND_MS = 200; // app.css .recent li .row-actions button.expanding
   const COLLAPSE_MS = 300; // app.css .recent li.collapsing
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   // open: the row whose actions show. drag: the gesture under way. eat: the click this gesture would
   // make is swallowed (it closed a row, or it was a swipe).
   const swipe = { open: null, openScrollY: 0, drag: null, eat: false, gesture: 0, rows: new WeakMap() };
 
-  function setShift(li, shift) {
+  // shift px left of closed (negative: the rubber band to the right); rowW the row's width.
+  function setShift(li, shift, rowW) {
+    const row = swipe.rows.get(li);
     li.querySelector(".row-front").style.transform = shift ? `translateX(${-shift}px)` : "";
-    li.querySelector(".row-actions").style.width = `${Math.max(ACTIONS_W, shift)}px`;
-    // Past the delete point the Delete button takes the whole width, as in iOS Mail.
-    li.classList.toggle("full", shift >= li.offsetWidth * L.SWIPE.DELETE);
+    // Past the delete point Delete takes the whole width, as in iOS Mail, with a tick where the
+    // device has one (Android; iOS gives the web none).
+    const full = shift >= rowW * L.SWIPE.DELETE;
+    const last = row.buttons[row.buttons.length - 1];
+    if (full !== li.classList.contains("full")) {
+      li.classList.toggle("full", full);
+      last.classList.add("expanding");
+      clearTimeout(last.expandTimer);
+      last.expandTimer = setTimeout(() => last.classList.remove("expanding"), EXPAND_MS);
+      if (full && navigator.vibrate) navigator.vibrate(8);
+    }
+    const offsets = L.actionOffsets(shift, row.buttons.length, full);
+    row.buttons.forEach((b, i) => {
+      b.style.transform = `translateX(${-offsets[i]}px)`;
+      // Its icon and label stay centred in the part of it that shows, until that is a full slot.
+      const shown = offsets[i] - (offsets[i + 1] || 0);
+      b.firstChild.style.transform = shown < ACTION_W ? `translateX(${(shown - ACTION_W) / 2}px)` : "";
+      // The label fades in over the second half of the slot: clipped words read worse than none.
+      b.firstChild.lastChild.style.opacity = Math.max(0, Math.min(1, (shown - ACTION_W / 2) / (ACTION_W / 2)));
+    });
+  }
+
+  function settle(li, shift) {
+    li.classList.add("live");
+    clearTimeout(li.settleTimer);
+    setShift(li, shift, li.offsetWidth);
+    if (!shift) li.settleTimer = setTimeout(() => li.classList.remove("live"), SETTLE_MS);
   }
 
   function openRow(li) {
@@ -425,7 +495,7 @@
     swipe.open = li;
     swipe.openScrollY = window.scrollY;
     li.querySelector(".row-actions").inert = false;
-    setShift(li, ACTIONS_W);
+    settle(li, swipe.rows.get(li).width);
   }
 
   function closeRow() {
@@ -433,7 +503,7 @@
     if (!li) return;
     swipe.open = null;
     li.querySelector(".row-actions").inert = true;
-    setShift(li, 0);
+    settle(li, 0);
   }
 
   // The row slides off to the left, then its space closes.
@@ -443,7 +513,7 @@
       listChanged();
       return;
     }
-    setShift(li, li.offsetWidth);
+    settle(li, li.offsetWidth);
     li.style.height = `${li.offsetHeight}px`;
     void li.offsetHeight; // the height above is the transition's start
     li.classList.add("collapsing");
@@ -485,49 +555,64 @@
       if (!ev.isPrimary || ev.button > 0 || swipe.eat) return;
       const li = ev.target.closest("li");
       if (!li || ev.target.closest(".row-actions, .remove")) return;
-      swipe.drag = { li, id: ev.pointerId, x0: ev.clientX, y0: ev.clientY, axis: null, start: li === swipe.open ? ACTIONS_W : 0, shift: 0 };
+      const row = swipe.rows.get(li);
+      // live (will-change) now, so the layers exist by the time the first SLOP px are past.
+      li.classList.add("live");
+      clearTimeout(li.settleTimer);
+      swipe.drag = { li, row, rowW: li.offsetWidth, id: ev.pointerId, x0: ev.clientX, y0: ev.clientY, axis: null,
+        start: li === swipe.open ? row.width : 0, shift: 0, frame: 0, samples: [{ t: ev.timeStamp, x: ev.clientX }] };
     });
     ul.addEventListener("pointermove", (ev) => {
       const d = swipe.drag;
       if (!d || ev.pointerId !== d.id) return;
       const dx = ev.clientX - d.x0;
+      d.samples.push({ t: ev.timeStamp, x: ev.clientX });
+      if (d.samples.length > 12) d.samples.shift();
       if (!d.axis) {
         d.axis = L.swipeAxis(dx, ev.clientY - d.y0);
         if (!d.axis) return;
         if (d.axis === "y") {
           swipe.drag = null;
+          if (d.li !== swipe.open) settle(d.li, 0); // drops live
           closeRow();
           return;
         }
         d.li.setPointerCapture(d.id);
         d.li.classList.add("dragging");
         if (swipe.open && swipe.open !== d.li) closeRow();
+        // Measured from here, so the row starts moving under the finger, not SLOP px behind it.
+        d.x0 = ev.clientX;
       }
-      d.shift = L.swipeShift({ start: d.start, dx, row: d.li.offsetWidth });
-      setShift(d.li, d.shift);
+      d.shift = L.swipeShift({ start: d.start, dx: ev.clientX - d.x0, row: d.rowW, actions: d.row.width });
+      if (!d.frame) {
+        d.frame = requestAnimationFrame(() => {
+          d.frame = 0;
+          setShift(d.li, d.shift, d.rowW);
+        });
+      }
     });
     const release = (ev) => {
       const d = swipe.drag;
       if (!d || ev.pointerId !== d.id) return;
       swipe.drag = null;
+      cancelAnimationFrame(d.frame);
       if (!d.axis) {
         // A tap on the open row closes it and opens nothing.
         if (d.li === swipe.open) {
           closeRow();
           swipe.eat = true;
-        }
+        } else settle(d.li, 0);
         return;
       }
       swipe.eat = true; // a swipe is never also a tap on the link
+      d.samples.push({ t: ev.timeStamp, x: ev.clientX });
       d.li.classList.remove("dragging");
       const verdict = ev.type === "pointercancel" ? (d.start ? "open" : "closed")
-        : L.swipeSettle({ shift: d.shift, actions: ACTIONS_W, row: d.li.offsetWidth, wasOpen: d.start > 0 });
-      if (verdict === "delete") deleteRow(d.li, swipe.rows.get(d.li));
+        : L.swipeSettle({ shift: d.shift, actions: d.row.width, row: d.rowW, wasOpen: d.start > 0, velocity: L.swipeVelocity(d.samples) });
+      if (verdict === "delete") deleteRow(d.li, d.row.r);
       else if (verdict === "open") openRow(d.li);
-      else {
-        if (swipe.open === d.li) closeRow();
-        else setShift(d.li, 0);
-      }
+      else if (swipe.open === d.li) closeRow();
+      else settle(d.li, 0);
     };
     ul.addEventListener("pointerup", release);
     ul.addEventListener("pointercancel", release);

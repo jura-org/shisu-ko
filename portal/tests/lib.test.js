@@ -471,9 +471,47 @@ test("swipeSettle: a third opens, two thirds back closes, 60% of the row deletes
   assert.equal(L.swipeSettle({ ...row, shift: 300, wasOpen: true }), "delete");
 });
 
-test("swipeShift: follows the finger, never right of closed or past the row", () => {
-  assert.equal(L.swipeShift({ start: 0, dx: -40, row: 360 }), 40);
-  assert.equal(L.swipeShift({ start: 160, dx: 30, row: 360 }), 130);
-  assert.equal(L.swipeShift({ start: 0, dx: 50, row: 360 }), 0);
-  assert.equal(L.swipeShift({ start: 160, dx: -400, row: 360 }), 360);
+test("swipeSettle: a flick goes the way it moved, however short", () => {
+  const row = { actions: 160, row: 360 };
+  assert.equal(L.swipeSettle({ ...row, shift: 25, wasOpen: false, velocity: 0.6 }), "open"); // fast and short
+  assert.equal(L.swipeSettle({ ...row, shift: 25, wasOpen: false, velocity: 0.2 }), "closed"); // slow and short
+  assert.equal(L.swipeSettle({ ...row, shift: 140, wasOpen: true, velocity: -0.5 }), "closed"); // a flick right
+  assert.equal(L.swipeSettle({ ...row, shift: 140, wasOpen: true, velocity: -0.1 }), "open");
+  assert.equal(L.swipeSettle({ ...row, shift: 230, wasOpen: false, velocity: -1 }), "delete"); // past 60% is past
+});
+
+test("swipeShift: 1:1 to the actions, damped past them, a rubber band right of closed", () => {
+  const base = { row: 360, actions: 160 };
+  assert.equal(L.swipeShift({ ...base, start: 0, dx: -40 }), 40);
+  assert.equal(L.swipeShift({ ...base, start: 160, dx: 30 }), 130);
+  assert.equal(L.swipeShift({ ...base, start: 0, dx: -160 }), 160);
+  assert.equal(L.swipeShift({ ...base, start: 0, dx: -260 }), 240); // 160 + 100 * 0.8
+  assert.equal(L.swipeShift({ ...base, start: 160, dx: -400 }), 360); // never past the row
+  assert.equal(L.swipeShift({ ...base, start: 0, dx: 0 }), 0);
+  const band = L.swipeShift({ ...base, start: 0, dx: 50 });
+  assert.ok(band < 0 && band > -50 * 0.55, `rubber band: ${band}`);
+  assert.ok(L.swipeShift({ ...base, start: 0, dx: 5000 }) > -60); // tends to BAND, never reaches it
+  // the delete point is reachable: 60% of 360 = 216 at 230 px of travel
+  assert.ok(L.swipeShift({ ...base, start: 0, dx: -230 }) >= 216);
+});
+
+test("swipeVelocity: px/ms leftward over the last 100 ms", () => {
+  assert.equal(L.swipeVelocity([]), 0);
+  assert.equal(L.swipeVelocity([{ t: 0, x: 300 }]), 0);
+  // 60 px left in 50 ms
+  assert.equal(L.swipeVelocity([{ t: 0, x: 330 }, { t: 25, x: 300 }, { t: 50, x: 270 }]), 1.2);
+  // only the last 100 ms count: a slow start, then a quick finish
+  assert.equal(L.swipeVelocity([{ t: 0, x: 400 }, { t: 900, x: 330 }, { t: 950, x: 300 }, { t: 1000, x: 280 }]), 0.5);
+  // the finger stopped 200 ms before lifting: no flick
+  assert.equal(L.swipeVelocity([{ t: 0, x: 330 }, { t: 30, x: 250 }, { t: 230, x: 250 }]), 0);
+  // rightward is negative
+  assert.equal(L.swipeVelocity([{ t: 0, x: 200 }, { t: 40, x: 240 }]), -1);
+});
+
+test("actionOffsets: the buttons share the uncovered width; full gives Delete all of it", () => {
+  assert.deepEqual(L.actionOffsets(160, 2, false), [160, 80]);
+  assert.deepEqual(L.actionOffsets(60, 2, false), [60, 30]);
+  assert.deepEqual(L.actionOffsets(250, 2, true), [250, 250]);
+  assert.deepEqual(L.actionOffsets(100, 1, false), [100]);
+  assert.deepEqual(L.actionOffsets(-20, 2, false), [0, 0]); // the rubber band shows nothing
 });

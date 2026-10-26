@@ -476,10 +476,12 @@
   // ---- swiping a home row (iOS Mail's swipe to the left)
 
   // SLOP: px of movement before the gesture picks an axis; a vertical one is the page's scroll.
-  // OPEN: the share of the action buttons' width a release must pass to open them (from open, the
-  // share it must close by to close them). DELETE: the share of the row's width a swipe must pass
-  // to delete on release.
-  const SWIPE = { SLOP: 10, OPEN: 1 / 3, DELETE: 0.6 };
+  // OPEN: the share of the actions' width a slow release must pass to open them (from open, the
+  // share it must close by to close them). DELETE: the share of the row's width past which a release
+  // deletes. FLICK: px/ms; a release this fast goes the way it moved, however short. DAMP: how much of
+  // the finger's travel past the actions the row follows. BAND: px; the rubber band to the right of
+  // closed tends to it. VELOCITY_MS: the stretch of movement the release speed is read from.
+  const SWIPE = { SLOP: 10, OPEN: 1 / 3, DELETE: 0.6, FLICK: 0.4, DAMP: 0.8, BAND: 60, VELOCITY_MS: 100 };
 
   // null until the finger has moved SLOP px, then "x" or "y".
   function swipeAxis(dx, dy) {
@@ -487,18 +489,43 @@
     return Math.abs(dx) > Math.abs(dy) ? "x" : "y";
   }
 
-  // Where a released row goes: "open", "closed" or "delete". shift is how far left it sits (px,
-  // positive), actions the buttons' width, row the row's width, wasOpen how the swipe began.
-  function swipeSettle({ shift, actions, row, wasOpen }) {
+  // Where a released row goes: "open", "closed" or "delete". shift is how far left it sits (px),
+  // actions the buttons' width, row the row's width, wasOpen how the swipe began, velocity the
+  // release speed (swipeVelocity(): px/ms, leftward positive).
+  function swipeSettle({ shift, actions, row, wasOpen, velocity = 0 }) {
     if (shift >= row * SWIPE.DELETE) return "delete";
+    if (velocity >= SWIPE.FLICK) return "open";
+    if (velocity <= -SWIPE.FLICK) return "closed";
     const needed = wasOpen ? actions * (1 - SWIPE.OPEN) : actions * SWIPE.OPEN;
     return shift >= needed ? "open" : "closed";
   }
 
-  // How far left a row sits while dragged: the finger's travel from where it began, never right
-  // of closed and never past the row.
-  function swipeShift({ start, dx, row }) {
-    return Math.max(0, Math.min(row, start - dx));
+  // How far left a row sits while dragged (px; negative is right of closed). It follows the finger
+  // 1:1 up to the actions' width, DAMP of it past them up to the row's width, and to the right of
+  // closed it stretches like iOS's rubber band, (1 - 1 / (x * 0.55 / BAND + 1)) * BAND.
+  function swipeShift({ start, dx, row, actions }) {
+    const raw = start - dx;
+    if (raw < 0) return -(1 - 1 / ((-raw * 0.55) / SWIPE.BAND + 1)) * SWIPE.BAND;
+    if (raw <= actions) return raw;
+    return Math.min(row, actions + (raw - actions) * SWIPE.DAMP);
+  }
+
+  // The release speed, px/ms leftward, from pointer samples [{t, x}] (oldest first, the release
+  // last): across those of the last VELOCITY_MS, so a finger that stopped before lifting reads 0.
+  function swipeVelocity(samples) {
+    if (samples.length < 2) return 0;
+    const last = samples[samples.length - 1];
+    const first = samples.find((p) => last.t - p.t <= SWIPE.VELOCITY_MS);
+    const dt = last.t - first.t;
+    return dt > 0 ? (first.x - last.x) / dt : 0;
+  }
+
+  // Where each of n action buttons sits behind a row shifted by shift px, as iOS reveals them: each
+  // takes an equal share of the uncovered width, so all grow with the drag. Each answer is the
+  // button's left edge, in px left of the row's right edge. full: the last (Delete) takes it all.
+  function actionOffsets(shift, n, full) {
+    const s = Math.max(0, shift);
+    return Array.from({ length: n }, (_, i) => (full && i === n - 1 ? s : (s * (n - i)) / n));
   }
 
   // ---- retries
@@ -763,7 +790,7 @@
     parseVideoInput, parseStart, activeCueIndex, formatTime, coveredUntil, statusText, tokenOffsets,
     morae, pitchPattern, splitFurigana, hasKanji, VIDEO_ID_RE, watchStatus, freqLabel,
     STRINGS, resumeTime, saveAllowed, dismissAction, GHOST_CLICK_MS, watchedFraction, finished, FINISHED_S,
-    SWIPE, swipeAxis, swipeSettle, swipeShift, formatClock, spokenTime,
+    SWIPE, swipeAxis, swipeSettle, swipeShift, swipeVelocity, actionOffsets, formatClock, spokenTime,
     SCHEDULES, backoffDelay, isTransient, withRetry, retryLeft,
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
