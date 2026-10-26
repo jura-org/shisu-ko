@@ -26,10 +26,17 @@ VIDEO = "AbCdEfGhIjK"
 PLAYBACK = "https://s.youtube.com/api/stats/playback?cl=1&docid=X&ei=E&el=detailpage&len=600&ns=yt&plid=P"
 WATCHTIME = "https://s.youtube.com/api/stats/watchtime?cl=1&docid=X&ei=E&el=detailpage&len=600&ns=yt&plid=P"
 TRACKING = {"playback": PLAYBACK, "watchtime": WATCHTIME}
+CLIENT = {"c": "WEB", "cver": "2.20260101.00.00", "cr": "JP"}
+CAPTURED = {**TRACKING, "client": CLIENT}
 RESPONSES = [
     {"streamingData": {}},  # a client's response without tracking
     {"playbackTracking": {"videostatsPlaybackUrl": {"baseUrl": PLAYBACK},
-                          "videostatsWatchtimeUrl": {"baseUrl": WATCHTIME}}},
+                          "videostatsWatchtimeUrl": {"baseUrl": WATCHTIME}},
+     "responseContext": {"serviceTrackingParams": [
+         {"service": "GFEEDBACK", "params": [{"key": "ipcc", "value": "JP"}, {"key": "logged_in", "value": "1"}]},
+         {"service": "CSI", "params": [{"key": "c", "value": "WEB"}, {"key": "cver", "value": "2.20260101.00.00"},
+                                       {"key": "yt_li", "value": "1"}]},
+         {"service": "ECATCHER", "params": [{"key": "client.name", "value": "WEB"}]}]}},
     {"playbackTracking": {"videostatsPlaybackUrl": {"baseUrl": PLAYBACK + "&second=1"},
                           "videostatsWatchtimeUrl": {"baseUrl": WATCHTIME + "&second=1"}}},
 ]
@@ -160,7 +167,7 @@ def test_resolve_keeps_the_first_player_responses_tracking_urls_and_sends_nothin
     FakeYoutubeDL.anonymous_hls = False  # signed in: the tracking URLs are the account's
     video = portal.HlsVideo(VIDEO)
     portal.HlsProxy(capture_tracking=True).resolve(video)
-    assert video.tracking == TRACKING
+    assert video.tracking == CAPTURED
     # The override lives on that YoutubeDL's own extractor, never on the class.
     assert "mark_watched" in vars(FakeYoutubeDL.made[-1].extractor)
     assert FakeExtractor.mark_watched is ORIGINAL_MARK_WATCHED
@@ -189,7 +196,7 @@ def test_an_anonymous_resolve_looks_the_tracking_up_signed_in_without_waiting_fo
     assert len(FakeYoutubeDL.made) == 2
     FakeYoutubeDL.gate.set()
     wait_for(lambda: not video.tracking_busy)
-    assert video.tracking == TRACKING and found == [(VIDEO, TRACKING)]
+    assert video.tracking == CAPTURED and found == [(VIDEO, CAPTURED)]
     assert signed_in.kwargs == {"process": False}
     hls.resolve(video)  # a re-resolve (a 403) keeps them and looks nothing up again
     assert len(FakeYoutubeDL.made) == 3
@@ -231,7 +238,7 @@ def test_resolve_without_the_switch_captures_nothing(home, fake_ytdlp):
 
 
 def test_tracking_urls_takes_youtube_https_urls_only():
-    assert portal.tracking_urls(RESPONSES) == TRACKING
+    assert portal.tracking_urls(RESPONSES) == CAPTURED
     assert portal.tracking_urls([]) is None and portal.tracking_urls(None) is None
     bad = {"playbackTracking": {"videostatsPlaybackUrl": {"baseUrl": "https://evil.example/api/stats/playback"},
                                 "videostatsWatchtimeUrl": {"baseUrl": WATCHTIME}}}
@@ -435,3 +442,92 @@ def test_ping_summary_names_the_ping_and_its_times_only():
     url = ("https://s.youtube.com/api/stats/watchtime?ns=yt&docid=x&cpn=abc&ei=e&st=0.000,30.000"
            "&et=10.000,45.000&cmt=45.000&len=228&state=paused")
     assert portal.ping_summary(url) == "watchtime st=0.000,30.000 et=10.000,45.000 cmt=45.000 len=228 state=paused"
+
+
+# ---------------------------------------------------------------- the client context, as YouTube's web player sends it
+
+
+PHONE = {"browser": "Safari", "browser_version": "17.5", "os": "iPhone", "os_version": "17_5"}
+
+
+def test_response_client_takes_only_what_the_response_holds():
+    assert portal.response_client(RESPONSES[1]) == CLIENT
+    assert portal.response_client({}) == {}
+    odd = {"responseContext": {"serviceTrackingParams": [
+        {"service": "CSI", "params": [{"key": "c", "value": "WEB&x=1"}, {"key": "cver", "value": 2}]},
+        {"service": "OTHER", "params": [{"key": "ipcc", "value": "JP"}]}, "junk"]}}
+    assert portal.response_client(odd) == {}  # unsafe, not a string, another service's key
+
+
+def full_report(**extra):
+    body = {"video_id": VIDEO, "ranges": [[0, 10], [50, 60]], "duration": 600, "cmt": 60, "state": "playing",
+            "lact": 1234, "volume": 80, "muted": False, "client": PHONE, **extra}
+    return portal.parse_watch_report(body)
+
+
+def test_pings_carry_the_web_players_client_context():
+    clock = [100.0]
+    reporter = portal.WatchReporter("on", send=None, clock=lambda: clock[0])
+    reporter.background = False
+    got = full_report()
+    got.update(fmt="136", afmt="140")
+    reporter.report(got, CAPTURED)
+    clock[0] = 112.6
+    (_, playback), (_, watchtime) = reporter.due(clock[0])
+    context = {"c": "WEB", "cver": "2.20260101.00.00", "cr": "JP", "cplayer": "UNIPLAYER", "cbr": "Safari",
+               "cbrver": "17.5", "cos": "iPhone", "cosver": "17_5", "fs": "0", "rt": "12.600", "fmt": "136",
+               "afmt": "140", "lact": "1234"}
+    for url in (playback, watchtime):
+        q = query(url)
+        assert {k: q.get(k) for k in context} == context
+        assert "euri=" in url  # present and empty
+    q = query(watchtime)
+    assert q["st"] == "0.000,50.000" and q["et"] == "10.000,60.000"
+    assert (q["volume"], q["muted"], q["vis"]) == ("80,80", "0,0", "0,0")  # one per stretch
+    assert (q["rti"], q["rtn"], q["idpj"], q["ldpj"]) == ("12", "22", "-1", "-1")
+    assert q["ver"] == "2" and q["el"] == "detailpage" and q["state"] == "playing"
+
+
+def test_what_nobody_said_is_left_out():
+    reporter = portal.WatchReporter("on", send=None, clock=lambda: 0.0)
+    reporter.background = False
+    reporter.report(report([[0, 20]]), TRACKING)  # an old capture without the client, a bare page
+    (_, playback), (_, watchtime) = reporter.due(0.0)
+    for url in (playback, watchtime):
+        q = query(url)
+        for absent in ("c", "cver", "cr", "cbr", "cbrver", "cos", "cosver", "lact", "fmt", "afmt", "hl"):
+            assert absent not in q, absent
+        assert q["cplayer"] == "UNIPLAYER" and q["fs"] == "0"
+    assert "volume" not in query(watchtime) and "muted" not in query(watchtime)
+
+
+@pytest.mark.parametrize("extra", [
+    {"lact": -1}, {"lact": float("nan")}, {"lact": "5"}, {"volume": 101}, {"volume": True}, {"muted": "no"},
+    {"muted": 0}, {"client": "Safari"}, {"client": {"agent": "x"}}, {"client": {"os": "iPhone;rm"}},
+    {"client": {"browser": "x" * 33}}, {"client": {"browser": ""}}, {"client": {"os": 17}},
+])
+def test_bad_page_context_is_refused(extra):
+    with pytest.raises(ValueError):
+        full_report(**extra)
+
+
+def test_the_page_context_is_optional():
+    got = portal.parse_watch_report({"video_id": VIDEO, "ranges": [], "duration": 600, "cmt": 0, "state": "paused"})
+    assert set(got) == {"video_id", "ranges", "cmt", "duration", "state"}
+    assert full_report(client={"os": "X11"})["client"] == {"cos": "X11"}
+
+
+def test_fmt_and_afmt_are_the_variants_the_player_takes_segments_from(server, monkeypatch):
+    video = server.services.hls.videos[VIDEO]
+    video.master = "#EXTM3U"
+    video.upstream = {"v136": "https://example.invalid/itag/136/x", "v134": "https://example.invalid/itag/134/x",
+                      "a140": "https://example.invalid/itag/140/x"}
+    server.services.hls.by_token[video.token] = video
+    monkeypatch.setattr(server.services.hls, "segment", lambda video, key, index: b"segment")
+    for path in ("v136/0.ts", "a140/0.aac", "v134/1.ts"):
+        conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
+        conn.request("GET", f"/api/hls/{video.token}/{path}", headers={"Host": "127.0.0.1"})
+        assert conn.getresponse().status == 200
+        conn.close()
+    assert post(server.port, GOOD) == (200, {"ok": True, "reported": True})
+    assert server.services.watch.sessions[VIDEO].page == {"fmt": "134", "afmt": "140"}  # the variant playing now

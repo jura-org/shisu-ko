@@ -1079,6 +1079,11 @@ class Services:
             video = self.hls.videos.get(report["video_id"])
         if video is None:
             return False
+        for kind, param in (("v", "fmt"), ("a", "afmt")):
+            key = video.played.get(kind)
+            itag = itag_of(video.upstream.get(key, "")) if key else None
+            if itag:
+                report[param] = itag
         return self.watch.report(report, video.tracking, waiting=video.tracking_busy)
 
     def card_info(self) -> dict:
@@ -1369,6 +1374,7 @@ class HlsVideo:
         self.title = None
         self.tracking = None  # YouTube's own watch-tracking URLs, kept only with --watch-history on
         self.tracking_busy = False  # the signed-in extraction that finds them is running
+        self.played: dict[str, str] = {}  # "v" / "a": the playlist key the player last took a segment from
         self.tracking_failed = False
 
 
@@ -1597,6 +1603,9 @@ WATCH_IDLE_DROP = HLS_IDLE_DROP
 WATCH_RANGES_MAX = 20  # per report from the page
 WATCH_PENDING_MAX = 50  # held for one ping; older stretches go first
 WATCH_JOIN_GAP = 0.5  # a stretch starting this close after the last one's end continues it
+# rtn: seconds into the session when YouTube's player sends its next watch-time ping. Pings seen
+# from the web player carry rti + 10 early on; ours come with the page's reports.
+WATCH_RTN_AHEAD = 10
 WATCH_YDL_TTL = 3600  # how long one YoutubeDL (and the cookies it read) serves the pings
 CPN_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
 
@@ -1623,8 +1632,27 @@ def youtube_url(value) -> bool:
     return parts.scheme == "https" and (host == "youtube.com" or host.endswith(".youtube.com"))
 
 
+CLIENT_VALUE_RE = re.compile(r"^[A-Za-z0-9._ -]{1,40}$")
+
+
+def response_client(response: dict) -> dict:
+    """The client a player response was made for, in the pings' own names: c and cver (its CSI
+    tracking params), cr (GFEEDBACK's ipcc, the country YouTube placed the request in). Only what
+    the response holds, each value checked."""
+    params = {}
+    for service in (response.get("responseContext") or {}).get("serviceTrackingParams") or []:
+        if not isinstance(service, dict):
+            continue
+        for item in service.get("params") or []:
+            if isinstance(item, dict) and isinstance(item.get("key"), str):
+                params.setdefault((service.get("service"), item["key"]), item.get("value"))
+    out = {"c": params.get(("CSI", "c")), "cver": params.get(("CSI", "cver")), "cr": params.get(("GFEEDBACK", "ipcc"))}
+    return {k: v for k, v in out.items() if isinstance(v, str) and CLIENT_VALUE_RE.match(v)}
+
+
 def tracking_urls(player_responses) -> dict | None:
-    """{"playback", "watchtime"}: the base URLs of the first player response that has both."""
+    """{"playback", "watchtime", "client"}: the base URLs of the first player response that has
+    both, and the client that response was made for (response_client())."""
     for response in player_responses or []:
         tracking = response.get("playbackTracking") if isinstance(response, dict) else None
         if not isinstance(tracking, dict):
@@ -1632,7 +1660,7 @@ def tracking_urls(player_responses) -> dict | None:
         urls = {name: (tracking.get(key) or {}).get("baseUrl")
                 for name, key in (("playback", "videostatsPlaybackUrl"), ("watchtime", "videostatsWatchtimeUrl"))}
         if all(youtube_url(u) for u in urls.values()):
-            return urls
+            return {**urls, "client": response_client(response)}
     return None
 
 
@@ -1685,7 +1713,34 @@ def parse_watch_report(body: dict) -> dict:
                 or not 0 <= item[0] <= item[1] <= limit):
             raise ValueError("ranges: [start, end] pairs inside the video")
         clean.append((float(item[0]), float(item[1])))
-    return {"video_id": video_id, "ranges": clean, "cmt": float(cmt), "duration": float(duration), "state": state}
+    out = {"video_id": video_id, "ranges": clean, "cmt": float(cmt), "duration": float(duration), "state": state}
+    # What the phone itself says about the playback, each optional.
+    lact, volume, muted, client = body.get("lact"), body.get("volume"), body.get("muted"), body.get("client")
+    if lact is not None:
+        if not finite(lact) or not 0 <= lact < 1e10:
+            raise ValueError("lact: milliseconds since the viewer last touched the page")
+        out["lact"] = int(lact)
+    if volume is not None:
+        if not finite(volume) or not 0 <= volume <= 100:
+            raise ValueError("volume: 0-100")
+        out["volume"] = int(round(volume))
+    if muted is not None:
+        if not isinstance(muted, bool):
+            raise ValueError("muted: true or false")
+        out["muted"] = muted
+    if client is not None:
+        if not isinstance(client, dict) or set(client) - set(PAGE_CLIENT_KEYS):
+            raise ValueError(f"client: an object of {', '.join(PAGE_CLIENT_KEYS)}")
+        for key, value in client.items():
+            if not isinstance(value, str) or not PAGE_CLIENT_RE.match(value):
+                raise ValueError(f"client.{key}: 1-32 letters, digits, '._ -'")
+        out["client"] = {PAGE_CLIENT_KEYS[k]: v for k, v in client.items()}
+    return out
+
+
+# The page's browser and system, as the pings name them (cbr=Safari, cos=iPhone, ...).
+PAGE_CLIENT_KEYS = {"browser": "cbr", "browser_version": "cbrver", "os": "cos", "os_version": "cosver"}
+PAGE_CLIENT_RE = re.compile(r"^[A-Za-z0-9._ -]{1,32}$")
 
 
 def merge_ranges(ranges) -> list[tuple[float, float]]:
@@ -1735,6 +1790,20 @@ class WatchSession:
         self.cmt = 0.0
         self.duration = 0.0
         self.state = "playing"
+        self.page: dict = {}  # the last report's lact, volume, muted, client, fmt, afmt
+
+    def context(self, now: float) -> dict:
+        """The client context YouTube's web player sends with every ping: the response's client,
+        the page's browser and system, the variants playing, the clocks."""
+        page, rt = self.page, now - self.began
+        out = {**(self.tracking.get("client") or {}), "cplayer": "UNIPLAYER", **page.get("client", {}),
+               "fs": "0", "euri": "", "rt": seconds(rt)}
+        for key in ("fmt", "afmt"):
+            if page.get(key):
+                out[key] = page[key]
+        if "lact" in page:
+            out["lact"] = str(page["lact"])
+        return out
 
 
 class WatchReporter:
@@ -1773,6 +1842,7 @@ class WatchReporter:
             session.tracking = session.tracking or tracking
             session.pending = merge_ranges(session.pending + report["ranges"])[-WATCH_PENDING_MAX:]
             session.cmt, session.duration, session.state = report["cmt"], report["duration"], report["state"]
+            session.page = {k: report[k] for k in ("lact", "volume", "muted", "client", "fmt", "afmt") if k in report}
             if self.thread is None and self.background:
                 self.thread = threading.Thread(target=self.run, daemon=True, name="watch-history")
                 self.thread.start()
@@ -1794,15 +1864,25 @@ class WatchReporter:
             for video_id, s in self.sessions.items():
                 if not s.pending or not s.tracking or now - s.last_ping < WATCH_PING_GAP:
                     continue
+                context = s.context(now)
                 if not s.announced:
                     s.announced = True
                     out.append((video_id, ping_url(s.tracking["playback"], {
-                        "ver": "2", "cpn": s.cpn, "cmt": seconds(s.pending[0][0]), "el": "detailpage"})))
-                out.append((video_id, ping_url(s.tracking["watchtime"], {
-                    "ver": "2", "cpn": s.cpn, "cmt": seconds(s.cmt), "el": "detailpage",
+                        "ver": "2", "cpn": s.cpn, "cmt": seconds(s.pending[0][0]), "el": "detailpage", **context})))
+                # volume, muted and vis are one value per stretch, as st and et.
+                each = lambda value: ",".join([value] * len(s.pending))  # noqa: E731
+                rti = int(now - s.began)
+                watchtime = {
+                    "ver": "2", "cpn": s.cpn, "cmt": seconds(s.cmt), "el": "detailpage", **context,
                     "st": ",".join(seconds(st) for st, _ in s.pending),
                     "et": ",".join(seconds(et) for _, et in s.pending),
-                    "len": seconds(s.duration), "state": s.state, "rt": seconds(now - s.began)})))
+                    "len": seconds(s.duration), "state": s.state, "rti": str(rti), "rtn": str(rti + WATCH_RTN_AHEAD),
+                    "idpj": "-1", "ldpj": "-1", "vis": each("0")}
+                if "volume" in s.page:
+                    watchtime["volume"] = each(str(s.page["volume"]))
+                if "muted" in s.page:
+                    watchtime["muted"] = each("1" if s.page["muted"] else "0")
+                out.append((video_id, ping_url(s.tracking["watchtime"], watchtime)))
                 s.pending = []
                 s.last_ping = now
         return out
@@ -2217,6 +2297,7 @@ class Handler(BaseHTTPRequestHandler):
         segment = re.fullmatch(r"([0-9]{1,5})\.(ts|aac)", parts[2]) if len(parts) == 3 else None
         if segment and HLS_KEY_RE.match(parts[1]) and (segment.group(2) == "aac") == parts[1].startswith("a"):
             ctype = "audio/aac" if segment.group(2) == "aac" else "video/mp2t"
+            video.played[parts[1][0]] = parts[1]  # the variant playing: the watch history's fmt / afmt
             data = hls.segment(video, parts[1], int(segment.group(1)))
             span = byte_range(self.headers.get("Range"), len(data))
             if span is None:
