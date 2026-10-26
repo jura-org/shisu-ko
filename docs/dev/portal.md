@@ -114,6 +114,11 @@ resolved them, so the portal proxies every byte:
   rewrites each segment to `/api/hls/<token>/<key>/<n>.ts` (video, MPEG-TS) or `.aac` (audio:
   YouTube's audio renditions are packed ADTS AAC with ID3 timestamps, not TS, and a player picks its
   demuxer by the name). No upstream URL ever reaches the page.
+- The stream resolves without cookies first. With the server's YouTube cookies yt-dlp asks only
+  the YouTube clients that take cookies, and those offer no HLS, so every video would fall back to
+  YouTube's player. The cookies are the second try, for a video that needs a sign-in (members-only,
+  age, a bot check) or that gave no HLS anonymously. googlevideo binds its URLs to the address, not
+  the account. The picture's DASH fallback (`stream_url()`) keeps the cookies: it needs no HLS.
 - The token is random and names a video the portal resolved itself; it expires after 8 hours, or 2
   idle. A 403 from googlevideo re-resolves the stream under the same token, so the player never
   notices; network errors and 5xx retry with backoff.

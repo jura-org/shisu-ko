@@ -657,3 +657,81 @@ def test_the_page_gets_the_extensions_own_words_js():
     assert not (PATH.parent / "static" / "words.js").exists(), "one words.js, served from addon/"
     html = (PATH.parent / "static" / "index.html").read_text(encoding="utf-8")
     assert html.index('src="words.js"') < html.index('src="app.js"')
+
+
+# ---------------------------------------------------------------- the HLS resolve: anonymous first
+
+
+def fake_resolver(monkeypatch, tmp_path, outcomes, cookies=True):
+    """yt-dlp stand-in: `outcomes` maps signed in (True/False) to an info dict or an exception.
+    Returns the list of option dicts each YoutubeDL was made with."""
+    monkeypatch.setattr(portal, "SHISUKO_HOME", tmp_path)
+    if cookies:
+        (tmp_path / "config.json").write_text('{"cookies_from_browser": "firefox"}', encoding="utf-8")
+    made = []
+
+    class YoutubeDL:
+        def __init__(self, options):
+            self.options = options
+            made.append(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, url, download):
+            outcome = outcomes["cookiesfrombrowser" in self.options]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+    monkeypatch.setattr(portal, "import_ytdlp", lambda: SimpleNamespace(YoutubeDL=YoutubeDL))
+    monkeypatch.setattr(portal, "http_open", lambda url, headers=None, timeout=20.0: SimpleNamespace(read=lambda: b"#EXTM3U"))
+    monkeypatch.setattr(portal, "rewrite_master", lambda text, prefix: ("#EXTM3U", {"v1": "u"}, {"v1": 720}))
+    return made
+
+
+HLS_INFO = {"duration": 60, "title": "t", "formats": [{"protocol": "m3u8_native", "manifest_url": "https://example.invalid/m"}]}
+NO_HLS_INFO = {"duration": 60, "title": "t", "formats": [{"protocol": "https", "url": "https://example.invalid/v"}]}
+
+
+def test_resolve_takes_the_anonymous_hls_and_never_reads_the_cookies(tmp_path, monkeypatch):
+    made = fake_resolver(monkeypatch, tmp_path, {False: HLS_INFO, True: AssertionError("signed in")})
+    video = portal.HlsVideo("dQw4w9WgXcQ")
+    portal.HlsProxy().resolve(video)
+    assert video.master and len(made) == 1 and "cookiesfrombrowser" not in made[0]
+
+
+@pytest.mark.parametrize("anonymous", [NO_HLS_INFO, RuntimeError("Sign in to confirm you're not a bot")])
+def test_resolve_tries_the_cookies_when_anonymous_gives_no_hls(tmp_path, monkeypatch, anonymous):
+    made = fake_resolver(monkeypatch, tmp_path, {False: anonymous, True: HLS_INFO})
+    video = portal.HlsVideo("dQw4w9WgXcQ")
+    portal.HlsProxy().resolve(video)
+    assert video.master and ["cookiesfrombrowser" in o for o in made] == [False, True]
+    assert made[1]["cookiesfrombrowser"] == ("firefox",)
+
+
+def test_resolve_without_cookies_or_with_both_failing_raises(tmp_path, monkeypatch):
+    made = fake_resolver(monkeypatch, tmp_path, {False: NO_HLS_INFO, True: HLS_INFO}, cookies=False)
+    with pytest.raises(portal.UpstreamError, match="no HLS"):
+        portal.HlsProxy().resolve(portal.HlsVideo("dQw4w9WgXcQ"))
+    assert len(made) == 1  # no browser chosen: no second try
+    fake_resolver(monkeypatch, tmp_path, {False: NO_HLS_INFO, True: RuntimeError("members only")})
+    with pytest.raises(RuntimeError, match="members only"):
+        portal.HlsProxy().resolve(portal.HlsVideo("dQw4w9WgXcQ"))
+
+
+def test_a_live_stream_is_not_tried_again_with_cookies(tmp_path, monkeypatch):
+    made = fake_resolver(monkeypatch, tmp_path, {False: {**HLS_INFO, "is_live": True}, True: HLS_INFO})
+    with pytest.raises(portal.UpstreamError, match="live"):
+        portal.HlsProxy().resolve(portal.HlsVideo("dQw4w9WgXcQ"))
+    assert len(made) == 1
+
+
+def test_only_the_hls_resolve_goes_without_cookies(tmp_path, monkeypatch):
+    monkeypatch.setattr(portal, "SHISUKO_HOME", tmp_path)
+    (tmp_path / "config.json").write_text('{"cookies_from_browser": "firefox"}', encoding="utf-8")
+    assert portal.ydl_options("best")["cookiesfrombrowser"] == ("firefox",)  # the picture's stream URL
+    assert "cookiesfrombrowser" not in portal.ydl_options(cookies=False)

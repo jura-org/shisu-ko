@@ -111,6 +111,7 @@ class FakeYoutubeDL:
 
     def __init__(self, options):
         assert "mark_watched" not in options
+        self.options = options
         self.extractor = FakeExtractor()
         FakeYoutubeDL.made.append(self)
 
@@ -124,20 +125,28 @@ class FakeYoutubeDL:
         assert key == "Youtube"
         return self.extractor
 
-    def extract_info(self, url, download):
+    anonymous_hls = True
+
+    def extract_info(self, url, download, **kwargs):
         # Where yt-dlp's YouTube extractor calls self.mark_watched(video_id, player_responses).
         self.extractor.mark_watched(VIDEO, RESPONSES)
+        if "cookiesfrombrowser" not in self.options and not FakeYoutubeDL.anonymous_hls:
+            return {"duration": 600, "title": "t", "formats": []}
         return {"duration": 600, "title": "t", "formats": [{"protocol": "m3u8_native", "manifest_url": "https://example.invalid/m"}]}
 
 
 @pytest.fixture
 def fake_ytdlp(monkeypatch):
+    FakeYoutubeDL.anonymous_hls = True
+    FakeYoutubeDL.made = []
     monkeypatch.setattr(portal, "import_ytdlp", lambda: SimpleNamespace(YoutubeDL=FakeYoutubeDL))
     monkeypatch.setattr(portal, "http_open", lambda url, headers=None, timeout=20.0: SimpleNamespace(read=lambda: b"#EXTM3U"))
     monkeypatch.setattr(portal, "rewrite_master", lambda text, prefix: ("#EXTM3U", {"v1": "u"}, {"v1": 720}))
 
 
 def test_resolve_keeps_the_first_player_responses_tracking_urls_and_sends_nothing(home, fake_ytdlp):
+    with_cookies(home)
+    FakeYoutubeDL.anonymous_hls = False  # signed in: the tracking URLs are the account's
     video = portal.HlsVideo(VIDEO)
     portal.HlsProxy(capture_tracking=True).resolve(video)
     assert video.tracking == TRACKING

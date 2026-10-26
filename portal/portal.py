@@ -1324,7 +1324,8 @@ def import_ytdlp():
     return yt_dlp
 
 
-def ydl_options(fmt: str | None = None) -> dict:
+def ydl_options(fmt: str | None = None, cookies: bool = True) -> dict:
+    """yt-dlp's options; `cookies` adds the server's browser (cookies_from_browser), if it has one."""
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -1334,7 +1335,7 @@ def ydl_options(fmt: str | None = None) -> dict:
     }
     if fmt:
         opts["format"] = fmt
-    browser = cookies_browser()
+    browser = cookies_browser() if cookies else None
     if browser:
         opts["cookiesfrombrowser"] = (browser,)
     return opts
@@ -1382,19 +1383,33 @@ class HlsProxy:
         return f"/api/hls/{video.token}/"
 
     def resolve(self, video: HlsVideo) -> None:
-        """yt-dlp -> the HLS master URL -> our master. Call with video.lock held."""
+        """yt-dlp -> the HLS master URL -> our master. Call with video.lock held.
+
+        Without cookies first: signed in, yt-dlp asks YouTube only through the clients that take
+        cookies, and those offer no HLS at all. The cookies are the second try, for a video that
+        needs a sign-in (members-only, age, a bot check) or that gave no HLS anonymously."""
         yt_dlp = import_ytdlp()
-        tracking = {}
-        with yt_dlp.YoutubeDL(ydl_options()) as ydl:
-            if self.capture_tracking:
-                capture_tracking(ydl, tracking)
-            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video.video_id}", download=False)
-        if info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming", "post_live"):
-            raise UpstreamError("live stream: YouTube's player plays these", 422)
-        master_url = next((f.get("manifest_url") for f in info.get("formats") or []
-                           if str(f.get("protocol", "")).startswith("m3u8") and f.get("manifest_url")), None)
-        if not master_url:
-            raise UpstreamError("no HLS stream for this video", 422)
+        url = f"https://www.youtube.com/watch?v={video.video_id}"
+        problem = None
+        for signed_in in (False, True) if cookies_browser() else (False,):
+            tracking = {}
+            try:
+                with yt_dlp.YoutubeDL(ydl_options(cookies=signed_in)) as ydl:
+                    if signed_in and self.capture_tracking:
+                        capture_tracking(ydl, tracking)
+                    info = ydl.extract_info(url, download=False)
+            except Exception as exc:  # noqa: BLE001 - yt-dlp raises its own types; the cookies may still get through
+                problem = exc
+                continue
+            if info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming", "post_live"):
+                raise UpstreamError("live stream: YouTube's player plays these", 422)
+            master_url = next((f.get("manifest_url") for f in info.get("formats") or []
+                               if str(f.get("protocol", "")).startswith("m3u8") and f.get("manifest_url")), None)
+            if master_url:
+                break
+            problem = UpstreamError("no HLS stream for this video", 422)
+        else:
+            raise problem
         text = retry(lambda: http_open(master_url).read().decode("utf-8", "replace"), tries=2, base=0.5)
         master, upstream, heights = rewrite_master(text, self.prefix(video))
         if not heights:
