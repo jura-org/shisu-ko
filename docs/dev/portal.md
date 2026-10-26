@@ -169,22 +169,37 @@ Server says it in one line (`watchHistoryText()`).
   extractor instance; yt-dlp calls it with the player responses it fetched, and the override keeps
   the first response's `playbackTracking` base URLs (`videostatsPlaybackUrl`,
   `videostatsWatchtimeUrl`; `https` on a YouTube host only, `tracking_urls()`) on the `HlsVideo`
-  and sends nothing. Playback never waits for it; a failure is logged once and leaves the video
+  and sends nothing. The response names `s.youtube.com`; `stats_host()` moves exactly that host to
+  `www.youtube.com`, where YouTube.js and ReVanced send theirs, and keeps the rest of the URL. With
+  the URLs go the web player's flush schedule (`flush_cadence()`):
+  `videostatsScheduledFlushWalltimeSeconds` (a WEB response says 10, 20, 30) and
+  `videostatsDefaultFlushIntervalSeconds` (40). A schedule of 1-10 rising steps at least 2 s apart
+  and within 600 s is kept; anything else, or a response without one, gets those WEB values. Playback never waits for it; a failure is logged once and leaves the video
   without tracking URLs.
 - **What the page sends.** Our own `<video>` keeps the stretches it played (`newWatchLog()`,
   `watchAt()`, `watchClose()`, `watchDrain()` in `lib.js`): a seek, pause, rate change, the end or
   a jump of over 3 s closes one. `POST /api/watched` carries `{video_id, ranges: [[st, et], ...],
-  cmt, duration, state: "playing" | "paused"}` 10 s after play starts, every 30 s while playing,
-  and at pause, end, hide and leave (keepalive). YouTube's iframe player records its own watches,
+  cmt, duration, state: "playing" | "paused", final}` on YouTube's schedule: 10 s after play
+  starts, then after the playing time the answer's `next` names (seconds; `watchNextMs()`), and
+  with `final: true` at pause, end, hide, leave and the switch to YouTube's player (keepalive).
+  The server counts the scheduled reports and answers each with the step to the next one, 10, 10,
+  then 40 s for a WEB response; a final report does not advance it. A resume after a final
+  report starts the next step afresh; a stall does not. Without an answer the page reports again
+  after 40 s. YouTube's iframe player records its own watches,
   so the page sends nothing from it. With them go, each optional: `lact` (ms since the last touch
   or key on the page), `volume` (0-100), `muted`, and `client: {browser, browser_version, os,
   os_version}`, read from the User-Agent (`clientInfo()`). `parse_watch_report()` refuses (400) a
   bad video id, more than 20 ranges, a number that is not finite, any time outside 0..duration +
-  5 s, and a client string beyond 1-32 of `[A-Za-z0-9._ -]`.
+  5 s, a `final` that is not a boolean, and a client string beyond 1-32 of `[A-Za-z0-9._ -]`.
 - **What goes to YouTube.** `WatchReporter` keeps one session per video (a random 16-character
-  `cpn`, dropped after 2 idle hours). The first played time sends the playback ping once (`ver=2`,
-  `cpn`, `cmt`, `el=detailpage`), which adds the video to the history. Then a watch-time ping per
-  report, at most one per video every 10 s, the stretches in between merged: `st` and `et` as
+  `cpn`, dropped after 2 idle hours; the playback ping and every watch-time ping carry the same
+  one). The first played time sends the playback ping once (`ver=2`, `cpn`, `cmt`,
+  `el=detailpage`), which adds the video to the history. Then a watch-time ping per report, at
+  most one per video every 10 s (or the schedule's shortest step, if that is shorter:
+  `WatchSession.gap()`), the stretches in between merged. A final report's ping goes as soon as
+  2 s have passed since the last ping, with `final=1`, as SmartTube, YouTube.js and Grayjay end a
+  viewing; a later report in the same session continues it with the same `cpn`, and the last
+  report decides whether the next ping is final. The watch-time ping carries `st` and `et` as
   comma-separated lists with 3 decimals, as YouTube's own player sends them, plus `cmt`, `len`,
   `state` and `rt` (seconds since the session began). The base URL's own parameters stay.
   Both pings carry the client context YouTube's web player sends (`WatchSession.context()`), never
@@ -196,10 +211,19 @@ Server says it in one line (`watchHistoryText()`).
   `ldpj=-1`, and `vis=0`, `volume`, `muted` with one value per stretch, as `st` and `et`. `hl` is
   left out: the response does not say it. The
   pings run on a thread of their own through a `YoutubeDL`'s `urlopen` with the server's cookies
-  (one `YoutubeDL` an hour, so the browser's cookie store is not read for every ping); a failure is
+  (one `YoutubeDL` an hour, so the browser's cookie store is not read for every ping) and the
+  header `X-Goog-AuthUser: 0`, the account the cookies sign in first, as Grayjay sends it (a brand
+  account's `X-Goog-PageId` is left out: the response does not say it); a failure is
   logged once per video and never touches playback. Stretches reported while the signed-in look-up
   runs wait in the session and go with the first ping after it (`set_tracking()`). A video with
   no tracking URLs (resolved before the switch, a failed look-up) reports nothing.
+- **What YouTube makes of it.** Every ping answers 204 and puts the video in the history. On the
+  owner's account a 23-minute video's history bar showed the position of a watch-time ping (34%,
+  `cmt` 481 of 1397) before `www` and `final=1` were sent; it did not follow the later pings.
+  Videos under about 20 minutes show a 10% bar, YouTube's "started" placeholder, whatever the pings
+  say: yt-dlp, SmartTube and YouTube.js see the same, so it is YouTube's limit on clients other than
+  its own, not ours. Positions on long videos are credited; whether `final=1` makes the last one
+  stick is unverified.
 - **Why not yt-dlp's `mark_watched`.** It sends both pings at resolve, the watch-time one with
   `st=0` and `et` at the end: a whole video claimed watched the moment a link opens. The history
   would fill with videos opened and closed, and the recommendations would learn from time never
