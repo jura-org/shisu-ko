@@ -454,3 +454,33 @@ test("clientInfo names the browser and system as YouTube's pings do, and nothing
   assert.deepEqual(L.clientInfo(""), {});
   assert.deepEqual(L.clientInfo("curl/8.0"), {});
 });
+
+test("the turned landscape view maps screen points, deltas and boxes into its own frame", () => {
+  // A 390x844 phone held upright: the view is 844 wide, 390 tall, its top along the screen's right.
+  const turn = { height: 390 };
+  assert.deepEqual(L.viewPoint(390, 0, turn), { x: 0, y: 0 }); // the view's top-left corner
+  assert.deepEqual(L.viewPoint(0, 844, turn), { x: 844, y: 390 }); // its bottom-right
+  assert.deepEqual(L.viewPoint(100, 200, null), { x: 100, y: 200 });
+  // A swipe towards the screen's bottom runs along the view's x axis; one to the screen's left
+  // runs down the view.
+  assert.deepEqual(L.viewDelta(10, 80, turn), { dx: 80, dy: -10 });
+  assert.deepEqual(L.viewDelta(-50, 5, turn), { dx: 5, dy: 50 });
+  assert.deepEqual(L.viewDelta(3, 4, null), { dx: 3, dy: 4 });
+  // The video box, the view's full width and its top 300 px: on screen, the right 300 px column.
+  const box = L.viewRect({ left: 90, top: 0, right: 390, bottom: 844, width: 300, height: 844 }, turn);
+  assert.deepEqual(box, { left: 0, top: 0, right: 844, bottom: 300, width: 844, height: 300 });
+  // Every corner of a box maps to a corner of its view rect.
+  const r = { left: 10, top: 20, right: 60, bottom: 100, width: 50, height: 80 };
+  const v = L.viewRect(r, turn);
+  for (const [x, y] of [[r.left, r.top], [r.right, r.bottom]]) {
+    const p = L.viewPoint(x, y, turn);
+    assert.ok(p.x >= v.left && p.x <= v.right && p.y >= v.top && p.y <= v.bottom);
+  }
+  assert.deepEqual(L.viewRect(r, null), r);
+});
+
+test("the landscape mode turns only an upright viewport", () => {
+  assert.equal(L.shouldTurn(390, 844), true);
+  assert.equal(L.shouldTurn(844, 390), false);
+  assert.equal(L.shouldTurn(800, 800), false);
+});

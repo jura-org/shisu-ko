@@ -106,6 +106,8 @@
     wordIndex: null,
     wordsKey: "",
     sheet: { open: false, pausedIt: false, cue: null, span: null, entries: [], pick: 0, def: null, seq: 0 },
+    // The landscape mode: on, and whether the browser's fullscreen holds the page for it.
+    landscape: { on: false, fullscreen: false },
   };
 
   function readJson(key, fallback) {
@@ -416,6 +418,7 @@
   // Leaving the video: stop it and let go of its stream, so a page kept in the back-forward cache
   // neither plays nor downloads.
   function teardownWatch() {
+    exitLandscape(); // leaving by any way (home, the end of the video, a link) restores the page
     if (!state.player || state.tornDown) return;
     state.tornDown = true;
     try {
@@ -721,6 +724,123 @@
   function renderBack() {
     const show = state.ytState === YT_PAUSED || state.ytState === YT_ENDED || Date.now() < state.backUntil;
     document.querySelector(".player-box").classList.toggle("show-back", show);
+  }
+
+  // ------------------------------------------------------------ the landscape mode
+
+  // The video as large as the screen allows, the line being said as a strip along its bottom.
+  // Where a page may go fullscreen (Android, iPad, desktop) the whole page does, so the subtitles
+  // and the dictionary sheet come along, and the screen is locked sideways where that is allowed.
+  // An iPhone lets only a bare <video> go fullscreen, into Apple's player with nothing of ours over
+  // it; there the mode is the page's own layout, turned a quarter (app.css html.turned) while the
+  // phone is held upright, so the viewer just turns the phone, rotation lock or not.
+  function canFullscreen() {
+    const root = document.documentElement;
+    return !!((document.fullscreenEnabled && root.requestFullscreen) || (document.webkitFullscreenEnabled && root.webkitRequestFullscreen));
+  }
+
+  function fullscreenElement() {
+    return document.fullscreenElement || document.webkitFullscreenElement || null;
+  }
+
+  // Runs inside the tap: a fullscreen request needs the gesture.
+  function enterLandscape() {
+    if (state.landscape.on) return;
+    state.landscape.on = true;
+    document.documentElement.classList.add("switching", "landscape");
+    if (canFullscreen()) {
+      const root = document.documentElement;
+      try {
+        const asked = root.requestFullscreen ? root.requestFullscreen({ navigationUI: "hide" }) : root.webkitRequestFullscreen();
+        if (asked && asked.catch) asked.catch((err) => console.log("fullscreen refused:", err.name));
+      } catch (err) {
+        console.log("fullscreen refused:", err.name); // the page-level layout stays
+      }
+    }
+    modeChanged();
+  }
+
+  function exitLandscape() {
+    if (!state.landscape.on) return;
+    state.landscape.on = false;
+    state.landscape.fullscreen = false;
+    document.documentElement.classList.add("switching");
+    document.documentElement.classList.remove("landscape", "turned");
+    if (screen.orientation && screen.orientation.unlock) {
+      try {
+        screen.orientation.unlock();
+      } catch {
+        // never locked
+      }
+    }
+    if (fullscreenElement()) {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      try {
+        const left = exit.call(document);
+        if (left && left.catch) left.catch(() => {});
+      } catch {
+        // already leaving
+      }
+    }
+    modeChanged();
+  }
+
+  function onFullscreenChange() {
+    if (fullscreenElement()) {
+      if (!state.landscape.on) return;
+      state.landscape.fullscreen = true;
+      // Allowed only in fullscreen, and not everywhere then (a desktop, a tablet that refuses).
+      if (screen.orientation && screen.orientation.lock) screen.orientation.lock("landscape").catch(() => {});
+    } else if (state.landscape.fullscreen) {
+      exitLandscape(); // the browser's own way out: the back gesture, Escape
+    }
+  }
+
+  function modeChanged() {
+    const b = $("btn-full");
+    b.classList.toggle("on", state.landscape.on);
+    b.setAttribute("aria-label", state.landscape.on ? S.exitFullscreen : S.fullscreen);
+    exitBrowse(); // a browse offset is in the old layout's pixels
+    viewChanged();
+  }
+
+  // After the mode or the viewport changed: turned or not, the list re-centred without motion (the
+  // same cue stays the focus, L.focusMotion), the scrubber and an open sheet measured again.
+  function viewChanged() {
+    const root = document.documentElement;
+    // The closed sheets and the list jump to their new places instead of gliding across the
+    // screen: the new layout is committed with transitions off ("switching", also set by
+    // enterLandscape() and exitLandscape()), then they come back.
+    const turned = state.landscape.on && L.shouldTurn(window.innerWidth, window.innerHeight);
+    if (turned !== root.classList.contains("turned")) root.classList.add("switching");
+    root.classList.toggle("turned", turned);
+    state.focusKey = null;
+    if (state.sheet.open) capSheet(state.sheet.cue);
+    measureScrubber();
+    void document.body.offsetHeight;
+    root.classList.remove("switching");
+  }
+
+  // Pointer events and getBoundingClientRect() speak in screen coordinates; gestures and layout
+  // maths speak in the view's own frame, which the turned mode rotates (lib.js viewPoint()).
+  function viewTurn() {
+    return document.documentElement.classList.contains("turned") ? { height: document.body.clientHeight } : null;
+  }
+
+  function viewPoint(x, y) {
+    return L.viewPoint(x, y, viewTurn());
+  }
+
+  function viewDelta(dx, dy) {
+    return L.viewDelta(dx, dy, viewTurn());
+  }
+
+  function viewRect(el) {
+    return L.viewRect(el.getBoundingClientRect(), viewTurn());
+  }
+
+  function viewHeight() {
+    return state.landscape.on ? document.body.clientHeight : window.innerHeight;
   }
 
   // ------------------------------------------------------------ /sync
@@ -1049,10 +1169,12 @@
   // The centre point: the middle of the list, or of the room left above the dictionary sheet.
   function focusY() {
     const box = $("lyrics");
+    // The landscape strip: its middle; the scrubber sits above it and the sheet beside it.
+    if (state.landscape.on) return box.clientHeight / 2;
     // The scrubber covers the list's faded bottom edge: centre in what is left above it.
     if (!state.sheet.open) return (box.clientHeight - $("scrubber").offsetHeight) / 2;
-    const sheetTop = window.innerHeight - $("sheet").offsetHeight;
-    const room = sheetTop - box.getBoundingClientRect().top;
+    const sheetTop = viewHeight() - $("sheet").offsetHeight;
+    const room = sheetTop - viewRect(box).top;
     return Math.max(40, Math.min(box.clientHeight / 2, room / 2));
   }
 
@@ -1259,12 +1381,22 @@
       ev.stopPropagation();
       goHome();
     });
+    $("btn-full").addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (state.landscape.on) exitLandscape();
+      else enterLandscape();
+      state.backUntil = Date.now() + 3000; // the controls stay up a moment in the new layout
+      setTimeout(renderBack, 3050);
+      renderBack();
+    });
+    for (const name of ["fullscreenchange", "webkitfullscreenchange"]) document.addEventListener(name, onFullscreenChange);
+    window.addEventListener("orientationchange", viewChanged);
 
     // The shield over the video: a tap toggles play; a quick second tap on the left or right third
     // steps a line back or forward (and plays). Both act inside the tap itself.
     $("shield").addEventListener("click", (ev) => {
-      const box = ev.currentTarget.getBoundingClientRect();
-      const x = (ev.clientX - box.left) / box.width;
+      const box = viewRect(ev.currentTarget);
+      const x = (viewPoint(ev.clientX, ev.clientY).x - box.left) / box.width;
       const zone = x < 1 / 3 ? "left" : x > 2 / 3 ? "right" : "middle";
       const last = state.lastShieldTap;
       const now = Date.now();
@@ -1313,8 +1445,7 @@
     lyrics.addEventListener("touchmove", (ev) => {
       if (!touch) return;
       const p = ev.touches[0];
-      const dx = p.clientX - touch.x;
-      const dy = p.clientY - touch.y;
+      const { dx, dy } = viewDelta(p.clientX - touch.x, p.clientY - touch.y);
       if (!touch.axis && Math.max(Math.abs(dx), Math.abs(dy)) > 8) touch.axis = Math.abs(dy) > Math.abs(dx) ? "y" : "x";
       if (touch.axis === "y" && !state.sheet.open) {
         if (!state.browse.active) {
@@ -1331,7 +1462,7 @@
     lyrics.addEventListener("touchend", (ev) => {
       if (!touch) return;
       const p = ev.changedTouches[0];
-      const dx = p.clientX - touch.x;
+      const { dx } = viewDelta(p.clientX - touch.x, p.clientY - touch.y);
       const { axis } = touch;
       touch = null;
       lyrics.classList.remove("dragging");
@@ -1351,16 +1482,20 @@
       browseIdle();
     }, { passive: false });
 
-    window.addEventListener("resize", () => { state.focusKey = null; });
+    window.addEventListener("resize", viewChanged);
   }
 
   // ------------------------------------------------------------ the word sheet
 
   // Content-sized, but always leaving room above it for the tapped cue.
   function capSheet(cue) {
+    if (state.landscape.on) {
+      $("sheet").style.maxHeight = ""; // a side panel, the view's full height
+      return;
+    }
     const row = state.rowById.get(cue.id);
-    const top = $("lyrics").getBoundingClientRect().top;
-    const room = window.innerHeight - top - (row ? row.offsetHeight : 80) - 40;
+    const top = viewRect($("lyrics")).top;
+    const room = viewHeight() - top - (row ? row.offsetHeight : 80) - 40;
     $("sheet").style.maxHeight = `${Math.max(240, room)}px`;
   }
 
@@ -1764,22 +1899,26 @@
   }
 
   // Drag a sheet down to dismiss: from the grabber anywhere, from the content once it is scrolled
-  // to the top. The dismissal runs in touchend, so a resume inside it is still a gesture.
+  // to the top. The word sheet in the landscape mode is a side panel and is dragged right instead.
+  // The dismissal runs in touchend, so a resume inside it is still a gesture.
   function makeDraggable(sheet, scroller, onDismiss) {
     let drag = null;
     sheet.addEventListener("touchstart", (ev) => {
       if (!sheet.classList.contains("open") || ev.target.closest("button, input, summary")) return;
       const fromGrabber = !!ev.target.closest(".grabber");
-      drag = { y: ev.touches[0].clientY, dy: 0, active: false, fromGrabber };
+      const side = state.landscape.on && sheet.classList.contains("word-sheet");
+      drag = { x: ev.touches[0].clientX, y: ev.touches[0].clientY, dy: 0, active: false, fromGrabber, side };
     }, { passive: true });
     sheet.addEventListener("touchmove", (ev) => {
       if (!drag) return;
-      const dy = ev.touches[0].clientY - drag.y;
+      const d = viewDelta(ev.touches[0].clientX - drag.x, ev.touches[0].clientY - drag.y);
+      // Along the way out (down, or right for the side panel), and across it.
+      const [dy, across] = drag.side ? [d.dx, d.dy] : [d.dy, d.dx];
       if (!drag.active) {
-        if (dy > 8 && (drag.fromGrabber || scroller.scrollTop <= 0)) {
+        if (dy > 8 && (drag.side ? Math.abs(across) < dy : drag.fromGrabber || scroller.scrollTop <= 0)) {
           drag.active = true;
           sheet.classList.add("dragging");
-        } else if (Math.abs(dy) > 8) {
+        } else if (Math.max(Math.abs(dy), drag.side ? Math.abs(across) : 0) > 8) {
           drag = null;
           return;
         } else {
@@ -1787,7 +1926,7 @@
         }
       }
       drag.dy = Math.max(0, dy);
-      sheet.style.transform = `translateY(${drag.dy}px)`;
+      sheet.style.transform = drag.side ? `translateX(${drag.dy}px)` : `translateY(${drag.dy}px)`;
       ev.preventDefault();
     }, { passive: false });
     sheet.addEventListener("touchend", () => {
@@ -1887,7 +2026,7 @@
   }
 
   function measureScrubber() {
-    const rect = $("scrub-track").getBoundingClientRect();
+    const rect = viewRect($("scrub-track"));
     scrub.width = rect.width;
     scrub.left = rect.left;
     scrub.f = -1; // place the thumb again at the new width
@@ -1935,10 +2074,11 @@
     $("scrub-buffer").style.transform = `scaleX(${Math.max(0, Math.min(1, end / d)).toFixed(4)})`;
   }
 
-  function scrubTo(clientX) {
+  function scrubTo(ev) {
     const d = scrubDuration();
     if (!d || !scrub.width) return;
-    scrub.target = Math.max(0, Math.min(d, ((clientX - scrub.left) / scrub.width) * d));
+    const x = viewPoint(ev.clientX, ev.clientY).x;
+    scrub.target = Math.max(0, Math.min(d, ((x - scrub.left) / scrub.width) * d));
     state.previewT = scrub.target; // the subtitle list shows the cue at the target meanwhile
   }
 
@@ -1954,9 +2094,9 @@
       measureScrubber();
       scrub.dragging = true;
       $("scrubber").classList.add("dragging");
-      scrubTo(ev.clientX);
+      scrubTo(ev);
     });
-    track.addEventListener("pointermove", (ev) => { if (scrub.dragging) scrubTo(ev.clientX); });
+    track.addEventListener("pointermove", (ev) => { if (scrub.dragging) scrubTo(ev); });
     const end = (commit) => {
       if (!scrub.dragging) return;
       scrub.dragging = false;
