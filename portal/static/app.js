@@ -227,12 +227,7 @@
       });
     }
     $("edit-btn").textContent = S.edit;
-    $("edit-btn").addEventListener("click", () => {
-      const editing = !$("home").classList.contains("editing");
-      $("home").classList.toggle("editing", editing);
-      $("edit-btn").textContent = editing ? S.done : S.edit;
-      closeRow();
-    });
+    $("edit-btn").addEventListener("click", () => setEditing(!$("home").classList.contains("editing")));
     bindSwipe();
     bindAnkiSetup();
     renderRecent(recentList()); // the local copy at once; the server's list replaces it
@@ -426,11 +421,18 @@
     button.setAttribute("aria-label", spec.aria(name));
   }
 
+  function setEditing(editing) {
+    $("home").classList.toggle("editing", editing);
+    $("edit-btn").textContent = editing ? S.done : S.edit;
+    closeRow();
+  }
+
+  // Called directly, never through a synthetic click: the swipe's click guard would eat one.
   function listChanged() {
     const empty = !$("recent").children.length;
     $("recent-empty").hidden = !empty;
     $("edit-btn").hidden = empty;
-    if (empty && $("home").classList.contains("editing")) $("edit-btn").click();
+    if (empty && $("home").classList.contains("editing")) setEditing(false);
   }
 
   function forget(id) {
