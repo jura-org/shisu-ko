@@ -814,6 +814,28 @@
     root.classList.remove("switching");
   }
 
+  // Pointer events and getBoundingClientRect() speak in screen coordinates; gestures and layout
+  // maths speak in the view's own frame, which the turned mode rotates (lib.js viewPoint()).
+  function viewTurn() {
+    return document.documentElement.classList.contains("turned") ? { height: document.body.clientHeight } : null;
+  }
+
+  function viewPoint(x, y) {
+    return L.viewPoint(x, y, viewTurn());
+  }
+
+  function viewDelta(dx, dy) {
+    return L.viewDelta(dx, dy, viewTurn());
+  }
+
+  function viewRect(el) {
+    return L.viewRect(el.getBoundingClientRect(), viewTurn());
+  }
+
+  function viewHeight() {
+    return state.landscape.on ? document.body.clientHeight : window.innerHeight;
+  }
+
   // ------------------------------------------------------------ /sync
 
   async function sync() {
@@ -1144,8 +1166,8 @@
     if (state.landscape.on) return box.clientHeight / 2;
     // The scrubber covers the list's faded bottom edge: centre in what is left above it.
     if (!state.sheet.open) return (box.clientHeight - $("scrubber").offsetHeight) / 2;
-    const sheetTop = window.innerHeight - $("sheet").offsetHeight;
-    const room = sheetTop - box.getBoundingClientRect().top;
+    const sheetTop = viewHeight() - $("sheet").offsetHeight;
+    const room = sheetTop - viewRect(box).top;
     return Math.max(40, Math.min(box.clientHeight / 2, room / 2));
   }
 
@@ -1366,8 +1388,8 @@
     // The shield over the video: a tap toggles play; a quick second tap on the left or right third
     // steps a line back or forward (and plays). Both act inside the tap itself.
     $("shield").addEventListener("click", (ev) => {
-      const box = ev.currentTarget.getBoundingClientRect();
-      const x = (ev.clientX - box.left) / box.width;
+      const box = viewRect(ev.currentTarget);
+      const x = (viewPoint(ev.clientX, ev.clientY).x - box.left) / box.width;
       const zone = x < 1 / 3 ? "left" : x > 2 / 3 ? "right" : "middle";
       const last = state.lastShieldTap;
       const now = Date.now();
@@ -1416,8 +1438,7 @@
     lyrics.addEventListener("touchmove", (ev) => {
       if (!touch) return;
       const p = ev.touches[0];
-      const dx = p.clientX - touch.x;
-      const dy = p.clientY - touch.y;
+      const { dx, dy } = viewDelta(p.clientX - touch.x, p.clientY - touch.y);
       if (!touch.axis && Math.max(Math.abs(dx), Math.abs(dy)) > 8) touch.axis = Math.abs(dy) > Math.abs(dx) ? "y" : "x";
       if (touch.axis === "y" && !state.sheet.open) {
         if (!state.browse.active) {
@@ -1434,7 +1455,7 @@
     lyrics.addEventListener("touchend", (ev) => {
       if (!touch) return;
       const p = ev.changedTouches[0];
-      const dx = p.clientX - touch.x;
+      const { dx } = viewDelta(p.clientX - touch.x, p.clientY - touch.y);
       const { axis } = touch;
       touch = null;
       lyrics.classList.remove("dragging");
@@ -1462,8 +1483,8 @@
   // Content-sized, but always leaving room above it for the tapped cue.
   function capSheet(cue) {
     const row = state.rowById.get(cue.id);
-    const top = $("lyrics").getBoundingClientRect().top;
-    const room = window.innerHeight - top - (row ? row.offsetHeight : 80) - 40;
+    const top = viewRect($("lyrics")).top;
+    const room = viewHeight() - top - (row ? row.offsetHeight : 80) - 40;
     $("sheet").style.maxHeight = `${Math.max(240, room)}px`;
   }
 
@@ -1873,11 +1894,11 @@
     sheet.addEventListener("touchstart", (ev) => {
       if (!sheet.classList.contains("open") || ev.target.closest("button, input, summary")) return;
       const fromGrabber = !!ev.target.closest(".grabber");
-      drag = { y: ev.touches[0].clientY, dy: 0, active: false, fromGrabber };
+      drag = { x: ev.touches[0].clientX, y: ev.touches[0].clientY, dy: 0, active: false, fromGrabber };
     }, { passive: true });
     sheet.addEventListener("touchmove", (ev) => {
       if (!drag) return;
-      const dy = ev.touches[0].clientY - drag.y;
+      const { dy } = viewDelta(ev.touches[0].clientX - drag.x, ev.touches[0].clientY - drag.y);
       if (!drag.active) {
         if (dy > 8 && (drag.fromGrabber || scroller.scrollTop <= 0)) {
           drag.active = true;
@@ -1990,7 +2011,7 @@
   }
 
   function measureScrubber() {
-    const rect = $("scrub-track").getBoundingClientRect();
+    const rect = viewRect($("scrub-track"));
     scrub.width = rect.width;
     scrub.left = rect.left;
     scrub.f = -1; // place the thumb again at the new width
@@ -2038,10 +2059,11 @@
     $("scrub-buffer").style.transform = `scaleX(${Math.max(0, Math.min(1, end / d)).toFixed(4)})`;
   }
 
-  function scrubTo(clientX) {
+  function scrubTo(ev) {
     const d = scrubDuration();
     if (!d || !scrub.width) return;
-    scrub.target = Math.max(0, Math.min(d, ((clientX - scrub.left) / scrub.width) * d));
+    const x = viewPoint(ev.clientX, ev.clientY).x;
+    scrub.target = Math.max(0, Math.min(d, ((x - scrub.left) / scrub.width) * d));
     state.previewT = scrub.target; // the subtitle list shows the cue at the target meanwhile
   }
 
@@ -2057,9 +2079,9 @@
       measureScrubber();
       scrub.dragging = true;
       $("scrubber").classList.add("dragging");
-      scrubTo(ev.clientX);
+      scrubTo(ev);
     });
-    track.addEventListener("pointermove", (ev) => { if (scrub.dragging) scrubTo(ev.clientX); });
+    track.addEventListener("pointermove", (ev) => { if (scrub.dragging) scrubTo(ev); });
     const end = (commit) => {
       if (!scrub.dragging) return;
       scrub.dragging = false;

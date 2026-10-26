@@ -715,6 +715,23 @@
     return best;
   }
 
+  // The landscape mode on a phone held upright turns the page a quarter clockwise (app.css
+  // html.turned): the view's top lies along the screen's right edge, and `turn.height` is the view's
+  // own height, which is the screen's width. Pointer events and getBoundingClientRect() speak in
+  // screen coordinates; these put them in the view's frame. `turn` is null when nothing is turned.
+  function viewPoint(x, y, turn) {
+    return turn ? { x: y, y: turn.height - x } : { x, y };
+  }
+
+  function viewDelta(dx, dy, turn) {
+    return turn ? { dx: dy, dy: -dx } : { dx, dy };
+  }
+
+  function viewRect(rect, turn) {
+    if (!turn) return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height };
+    return { left: rect.top, top: turn.height - rect.right, right: rect.bottom, bottom: turn.height - rect.left, width: rect.height, height: rect.width };
+  }
+
   // A viewport taller than wide shows the landscape mode turned: the viewer turns the phone, even
   // with its rotation lock on, which is the only way an iPhone's page goes sideways.
   function shouldTurn(width, height) {
@@ -733,7 +750,7 @@
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
     ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs, nearestBox, lookupResume, LOOKUP_LEAD_S,
-    watchHistoryText, newWatchLog, watchAt, watchClose, watchDrain, shouldTurn,
+    watchHistoryText, newWatchLog, watchAt, watchClose, watchDrain, viewPoint, viewDelta, viewRect, shouldTurn,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.PortalLib = api;
