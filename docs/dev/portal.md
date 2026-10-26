@@ -171,14 +171,25 @@ Server says it in one line (`watchHistoryText()`).
   a jump of over 3 s closes one. `POST /api/watched` carries `{video_id, ranges: [[st, et], ...],
   cmt, duration, state: "playing" | "paused"}` 10 s after play starts, every 30 s while playing,
   and at pause, end, hide and leave (keepalive). YouTube's iframe player records its own watches,
-  so the page sends nothing from it. `parse_watch_report()` refuses (400) a bad video id, more
-  than 20 ranges, a number that is not finite, and any time outside 0..duration + 5 s.
+  so the page sends nothing from it. With them go, each optional: `lact` (ms since the last touch
+  or key on the page), `volume` (0-100), `muted`, and `client: {browser, browser_version, os,
+  os_version}`, read from the User-Agent (`clientInfo()`). `parse_watch_report()` refuses (400) a
+  bad video id, more than 20 ranges, a number that is not finite, any time outside 0..duration +
+  5 s, and a client string beyond 1-32 of `[A-Za-z0-9._ -]`.
 - **What goes to YouTube.** `WatchReporter` keeps one session per video (a random 16-character
   `cpn`, dropped after 2 idle hours). The first played time sends the playback ping once (`ver=2`,
   `cpn`, `cmt`, `el=detailpage`), which adds the video to the history. Then a watch-time ping per
   report, at most one per video every 10 s, the stretches in between merged: `st` and `et` as
   comma-separated lists with 3 decimals, as YouTube's own player sends them, plus `cmt`, `len`,
-  `state` and `rt` (seconds since the session began). The base URL's own parameters stay. The
+  `state` and `rt` (seconds since the session began). The base URL's own parameters stay.
+  Both pings carry the client context YouTube's web player sends (`WatchSession.context()`), never
+  a made-up value: `c`, `cver` from the signed-in response's CSI tracking params and `cr` from its
+  GFEEDBACK `ipcc` (`response_client()`, captured with the URLs); `cplayer=UNIPLAYER`, `fs=0`, an
+  empty `euri`; the page's `cbr`, `cbrver`, `cos`, `cosver` and `lact`; `fmt` and `afmt`, the
+  itags of the variants the player last took a segment from. The watch-time ping adds `rti`
+  (whole seconds of `rt`), `rtn` (`rti` + 10, as the web player's early pings carry), `idpj=-1`,
+  `ldpj=-1`, and `vis=0`, `volume`, `muted` with one value per stretch, as `st` and `et`. `hl` is
+  left out: the response does not say it. The
   pings run on a thread of their own through a `YoutubeDL`'s `urlopen` with the server's cookies
   (one `YoutubeDL` an hour, so the browser's cookie store is not read for every ping); a failure is
   logged once per video and never touches playback. Stretches reported while the signed-in look-up
