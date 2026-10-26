@@ -1162,7 +1162,7 @@
   // The centre point: the middle of the list, or of the room left above the dictionary sheet.
   function focusY() {
     const box = $("lyrics");
-    // The landscape strip: its middle; the scrubber sits above it.
+    // The landscape strip: its middle; the scrubber sits above it and the sheet beside it.
     if (state.landscape.on) return box.clientHeight / 2;
     // The scrubber covers the list's faded bottom edge: centre in what is left above it.
     if (!state.sheet.open) return (box.clientHeight - $("scrubber").offsetHeight) / 2;
@@ -1482,6 +1482,10 @@
 
   // Content-sized, but always leaving room above it for the tapped cue.
   function capSheet(cue) {
+    if (state.landscape.on) {
+      $("sheet").style.maxHeight = ""; // a side panel, the view's full height
+      return;
+    }
     const row = state.rowById.get(cue.id);
     const top = viewRect($("lyrics")).top;
     const room = viewHeight() - top - (row ? row.offsetHeight : 80) - 40;
@@ -1888,22 +1892,26 @@
   }
 
   // Drag a sheet down to dismiss: from the grabber anywhere, from the content once it is scrolled
-  // to the top. The dismissal runs in touchend, so a resume inside it is still a gesture.
+  // to the top. The word sheet in the landscape mode is a side panel and is dragged right instead.
+  // The dismissal runs in touchend, so a resume inside it is still a gesture.
   function makeDraggable(sheet, scroller, onDismiss) {
     let drag = null;
     sheet.addEventListener("touchstart", (ev) => {
       if (!sheet.classList.contains("open") || ev.target.closest("button, input, summary")) return;
       const fromGrabber = !!ev.target.closest(".grabber");
-      drag = { x: ev.touches[0].clientX, y: ev.touches[0].clientY, dy: 0, active: false, fromGrabber };
+      const side = state.landscape.on && sheet.classList.contains("word-sheet");
+      drag = { x: ev.touches[0].clientX, y: ev.touches[0].clientY, dy: 0, active: false, fromGrabber, side };
     }, { passive: true });
     sheet.addEventListener("touchmove", (ev) => {
       if (!drag) return;
-      const { dy } = viewDelta(ev.touches[0].clientX - drag.x, ev.touches[0].clientY - drag.y);
+      const d = viewDelta(ev.touches[0].clientX - drag.x, ev.touches[0].clientY - drag.y);
+      // Along the way out (down, or right for the side panel), and across it.
+      const [dy, across] = drag.side ? [d.dx, d.dy] : [d.dy, d.dx];
       if (!drag.active) {
-        if (dy > 8 && (drag.fromGrabber || scroller.scrollTop <= 0)) {
+        if (dy > 8 && (drag.side ? Math.abs(across) < dy : drag.fromGrabber || scroller.scrollTop <= 0)) {
           drag.active = true;
           sheet.classList.add("dragging");
-        } else if (Math.abs(dy) > 8) {
+        } else if (Math.max(Math.abs(dy), drag.side ? Math.abs(across) : 0) > 8) {
           drag = null;
           return;
         } else {
@@ -1911,7 +1919,7 @@
         }
       }
       drag.dy = Math.max(0, dy);
-      sheet.style.transform = `translateY(${drag.dy}px)`;
+      sheet.style.transform = drag.side ? `translateX(${drag.dy}px)` : `translateY(${drag.dy}px)`;
       ev.preventDefault();
     }, { passive: false });
     sheet.addEventListener("touchend", () => {

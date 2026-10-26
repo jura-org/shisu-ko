@@ -606,7 +606,7 @@ button.row-item { width: 100%; text-align: left; background: none; border-radius
 /* ------------------------------------------------ the landscape mode (app.js enterLandscape)
 
    The video fills the view, the line being said is a strip along its bottom, the scrubber and the
-   way out sit just above the strip while the controls show.
+   way out sit just above the strip while the controls show, and the dictionary is a side panel.
    The page is fixed to the viewport, or, on a phone held upright, turned a quarter clockwise and
    sized to the screen's other way round (html.turned): every fixed sheet, toast and bar then lies
    in the turned body, which a transform makes their containing block. Percentages below are of
@@ -614,6 +614,7 @@ button.row-item { width: 100%; text-align: left; background: none; border-radius
 
 html.landscape, html.landscape body { height: 100%; overflow: hidden; }
 html.landscape body { position: fixed; inset: 0; }
+html.landscape { --side-w: min(400px, 46%); }
 html.landscape.turned body {
   right: auto;
   bottom: auto;
@@ -659,6 +660,7 @@ html.landscape #lyrics {
   mask-image: none;
 }
 html.landscape .lyrics-track { padding: 0 calc(24px + var(--safe-right)) 0 calc(24px + var(--safe-left)); }
+html.landscape .lyrics.sheet-open .lyrics-track { padding-right: calc(var(--side-w) + 16px); }
 html.landscape .cue { font-size: 24px; margin-bottom: 14px; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8); }
 /* The strip holds the line being said alone; a drag still browses its neighbours. */
 html.landscape .lyrics:not(.browsing) .cue:not([data-d="0"]) { visibility: hidden; opacity: 0; }
@@ -678,6 +680,22 @@ html.landscape .scrubber {
 }
 html.landscape .watch:has(.player-box.show-back) .scrubber, html.landscape .scrubber.dragging { opacity: 1; visibility: visible; }
 
+html.landscape .word-sheet {
+  left: auto;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--side-w);
+  max-width: none;
+  margin: 0;
+  padding-top: calc(12px + var(--safe-top));
+  border-radius: 14px 0 0 14px;
+  transform: translateX(calc(100% + 24px));
+}
+html.landscape .word-sheet.open { transform: translateX(0); }
+html.landscape .word-sheet .grabber { display: none; }
+html.landscape .word-sheet .sheet-scroll { flex: 1 1 auto; padding: 0 calc(20px + var(--safe-right)) 8px 20px; }
+html.landscape .word-sheet .sheet-foot { padding: 8px calc(16px + var(--safe-right)) calc(8px + var(--safe-bottom)) 16px; }
 html.landscape .settings-sheet { max-height: 88%; }
 html.switching .sheet, html.switching .lyrics-track, html.switching .scrubber { transition: none !important; }
 @media (prefers-reduced-motion: reduce) {
