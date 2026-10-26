@@ -521,6 +521,8 @@ DVR disabled cannot be followed, since the server needs the numbered audio segme
 The phone portal plays a YouTube video on a phone or tablet with Shisu-ko's subtitles, looks words
 up with Yomitan and mines them into Anki, all served by the computer that runs the server. It needs
 no app and no extension on the phone: open a page in its browser (or add it to the home screen).
+The button in the video's bottom-right corner, shown while paused, turns the phone's screen into a
+large landscape player with the line being said along the bottom, still tappable for lookups.
 
 <p>
 <img src="docs/images/portal-watch.png" width="190" alt="The watch view: the video, and the line being said in the middle with its words lighting up as they are spoken">

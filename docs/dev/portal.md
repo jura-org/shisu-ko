@@ -231,6 +231,54 @@ stream shows "LIVE" instead. The list centres its line in the space above it.
 
 <img src="../images/portal-scrubber-drag.png" width="220" alt="Dragging the scrubber: the thumb grows and the list previews the line at the target">
 
+## The landscape mode
+
+The button in the player's bottom-right corner (`#btn-full`, the back button's twin, shown when it
+shows: paused, ended, or for 3 s after a tap on the video) switches the watch view to a landscape
+layout (`enterLandscape()` / `exitLandscape()` in `app.js`, `html.landscape` in `app.css`): the
+video fills the view, the line being said is a strip along its bottom, and the scrubber and the
+exit button (the same corner button, a collapse icon) sit just above the strip while the controls
+show. The strip is the subtitle list itself, so word taps, the sweep, furigana, word colours, the
+picked-word highlight and mining work as in the portrait view. It holds the line being said alone;
+a vertical drag still browses its neighbours. The dictionary is a side panel on the right
+(dragged right to close), and the line moves left out of its way. The toolbar is hidden: a tap on
+the video plays and pauses, a double tap on its left or right third steps a line, and so does a
+horizontal swipe on the strip. Settings is out of reach until the mode is left.
+
+How it gets the whole screen depends on what the browser allows, found by feature detection:
+
+| Browser | Fullscreen | Sideways |
+|---|---|---|
+| Android, iPad, desktop | `requestFullscreen()` on the whole page (`document.documentElement`), so the sheet and toasts come along | `screen.orientation.lock("landscape")` once fullscreen; a refusal is ignored |
+| iPhone (Safari, the home-screen app, every iOS browser) | none: the page fills the viewport (`position: fixed`); the home-screen app has no browser bars, so that is nearly the whole screen | the CSS below |
+
+An iPhone has no element fullscreen: `requestFullscreen()` is iPad-only (MDN's compatibility data,
+up to iOS 26), and the one fullscreen it has, `webkitEnterFullscreen()` on a `<video>`, opens
+Apple's own player, over which no page content draws. Subtitles we can tap cannot exist there, so
+the portal never uses it. Nor can a page lock the orientation on iOS (`lock()` rejects). So while
+the mode is on and the viewport is taller than wide (`shouldTurn()`), the page turns itself
+(`html.turned`): `body` is sized to the screen the other way round (`100dvh` x `100dvw`) and
+rotated a quarter clockwise. The viewer turns the phone, with the rotation lock on or off; a phone
+that does rotate the page gets a landscape viewport, and the turn goes away (`resize` and
+`orientationchange` call `viewChanged()`). The turned body is the containing block of every fixed
+bar, sheet and toast, so they turn with it; percentages in the mode's CSS are of the view, never
+`vw`/`vh`, and the safe-area insets are remapped (the notch is the turned view's left).
+
+**Pointers under the turn.** The browser hit-tests through the transform, so a tap lands on the
+word drawn under the finger, and `tappedIndex()` compares glyph boxes and the tap in the same
+screen coordinates. Only code that reads coordinates as directions needs the view's frame:
+`viewPoint()`, `viewDelta()` and `viewRect()` in `lib.js` (screen x is the view's y, measured from
+the view's bottom). They map the video's tap thirds, the strip's swipe and browse drag, the
+scrubber's tap and drag, the sheets' drag to close, and `focusY()` / `capSheet()`'s room
+measurements.
+
+**Leaving.** The exit button, the browser's own fullscreen exit (`fullscreenchange`: Android's
+back gesture, Escape) and leaving the video by any way (`teardownWatch()`: the back button, the
+video's end, a link) all end the mode the same way: the classes go, fullscreen and the orientation
+lock are released, and the list is re-anchored on the same cue without motion. The playhead is
+never touched. Nothing is remembered: each video starts in portrait. The YouTube iframe fallback
+takes the mode as well; the iframe only grows, keeping its 3x-and-crop trick.
+
 ## Retries
 
 - The heartbeat never stops. A failed `/sync` backs off 1, 2, 4, 8 ... 15 s with jitter and reads
