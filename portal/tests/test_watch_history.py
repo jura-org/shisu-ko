@@ -134,6 +134,7 @@ class FakeYoutubeDL:
         return self.extractor
 
     anonymous_hls = True
+    responses = RESPONSES  # the player responses yt-dlp hands mark_watched
     gate = None  # a threading.Event a signed-in extraction waits for
     signed_in_error = None
 
@@ -145,7 +146,7 @@ class FakeYoutubeDL:
         if signed_in and FakeYoutubeDL.signed_in_error:
             raise FakeYoutubeDL.signed_in_error
         # Where yt-dlp's YouTube extractor calls self.mark_watched(video_id, player_responses).
-        self.extractor.mark_watched(VIDEO, RESPONSES)
+        self.extractor.mark_watched(VIDEO, FakeYoutubeDL.responses)
         if "cookiesfrombrowser" not in self.options and not FakeYoutubeDL.anonymous_hls:
             return {"duration": 600, "title": "t", "formats": []}
         return {"duration": 600, "title": "t", "formats": [{"protocol": "m3u8_native", "manifest_url": "https://example.invalid/m"}]}
@@ -154,6 +155,7 @@ class FakeYoutubeDL:
 @pytest.fixture
 def fake_ytdlp(monkeypatch):
     FakeYoutubeDL.anonymous_hls = True
+    FakeYoutubeDL.responses = RESPONSES
     FakeYoutubeDL.made = []
     FakeYoutubeDL.gate = None
     FakeYoutubeDL.signed_in_error = None
@@ -200,6 +202,20 @@ def test_an_anonymous_resolve_looks_the_tracking_up_signed_in_without_waiting_fo
     assert signed_in.kwargs == {"process": False}
     hls.resolve(video)  # a re-resolve (a 403) keeps them and looks nothing up again
     assert len(FakeYoutubeDL.made) == 3
+
+
+def test_a_signed_in_resolve_without_tracking_is_not_extracted_again(home, fake_ytdlp, caplog):
+    with_cookies(home)
+    FakeYoutubeDL.anonymous_hls = False  # the resolve itself goes signed in
+    FakeYoutubeDL.responses = RESPONSES[:1]  # and its answer carries no tracking URLs
+    hls = portal.HlsProxy(capture_tracking=True)
+    video = portal.HlsVideo(VIDEO)
+    with caplog.at_level("WARNING", logger="portal"):
+        for _ in range(2):
+            hls.resolve(video)
+    # Two passes per resolve, anonymous then signed in; no third, identical signed-in look-up.
+    assert len(FakeYoutubeDL.made) == 4 and not video.tracking_busy and video.tracking is None
+    assert len([r for r in caplog.records if "carried no tracking URLs" in r.getMessage()]) == 1
 
 
 def test_a_failed_look_up_leaves_no_tracking_and_is_logged_once(home, fake_ytdlp, caplog):

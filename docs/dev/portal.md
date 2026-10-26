@@ -164,7 +164,8 @@ Server says it in one line (`watchHistoryText()`).
   what ties a ping to the account. The stream resolves anonymously (above), so after it
   `start_tracking()` runs one signed-in extraction per video on a thread of its own
   (`fetch_tracking()`, `process=False`; never two at once, and none when the resolve itself went
-  signed in). `capture_tracking()` replaces `mark_watched` on that `YoutubeDL`'s own YouTube
+  signed in: its answer is the one that extraction would get, so no URLs there means none, logged
+  once). `capture_tracking()` replaces `mark_watched` on that `YoutubeDL`'s own YouTube
   extractor instance; yt-dlp calls it with the player responses it fetched, and the override keeps
   the first response's `playbackTracking` base URLs (`videostatsPlaybackUrl`,
   `videostatsWatchtimeUrl`; `https` on a YouTube host only, `tracking_urls()`) on the `HlsVideo`

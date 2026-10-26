@@ -1435,8 +1435,15 @@ class HlsProxy:
         video.title = info.get("title")
         video.tracking = tracking or video.tracking
         video.created = time.time()
-        if self.capture_tracking and not video.tracking:
+        if not self.capture_tracking or video.tracking:
+            return
+        if not signed_in:
             self.start_tracking(video)
+        elif not video.tracking_failed:
+            # This resolve was the signed-in extraction start_tracking() would run, and its answer
+            # carried no tracking URLs: the same request again would find none either.
+            video.tracking_failed = True
+            log.warning("[%s] watch history: the signed-in answer carried no tracking URLs", video.video_id)
 
     def start_tracking(self, video: HlsVideo) -> None:
         """Find the tracking URLs of an anonymously resolved video in a signed-in player response,
