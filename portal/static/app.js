@@ -719,20 +719,21 @@
   // ends a viewing. A pause is no end: it reports "paused" on the schedule. A later play goes on in
   // the same session.
   function reportWatch(final = false) {
-    const video = state.player && state.player.video;
-    if (final || (video && video.paused)) {
-      // Still playing (the page hidden, the player swapped): the schedule goes on; else a play restarts it.
-      state.watchDueAt = video && !video.paused && !video.ended ? Date.now() + state.watchGapMs : Infinity;
-    }
+    // Whatever happens below, the next scheduled report: a gap on while our own player plays, none
+    // while it does not (a play restarts it). tick() calls this whenever the time is due, so an
+    // early return must never leave the time in the past.
+    const video = state.player && state.player.kind === "native" ? state.player.video : null;
+    const playing = Boolean(video) && !video.paused && !video.ended && !state.tornDown;
+    state.watchDueAt = playing ? Date.now() + state.watchGapMs : Infinity;
     if (!state.info) return; // not known yet: the stretches wait
     if (state.info.watch_history !== "on") {
       state.watch = L.newWatchLog();
+      state.watchDueAt = Infinity;
       return;
     }
-    if (!state.player || state.player.kind !== "native" || state.tornDown) return;
+    if (!video || state.tornDown) return;
     const duration = playerDuration();
     if (!duration) return;
-    const playing = !video.paused && !video.ended;
     const ranges = L.watchDrain(state.watch, video.currentTime, playing);
     if (!ranges.length) return;
     const sentAt = Date.now();
@@ -940,8 +941,10 @@
           state.resumeLanded = true;
         }
       }
-      // A start or a resume (not the end of a stall): the schedule goes on from the server's last answer.
-      if (state.watchDueAt === Infinity) state.watchDueAt = Date.now() + state.watchGapMs;
+      // A start or a resume (not the end of a stall): the schedule goes on from the server's last
+      // answer. History off: no schedule (the page does not know yet: the first report finds out).
+      const history = state.info ? state.info.watch_history : "on";
+      if (state.watchDueAt === Infinity && history === "on") state.watchDueAt = Date.now() + state.watchGapMs;
       emit(YT_PLAYING);
     });
     // The played stretches, once the resume has landed (before it the element may still say 0).
