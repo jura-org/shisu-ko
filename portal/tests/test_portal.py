@@ -171,14 +171,39 @@ def test_valid_video_id_and_frame_time():
     assert portal.frame_time(10.0, 20.0) == 10.75
 
 
-def test_compact_entries_keeps_only_the_longest_matches():
-    def entry(term, reading, matched):
-        return {"headwords": [{"term": term, "reading": reading, "sources": [{"originalText": matched}]}],
-                "definitions": [{"dictionary": "D", "entries": [term]}]}
-    data = {"dictionaryEntries": [entry("天気", "てんき", "天気"), entry("天", "てん", "天"), entry("天", "あま", "天")]}
-    assert [e["term"] for e in portal.compact_entries(data)] == ["天気"]
-    data = {"dictionaryEntries": [entry("天", "てん", "天"), entry("天", "あま", "天")]}
-    assert [e["reading"] for e in portal.compact_entries(data)] == ["てん", "あま"]
+def _entry(term, reading, matched):
+    return {"headwords": [{"term": term, "reading": reading, "sources": [{"originalText": matched}]}],
+            "definitions": [{"dictionary": "D", "entries": [term]}]}
+
+
+def test_compact_entries_puts_the_longest_matches_first_then_the_shorter():
+    data = {"dictionaryEntries": [_entry("天", "てん", "天"), _entry("天気", "てんき", "天気"), _entry("天", "あま", "天")]}
+    entries = portal.compact_entries(data)
+    # The sheet opens on the longest match; the readings of 天 follow, in Yomitan's order.
+    assert [(e["term"], e["reading"], e["matched"]) for e in entries] == [
+        ("天気", "てんき", 2), ("天", "てん", 1), ("天", "あま", 1)]
+
+
+def test_compact_entries_keeps_yomitans_order_within_a_length_and_drops_repeats():
+    data = {"dictionaryEntries": [
+        _entry("降る", "ふる", "降っています"), _entry("降る", "くだる", "降っています"),
+        _entry("降って", "くだって", "降って"), _entry("降", "こう", "降"),
+        _entry("降る", "ふる", "降っています"),  # the same headword again (another dictionary's entry)
+        _entry("降", "ふり", "降"),
+    ]}
+    entries = portal.compact_entries(data)
+    assert [(e["term"], e["reading"], e["matched"]) for e in entries] == [
+        ("降る", "ふる", 6), ("降る", "くだる", 6), ("降って", "くだって", 3), ("降", "こう", 1), ("降", "ふり", 1)]
+
+
+def test_compact_entries_caps_the_choices():
+    data = {"dictionaryEntries": [_entry("天気", "てんき", "天気")]
+            + [_entry("天", f"r{i}", "天") for i in range(20)]}
+    entries = portal.compact_entries(data)
+    assert len(entries) == portal.LOOKUP_ENTRIES
+    assert entries[0]["term"] == "天気"
+    assert [e["reading"] for e in portal.compact_entries(data, limit=3)] == ["てんき", "r0", "r1"]
+    assert portal.compact_entries({}) == [] and portal.compact_entries(None) == []
 
 
 # ---------------------------------------------------------------- retries

@@ -185,7 +185,7 @@ EXTRA_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 MAX_BODY = 64 * 1024
 MAX_CLIP_SECONDS = 30.0
 TOKENIZE_BATCH = 12
-LOOKUP_ENTRIES = 8
+LOOKUP_ENTRIES = 12
 STREAM_URL_TTL = 2 * 3600
 OWNER_REFRESH_SECONDS = 60
 OWNER_MISS_REFRESH_SECONDS = 10
@@ -403,18 +403,18 @@ def match_length(entry: dict) -> int:
 
 
 def compact_entries(data: dict, limit: int = LOOKUP_ENTRIES, default_dictionary: str = "") -> list[dict]:
-    """Yomitan termEntries -> what the word sheet shows, one item per headword.
+    """Yomitan termEntries -> what the word sheet shows, one item per headword and reading.
 
-    Only the entries matching as much of the text as the best one count as candidates: tapping
-    天気 offers 天気, not every reading of 天 that also matched its first character.
+    The entries matching the most of the text come first, so the sheet opens on 天気 for a tap on
+    天気; the shorter matches (every reading of 天) follow as choices. Each keeps how much of the
+    text it matched (`matched`), which becomes the span when it is picked. Within one length the
+    order is Yomitan's.
     """
     out = []
     seen = set()
     entries = (data or {}).get("dictionaryEntries", [])
-    longest = max((match_length(e) for e in entries), default=0)
-    for entry in entries:
-        if match_length(entry) < longest:
-            continue
+    # sorted() is stable: Yomitan's own ranking survives inside each length.
+    for matched, entry in sorted(((match_length(e), e) for e in entries), key=lambda pair: -pair[0]):
         headwords = entry.get("headwords") or []
         if not headwords:
             continue
@@ -472,7 +472,7 @@ def compact_entries(data: dict, limit: int = LOOKUP_ENTRIES, default_dictionary:
             "dicts": [d for d in dicts if d["items"]],
             "gloss": default[:300],
             "glossFrom": default_from,
-            "matched": longest,
+            "matched": matched,
         })
         if len(out) >= limit:
             break
