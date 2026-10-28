@@ -161,6 +161,17 @@ container (`SHISUKO_CONTAINER`), the switch does nothing and the log says why at
 `/api/info`'s `watch_history` tells the page `"on"`, `"off"` or `"no-cookies"`, and Settings >
 Server says it in one line (`watchHistoryText()`).
 
+What leaves the computer, all of it to YouTube under the viewer's account, and none of it unless
+the switch is on and a cookie browser is set: one signed-in extraction per video (tried again
+after a failure), the playback ping once per viewing, and a watch-time ping per report (below).
+Each ping carries the base URL's own parameters, a random `cpn`, the stretches played (`st`,
+`et`), `cmt`, `len`, `state`, `rt` and its derivatives, `final` at the end of a viewing, the
+response's client (`c`, `cver`, `cr`), the phone's browser and system (`cbr`, `cbrver`, `cos`,
+`cosver`), `lact`, `volume`, `muted`, `fmt`, `afmt`, and fixed values (`ver`, `el`, `cplayer`,
+`fs`, `euri`, `vis`, `idpj`, `ldpj`), sent with the browser's YouTube cookies and
+`X-Goog-AuthUser: 0`. The README and `docs/amo/privacy-policy.md` state the same; a change here
+changes them too.
+
 - **What is captured.** The tracking URLs must come from a signed-in player response: that is
   what ties a ping to the account. The stream resolves anonymously (above), so after it
   `start_tracking()` runs one signed-in extraction per video on a thread of its own

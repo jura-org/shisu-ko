@@ -568,8 +568,17 @@ watched or delete it, and a video watched to its end returns to the list. How it
 account, as if watched on YouTube: it lands in your watch history, and your recommendations see the
 time you actually watched. It reports through the YouTube cookies of the browser the server sends
 (`--save-cookies-from-browser firefox`; on Windows Chrome and Edge lock their cookies away) and
-does nothing without them. It sends YouTube which stretches of the video played, nothing else, and
-only for the portal's own player; YouTube's player, the fallback, records its own. YouTube's
+does nothing without them. It asks YouTube once per video, signed in, for the addresses YouTube's
+own player reports to. Then, from your computer and under your account (those cookies, and the
+header `X-Goog-AuthUser: 0`), it sends a playback ping when the video first plays, and a
+watch-time ping every 10 to 40 s of play, after a pause, and at once when a viewing ends (the end,
+the page hidden or left, home, the switch to YouTube's player). Each ping carries a random id for
+the viewing; the stretches played, the position and the video's length; whether it plays or is
+paused, and the seconds since the viewing began; the phone's browser and system with their
+versions (from its User-Agent); the milliseconds since your last touch or key on the page; the
+volume and whether it is muted; the video and audio formats playing; the web client and country
+YouTube's answer named; and the parameters YouTube put into those addresses itself. Only the
+portal's own player reports; YouTube's player, the fallback, records its own. YouTube's
 history bar takes the position on videos of about 20 minutes or more; on shorter ones it shows a
 10% "started" mark, as it does for every client outside YouTube's own apps.
 
