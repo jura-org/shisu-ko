@@ -1939,9 +1939,10 @@ class WatchReporter:
     def report(self, report: dict, tracking: dict | None, waiting: bool = False) -> bool:
         """Hold a checked report for the next ping; False when nothing will be sent for it.
         `waiting`: the tracking URLs are still being looked up (set_tracking() brings them), so
-        the stretches wait in the session rather than being lost. A final report (a pause, the
-        end, the page hidden or left) has its ping go within WATCH_FINAL_GAP, with final=1; a
-        later report continues the same session, and the last report decides."""
+        the stretches wait in the session rather than being lost. A final report (the end, the
+        page hidden or left, home, the switch to YouTube's player; never a pause) has its ping go
+        within WATCH_FINAL_GAP, with final=1; a later report continues the same session, and the
+        last report decides."""
         if self.mode != "on":
             return False
         now = self.clock()

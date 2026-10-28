@@ -183,10 +183,12 @@ Server says it in one line (`watchHistoryText()`).
   `watchAt()`, `watchClose()`, `watchDrain()` in `lib.js`): a seek, pause, rate change, the end or
   a jump of over 3 s closes one. `POST /api/watched` carries `{video_id, ranges: [[st, et], ...],
   cmt, duration, state: "playing" | "paused", final}` on YouTube's schedule: 10 s after play
-  starts, then after the playing time the answer's `next` names (seconds; `watchNextMs()`), and
-  with `final: true` at pause, end, hide, leave and the switch to YouTube's player (keepalive).
-  The server counts the scheduled reports and answers each with the step to the next one, 10, 10,
-  then 40 s for a WEB response; a final report does not advance it. A resume after a final
+  starts, then after the playing time the answer's `next` names (seconds; `watchNextMs()`); at a
+  pause (the viewer's, auto-pause, a lookup, a scrub) with `state: "paused"`; and with
+  `final: true` only where a viewing ends, as YouTube's player sends it: the end of the video, the
+  page hidden or left, home, and the switch to YouTube's player (keepalive). The server counts the
+  reports that are not final and answers each with the step to the next one, 10, 10, then 40 s
+  for a WEB response; a final report does not advance it. A resume after a pause or a final
   report starts the next step afresh; a stall does not. Without an answer the page reports again
   after 40 s. YouTube's iframe player records its own watches,
   so the page sends nothing from it. With them go, each optional: `lact` (ms since the last touch

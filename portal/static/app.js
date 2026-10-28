@@ -714,12 +714,14 @@
     document.addEventListener(name, () => { lastActivity = Date.now(); }, { capture: true, passive: true });
   }
 
-  // final: the viewing ends here (a pause, the end, the page hidden or left): YouTube gets this
-  // report's ping at once, marked final. A later play goes on in the same session.
+  // final: the viewing ends here (the end of the video, the page hidden or left, home, the switch
+  // to YouTube's player): YouTube gets this report's ping at once, marked final, as its own player
+  // ends a viewing. A pause is no end: it reports "paused" on the schedule. A later play goes on in
+  // the same session.
   function reportWatch(final = false) {
-    if (final) {
+    const video = state.player && state.player.video;
+    if (final || (video && video.paused)) {
       // Still playing (the page hidden, the player swapped): the schedule goes on; else a play restarts it.
-      const video = state.player && state.player.video;
       state.watchDueAt = video && !video.paused && !video.ended ? Date.now() + state.watchGapMs : Infinity;
     }
     if (!state.info) return; // not known yet: the stretches wait
@@ -728,14 +730,13 @@
       return;
     }
     if (!state.player || state.player.kind !== "native" || state.tornDown) return;
-    const video = state.player.video;
     const duration = playerDuration();
     if (!duration) return;
     const playing = !video.paused && !video.ended;
     const ranges = L.watchDrain(state.watch, video.currentTime, playing);
     if (!ranges.length) return;
     const sentAt = Date.now();
-    if (!final) state.watchDueAt = sentAt + WATCH_UNANSWERED_MS;
+    if (!final && playing) state.watchDueAt = sentAt + WATCH_UNANSWERED_MS;
     fetch("/api/watched", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -949,10 +950,12 @@
     });
     video.addEventListener("seeking", () => L.watchClose(state.watch));
     video.addEventListener("ratechange", () => L.watchClose(state.watch));
+    // The end of the video ends the viewing; a pause (the viewer's, auto-pause, a lookup, a scrub)
+    // only says so. At the end the element fires "pause" too, with `ended` already true.
     for (const name of ["pause", "ended"]) {
       video.addEventListener(name, () => {
         L.watchClose(state.watch);
-        reportWatch(true);
+        reportWatch(video.ended);
       });
     }
     video.addEventListener("seeked", () => {

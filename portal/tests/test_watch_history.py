@@ -493,6 +493,19 @@ def test_a_final_report_goes_within_two_seconds_with_final_1():
     assert reporter.due(25.0) == []  # a scheduled report keeps the 10 s gap
 
 
+def test_a_pause_reports_paused_on_the_schedule_without_final():
+    # A pause is no end of the viewing: its ping keeps the 10 s gap and carries no final=1.
+    reporter = portal.WatchReporter("on", send=None, clock=lambda: 0.0)
+    reporter.background = False
+    reporter.report(report([[0, 10]]), CAPTURED)
+    reporter.due(0.0)
+    reporter.report(report([[10, 11]], state="paused"), CAPTURED)
+    assert reporter.due(5.0) == []
+    (ping,) = reporter.due(10.0)
+    got = query(ping[1])
+    assert got["state"] == "paused" and "final" not in got and got["st"] == "10.000"
+
+
 def test_a_final_report_then_more_play_before_its_ping_drops_final():
     reporter = portal.WatchReporter("on", send=None, clock=lambda: 0.0)
     reporter.background = False
