@@ -151,6 +151,22 @@
     edit: "Edit",
     done: "Done",
     close: "Close",
+    back: "Back",
+    settings: "Settings",
+    // Settings > Subtitle style (the landscape mode's caption box)
+    subtitleStyle: "Subtitle style",
+    captionBackground: "Background",
+    captionSize: "Text size",
+    captionPosition: "Position",
+    captionNone: "None",
+    captionSmall: "Small",
+    captionMedium: "Medium",
+    captionLarge: "Large",
+    captionLower: "Lower",
+    captionDefault: "Default",
+    captionHigher: "Higher",
+    captionSample: "今日は雨が降っています",
+    captionStyleNote: "For the subtitle over the video in the landscape mode.",
     play: "Play",
     pause: "Pause",
     lookingUp: "Looking up…",
@@ -977,6 +993,42 @@
     return frame;
   }
 
+  // Settings > Subtitle style: the landscape caption box's background, text size and resting
+  // height, each one of a few fixed choices; `fallback` is the default and today's look. Anything
+  // else read back from storage becomes the default.
+  const CAPTION_CHOICES = {
+    captionBg: { values: [0, 0.3, 0.45, 0.6, 0.8], fallback: 0.6 },
+    captionSize: { values: ["small", "medium", "large"], fallback: "medium" },
+    captionPosition: { values: ["lower", "default", "higher"], fallback: "default" },
+  };
+  const CAPTION_SCALE = { small: 0.85, medium: 1, large: 1.2 }; // times the size clamp in app.css
+  const CAPTION_LIFT = { lower: -8, default: 0, higher: 24 }; // px off the resting height, inside the safe area
+
+  function captionStyle(saved) {
+    const out = {};
+    for (const [key, { values, fallback }] of Object.entries(CAPTION_CHOICES)) {
+      const v = saved ? saved[key] : undefined;
+      out[key] = values.includes(v) ? v : fallback;
+    }
+    return out;
+  }
+
+  // The custom properties app.css reads, as plain numbers clamped to sane ranges whatever comes in:
+  // nothing from storage reaches the stylesheet unchecked. Below a 45% box the text gets a shadow
+  // of its own (--cap-shadow), as the iPhone's own outline styles do, or white text on a bright
+  // picture is lost.
+  function captionVars(saved) {
+    const s = captionStyle(saved);
+    const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, Number.isFinite(x) ? x : lo));
+    const bg = clamp(s.captionBg, 0, 1);
+    return {
+      "--cap-bg": String(bg),
+      "--cap-scale": String(clamp(CAPTION_SCALE[s.captionSize], 0.5, 2)),
+      "--cap-lift": `${clamp(CAPTION_LIFT[s.captionPosition], -16, 48)}px`,
+      "--cap-shadow": bg < 0.45 ? "0.9" : "0",
+    };
+  }
+
   function hasKanji(text) {
     return /[㐀-鿿豈-﫿々]/.test(String(text || ""));
   }
@@ -992,6 +1044,7 @@
     ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs, nearestBox, entrySpan, candidateTabs, lookupResume, LOOKUP_LEAD_S,
     watchHistoryText, newWatchLog, watchAt, watchClose, watchDrain, watchNextMs, clientInfo, viewPoint, viewDelta, viewRect, shouldTurn,
     shieldTap, tapZone, TAP_MIDDLE, sideShare, stepTarget, framePlayhead, DOUBLE_TAP_MS,
+    CAPTION_CHOICES, captionStyle, captionVars,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.PortalLib = api;

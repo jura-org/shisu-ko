@@ -770,3 +770,32 @@ test("every string the page names (data-s, data-s-label) is a string in STRINGS"
   assert.ok(names.length > 0);
   for (const name of names) assert.equal(typeof L.STRINGS[name], "string", name);
 });
+
+test("captionStyle: only the listed choices survive storage; anything else is today's look", () => {
+  assert.deepEqual(L.captionStyle(undefined), { captionBg: 0.6, captionSize: "medium", captionPosition: "default" });
+  assert.deepEqual(L.captionStyle({ captionBg: 0, captionSize: "large", captionPosition: "higher" }),
+    { captionBg: 0, captionSize: "large", captionPosition: "higher" });
+  for (const bad of [{ captionBg: 0.5 }, { captionBg: "0.3" }, { captionBg: -1 }, { captionBg: NaN }, { captionBg: null }]) {
+    assert.equal(L.captionStyle(bad).captionBg, 0.6, JSON.stringify(bad));
+  }
+  for (const bad of ["huge", "", "medium; color: red", "url(x)", 1, {}]) {
+    assert.equal(L.captionStyle({ captionSize: bad }).captionSize, "medium");
+    assert.equal(L.captionStyle({ captionPosition: bad }).captionPosition, "default");
+  }
+});
+
+test("captionVars: numbers only, mapped from the choices", () => {
+  assert.deepEqual(L.captionVars({}), { "--cap-bg": "0.6", "--cap-scale": "1", "--cap-lift": "0px", "--cap-shadow": "0" });
+  assert.deepEqual(L.captionVars({ captionBg: 0, captionSize: "small", captionPosition: "lower" }),
+    { "--cap-bg": "0", "--cap-scale": "0.85", "--cap-lift": "-8px", "--cap-shadow": "0.9" });
+  assert.deepEqual(L.captionVars({ captionBg: 0.8, captionSize: "large", captionPosition: "higher" }),
+    { "--cap-bg": "0.8", "--cap-scale": "1.2", "--cap-lift": "24px", "--cap-shadow": "0" });
+  assert.equal(L.captionVars({ captionBg: 0.3 })["--cap-shadow"], "0.9");
+  assert.equal(L.captionVars({ captionBg: 0.45 })["--cap-shadow"], "0");
+  // Whatever storage held, every value is a bare number (and px), never a CSS fragment.
+  for (const junk of [{ captionBg: "1;}body{display:none" }, { captionSize: "x" }, { captionPosition: "url(a)" }]) {
+    for (const v of Object.values(L.captionVars(junk))) assert.match(v, /^-?\d+(\.\d+)?(px)?$/);
+  }
+  // Every size choice maps to a scale.
+  for (const size of L.CAPTION_CHOICES.captionSize.values) assert.ok(L.captionVars({ captionSize: size })["--cap-scale"]);
+});

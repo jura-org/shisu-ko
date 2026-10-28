@@ -8,7 +8,11 @@
   const SETTINGS_KEY = "portal.settings";
   const RECENT_KEY = "portal.recent";
   // wordColours is off by default, like the extension's cardStatus.
-  const DEFAULTS = { pauseOnLookup: true, lookupResume: "tap", autoPause: false, speed: 1, listening: false, furigana: false, sweep: true, wordColours: false };
+  // captionBg, captionSize and captionPosition are Settings > Subtitle style (lib.js captionStyle()).
+  const DEFAULTS = {
+    pauseOnLookup: true, lookupResume: "tap", autoPause: false, speed: 1, listening: false, furigana: false, sweep: true, wordColours: false,
+    ...L.captionStyle(null),
+  };
   const SPEEDS = [0.75, 1, 1.25, 1.5];
   const SYNC_PLAYING_MS = 1000;
   const SYNC_PAUSED_MS = 5000;
@@ -42,6 +46,7 @@
   }
   if (!SPEEDS.includes(settings.speed)) settings.speed = 1;
   if (settings.lookupResume !== "line") settings.lookupResume = "tap"; // "tap" or "line": lib.js lookupResume()
+  Object.assign(settings, L.captionStyle(settings)); // an unknown stored choice is the default
 
   const state = {
     videoId: null,
@@ -1842,6 +1847,10 @@
     $("btn-replay").addEventListener("click", replayLine);
     $("btn-play").addEventListener("click", togglePlay);
     $("btn-settings").addEventListener("click", openSettings);
+    $("btn-corner-settings").addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      openSettings();
+    });
     $("back-to-now").addEventListener("click", exitBrowse);
     $("btn-home").addEventListener("click", (ev) => {
       ev.stopPropagation();
@@ -2438,13 +2447,13 @@
 
   // Drag a sheet down to dismiss, from its content once that is scrolled to the top. No handle is
   // drawn: the drag is a shortcut, and a tap outside or the close button is the visible way out.
-  // The word sheet in the landscape mode is a side panel and is dragged right instead.
+  // Every sheet in the landscape mode is a side panel and is dragged right instead.
   // The dismissal runs in touchend, so a resume inside it is still a gesture.
   function makeDraggable(sheet, scroller, onDismiss) {
     let drag = null;
     sheet.addEventListener("touchstart", (ev) => {
       if (!sheet.classList.contains("open") || ev.target.closest("button, input, summary")) return;
-      const side = state.landscape.on && sheet.classList.contains("word-sheet");
+      const side = state.landscape.on; // every sheet is a side panel in the landscape mode
       drag = { x: ev.touches[0].clientX, y: ev.touches[0].clientY, dy: 0, active: false, side };
     }, { passive: true });
     sheet.addEventListener("touchmove", (ev) => {
@@ -2453,7 +2462,8 @@
       // Along the way out (down, or right for the side panel), and across it.
       const [dy, across] = drag.side ? [d.dx, d.dy] : [d.dy, d.dx];
       if (!drag.active) {
-        if (dy > 8 && (drag.side ? Math.abs(across) < dy : scroller.scrollTop <= 0)) {
+        const scrolled = (typeof scroller === "function" ? scroller() : scroller).scrollTop;
+        if (dy > 8 && (drag.side ? Math.abs(across) < dy : scrolled <= 0)) {
           drag.active = true;
           sheet.classList.add("dragging");
         } else if (Math.max(Math.abs(dy), drag.side ? Math.abs(across) : 0) > 8) {
@@ -2489,6 +2499,14 @@
     $("set-sweep").checked = settings.sweep;
     $("set-colours").checked = settings.wordColours;
     for (const b of $("set-speed").children) b.classList.toggle("on", Number(b.dataset.speed) === settings.speed);
+    for (const [id, key] of CAPTION_CONTROLS) {
+      for (const b of $(id).children) {
+        const on = b.dataset.value === String(settings[key]);
+        b.classList.toggle("on", on);
+        b.setAttribute("aria-checked", String(on));
+      }
+    }
+    applyCaptionStyle();
     // Furigana and the word colours change every cue's markup; redraw the list once when one flips.
     const drawn = `${settings.furigana} ${settings.wordColours}`;
     if (state.drawnWith !== undefined && state.drawnWith !== drawn) redrawRows();
@@ -2497,7 +2515,56 @@
     updateVeil();
   }
 
+  // Settings > Subtitle style: each control, the setting it sets, and its choices' labels.
+  const CAPTION_CONTROLS = [["set-caption-bg", "captionBg"], ["set-caption-size", "captionSize"], ["set-caption-position", "captionPosition"]];
+  const CAPTION_LABELS = {
+    captionBg: (v) => (v === 0 ? S.captionNone : `${Math.round(v * 100)}%`),
+    captionSize: (v) => S[`caption${v[0].toUpperCase()}${v.slice(1)}`],
+    captionPosition: (v) => S[`caption${v[0].toUpperCase()}${v.slice(1)}`],
+  };
+
+  // The landscape caption box's look, through custom properties holding numbers only (lib.js
+  // captionVars() clamps them): app.css's html.landscape .cue and the sample box read them.
+  function applyCaptionStyle() {
+    const root = document.documentElement;
+    for (const [name, value] of Object.entries(L.captionVars(settings))) root.style.setProperty(name, value);
+  }
+
+  // The Subtitle style page, pushed over the main list inside the same sheet.
+  function showSettingsPage(sub, animate = true) {
+    const sheet = $("settings");
+    const pages = sheet.querySelector(".sheet-pages");
+    pages.classList.toggle("instant", !animate);
+    sheet.classList.toggle("sub", sub);
+    $("settings-title").textContent = sub ? S.subtitleStyle : S.settings;
+    $("settings-back").hidden = !sub;
+    for (const [id, shown] of [["settings-main", !sub], ["settings-style", sub]]) {
+      $(id).inert = !shown;
+      $(id).setAttribute("aria-hidden", String(!shown));
+    }
+    if (sub) $("settings-style").scrollTop = 0;
+    void pages.offsetWidth;
+    pages.classList.remove("instant");
+  }
+
   function bindSettings() {
+    for (const [id, key] of CAPTION_CONTROLS) {
+      for (const value of L.CAPTION_CHOICES[key].values) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.dataset.value = String(value);
+        b.setAttribute("role", "radio");
+        b.textContent = CAPTION_LABELS[key](value);
+        b.addEventListener("click", () => {
+          settings[key] = value;
+          saveSettings();
+          applySettings();
+        });
+        $(id).append(b);
+      }
+    }
+    $("set-style").addEventListener("click", () => showSettingsPage(true));
+    $("settings-back").addEventListener("click", () => showSettingsPage(false));
     const seg = $("set-speed");
     for (const speed of SPEEDS) {
       const b = document.createElement("button");
@@ -2533,7 +2600,7 @@
     $("settings").querySelector(".sheet-close").addEventListener("click", closeSettings);
     $("set-anki").addEventListener("click", openAnkiSetup);
     bindAnkiSetup();
-    makeDraggable($("settings"), $("settings").querySelector(".sheet-scroll"), closeSettings);
+    makeDraggable($("settings"), () => $($("settings").classList.contains("sub") ? "settings-style" : "settings-main"), closeSettings);
     applySettings();
   }
 
@@ -2544,6 +2611,7 @@
     renderWatchHistory();
     closeSheet();
     renderServerStatus();
+    showSettingsPage(false, false); // always opens on the main list
     $("settings").classList.add("open");
     $("settings").setAttribute("aria-hidden", "false");
     $("settings-backdrop").classList.add("open");

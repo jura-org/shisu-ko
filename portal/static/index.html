@@ -46,6 +46,10 @@
         <svg class="icon-expand" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4.5h5.5V10M10 19.5H4.5V14M19.5 4.5 14 10M4.5 19.5 10 14"/></svg>
         <svg class="icon-collapse" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 10H14V4.5M4.5 14H10v5.5M14 10l5.5-5.5M10 14l-5.5 5.5"/></svg>
       </button>
+      <!-- Settings in the landscape mode, which has no toolbar: the top right corner. -->
+      <button id="btn-corner-settings" class="btn-home btn-corner-settings" type="button" data-s-label="settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg>
+      </button>
       <div id="shield" class="shield">
         <svg class="shield-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z"/></svg>
       </div>
@@ -107,10 +111,13 @@
   <div id="settings-backdrop" class="backdrop"></div>
   <section id="settings" class="sheet settings-sheet" role="dialog" aria-label="Settings" aria-hidden="true">
     <div class="sheet-head">
-      <h2 class="sheet-title">Settings</h2>
+      <button id="settings-back" class="sheet-back" type="button" data-s-label="back" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 5 7.5 12l7 7"/></svg></button>
+      <h2 id="settings-title" class="sheet-title" data-s="settings">Settings</h2>
       <button class="sheet-close" type="button" data-s-label="close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 7.5l9 9M16.5 7.5l-9 9"/></svg></button>
     </div>
-    <div class="sheet-scroll">
+    <!-- Two pages in one sheet, pushed sideways as in iOS Settings: the main list and Subtitle style. -->
+    <div class="sheet-pages">
+    <div id="settings-main" class="sheet-scroll sheet-page page-main">
       <h3 class="group-label">Playback</h3>
       <div class="group">
         <label class="row-item">Auto-pause after each line<input id="set-autopause" type="checkbox" role="switch" class="switch"></label>
@@ -130,6 +137,7 @@
         <label class="row-item">Furigana<input id="set-furigana" type="checkbox" role="switch" class="switch"></label>
         <label class="row-item">Word colours<input id="set-colours" type="checkbox" role="switch" class="switch"></label>
         <label class="row-item">Listening mode<input id="set-listening" type="checkbox" role="switch" class="switch"></label>
+        <button id="set-style" class="row-item link" type="button"><span data-s="subtitleStyle">Subtitle style</span><span class="chevron" aria-hidden="true"></span></button>
       </div>
       <p class="group-note">Listening mode hides the text while the video plays.</p>
       <h3 class="group-label">Anki</h3>
@@ -147,6 +155,23 @@
         <div id="set-watch-history" class="row-item status-text" hidden></div>
       </div>
       <p id="player-note" class="group-note" hidden data-s="usingYouTube">Using YouTube's player</p>
+    </div>
+    <div id="settings-style" class="sheet-scroll sheet-page page-sub" aria-hidden="true" inert>
+      <!-- The caption box as it will look; the landscape mode shows the real one beside the sheet. -->
+      <div class="caption-sample" aria-hidden="true"><span class="caption-sample-box" lang="ja" data-s="captionSample"></span></div>
+      <div class="group">
+        <div class="row-item stacked"><span id="style-bg-label" data-s="captionBackground">Background</span>
+          <div id="set-caption-bg" class="segmented" role="radiogroup" aria-labelledby="style-bg-label"></div>
+        </div>
+        <div class="row-item stacked"><span id="style-size-label" data-s="captionSize">Text size</span>
+          <div id="set-caption-size" class="segmented" role="radiogroup" aria-labelledby="style-size-label"></div>
+        </div>
+        <div class="row-item stacked"><span id="style-pos-label" data-s="captionPosition">Position</span>
+          <div id="set-caption-position" class="segmented" role="radiogroup" aria-labelledby="style-pos-label"></div>
+        </div>
+      </div>
+      <p class="group-note" data-s="captionStyleNote">For the subtitle over the video in the landscape mode.</p>
+    </div>
     </div>
   </section>
 

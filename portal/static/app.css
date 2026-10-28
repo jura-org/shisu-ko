@@ -473,6 +473,45 @@ rt { font-size: 0.45em; color: var(--label-2); font-weight: 400; }
 .sheet-close::before { content: ""; position: absolute; width: 30px; height: 30px; border-radius: 50%; background: var(--fill); }
 .sheet-close svg { position: relative; width: 16px; height: 16px; stroke-width: 2.4; }
 .sheet-close:active { opacity: 0.45; }
+/* A sub-page's way back, the close button's twin at the left edge. */
+.sheet-back { position: absolute; top: -7px; left: calc(13px + var(--safe-left)); width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; color: var(--accent); }
+.sheet-back[hidden] { display: none; }
+.sheet-back svg { width: 22px; height: 22px; stroke-width: 2.4; }
+.sheet-back:active { opacity: 0.45; }
+
+/* Settings' pages share one grid cell and slide sideways: the sub-page in from the right, the main
+   list a little to the left beneath it, as iOS Settings pushes a page. Each page scrolls itself. */
+.sheet-pages { flex: 0 1 auto; min-height: 0; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); overflow: hidden; }
+.sheet-page { grid-area: 1 / 1; transition: transform 0.35s var(--spring), visibility 0.35s; }
+.page-sub { transform: translateX(100%); visibility: hidden; }
+.settings-sheet.sub .page-main { transform: translateX(-30%); visibility: hidden; }
+.settings-sheet.sub .page-sub { transform: none; visibility: visible; }
+.sheet-pages.instant .sheet-page { transition: none; }
+.row-item.stacked { flex-direction: column; align-items: stretch; gap: 8px; padding: 10px 16px 12px; }
+.row-item.stacked .segmented button { flex: 1 1 0; min-width: 0; }
+
+/* The caption box as Subtitle style sets it, over a stand-in for a picture so its transparency
+   shows. The same custom properties as the landscape box (app.js applyCaptionStyle()). */
+.caption-sample {
+  height: 120px;
+  margin: 4px 0 16px;
+  border-radius: 10px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: calc(14px + var(--cap-lift, 0px));
+  background: linear-gradient(135deg, #5b7fa6, #c9a46b 55%, #e8e1d0);
+  overflow: hidden;
+}
+.caption-sample-box {
+  padding: 0.12em 0.45em;
+  border-radius: 0.3em;
+  background: rgba(0, 0, 0, var(--cap-bg, 0.6));
+  color: #fff;
+  font-size: calc(20px * var(--cap-scale, 1));
+  line-height: 1.35;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, var(--cap-shadow, 0)), 0 0 2px rgba(0, 0, 0, var(--cap-shadow, 0));
+}
 .group-label { font-size: 13px; font-weight: 400; text-transform: uppercase; color: var(--label-2); margin: 24px 16px 8px; letter-spacing: 0.02em; }
 .group { background: var(--grouped); border-radius: 10px; overflow: hidden; }
 .group-note { font-size: 13px; color: var(--label-2); margin: 8px 16px 0; }
@@ -728,11 +767,13 @@ html.landscape .watch {
   --edge-b: max(20px, var(--safe-bottom));
   --edge-l: max(20px, var(--safe-left));
   --ctl-h: 44px; /* the controls row: the scrubber and the exit button */
-  --sub-rest: max(14px, var(--safe-bottom)); /* the subtitle box's bottom, controls hidden */
+  --sub-rest: max(calc(14px + var(--cap-lift, 0px)), var(--safe-bottom)); /* the subtitle box's bottom, controls hidden; Subtitle style's Position moves it */
   --sub-up: calc(var(--edge-b) + var(--ctl-h) + 6px); /* and with the controls showing */
 }
 html.landscape .btn-home { top: var(--edge-t); left: var(--edge-l); }
 html.landscape .btn-full { top: auto; left: auto; right: var(--edge-r); bottom: var(--edge-b); }
+.btn-corner-settings { display: none; }
+html.landscape .btn-corner-settings { display: flex; left: auto; top: var(--edge-t); right: var(--edge-r); }
 html.landscape .toolbar, html.landscape .toolbar-space { display: none; }
 /* While the controls show, a soft shade under them keeps the times readable over a bright picture;
    it goes with them. Nothing else darkens the video. */
@@ -780,14 +821,16 @@ html.landscape .cue {
   margin: 0 auto 14px;
   padding: 0.12em 0.45em;
   border-radius: 0.3em;
-  background: rgba(0, 0, 0, 0.6);
+  /* Settings > Subtitle style: --cap-bg, --cap-scale and --cap-shadow (app.js applyCaptionStyle()). */
+  background: rgba(0, 0, 0, var(--cap-bg, 0.6));
   font-size: 24px;
-  font-size: clamp(18px, 6.2cqh, 40px);
+  font-size: clamp(calc(18px * var(--cap-scale, 1)), calc(6.2cqh * var(--cap-scale, 1)), calc(40px * var(--cap-scale, 1)));
   line-height: 1.35;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, var(--cap-shadow, 0)), 0 0 2px rgba(0, 0, 0, var(--cap-shadow, 0));
   pointer-events: auto;
 }
 html.landscape .cue.furigana { line-height: 1.95; }
-html.landscape .cue.active .tok.now { text-shadow: none; } /* a glow on the box only greys it */
+html.landscape .cue.active .tok.now { text-shadow: inherit; } /* a glow on the box only greys it; the box's own shadow stays */
 /* The picked word must show on the dark box: twice the portrait view's light. */
 html.landscape .cue .tok.picked { background: rgba(255, 255, 255, 0.28); }
 html.landscape .cue::highlight(picked), html.landscape .cue ::highlight(picked) { background-color: rgba(255, 255, 255, 0.28); color: var(--label); }
@@ -847,7 +890,36 @@ html.landscape .word-sheet {
 html.landscape .word-sheet.open { transform: translateX(0); }
 html.landscape .word-sheet .sheet-scroll { flex: 1 1 auto; padding: 0 calc(20px + var(--safe-right)) 8px 20px; }
 html.landscape .word-sheet .sheet-foot { padding: 8px calc(16px + var(--safe-right)) calc(8px + var(--safe-bottom)) 16px; }
-html.landscape .settings-sheet { max-height: 88%; }
+/* Settings and the Anki setup are a side panel too, so the caption box stays in sight beside them
+   (Subtitle style shows its changes on the real box), the line moved out of their way; the
+   backdrop only catches the tap that closes them. */
+html.landscape .settings-sheet {
+  left: auto;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--side-w);
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding-top: calc(12px + var(--safe-top));
+  border-radius: 14px 0 0 14px;
+  transform: translateX(calc(100% + 24px));
+}
+html.landscape .settings-sheet.open { transform: translateX(0); }
+html.landscape .settings-sheet .sheet-head { padding-right: calc(20px + var(--safe-right)); }
+html.landscape .settings-sheet .sheet-close { right: calc(13px + var(--safe-right)); }
+html.landscape .settings-sheet .sheet-scroll { padding: 0 calc(20px + var(--safe-right)) calc(8px + var(--safe-bottom)) 20px; }
+html.landscape .backdrop { background: transparent; }
+html.landscape .caption-sample { display: none; }
+html.landscape:has(.settings-sheet.open) .lyrics-track { padding: 0 calc(var(--side-w) + 16px) 0 calc(var(--edge-l) + 8px); }
+/* Meanwhile the line sits where it rests while the video plays, over the bare picture: the
+   controls and the pause scrim out of its way, so Position and Background show what they do. */
+html.landscape:has(.settings-sheet.open) .watch #lyrics { transform: none; }
+html.landscape:has(.settings-sheet.open) .watch .scrubber,
+html.landscape:has(.settings-sheet.open) .watch .player-box::after,
+html.landscape:has(.settings-sheet.open) .watch .shield-play { opacity: 0; visibility: hidden; }
+html.landscape:has(.settings-sheet.open) .watch .shield { background: none; }
 html.switching .sheet, html.switching .lyrics-track, html.switching .scrubber, html.switching #lyrics { transition: none !important; }
 @media (prefers-reduced-motion: reduce) {
   html.landscape .scrubber, html.landscape #lyrics, html.landscape .player-box::after { transition: none; }
