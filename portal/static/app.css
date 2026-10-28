@@ -664,8 +664,19 @@ html.landscape .watch {
   --strip-h: clamp(88px, 32%, 168px);
 }
 html.landscape .player-box { position: absolute; inset: 0; width: auto; max-height: none; aspect-ratio: auto; }
-html.landscape .btn-home { top: calc(4px + var(--safe-top)); left: calc(4px + var(--safe-left)); }
-html.landscape .btn-full { top: auto; left: auto; right: calc(4px + var(--safe-right)); bottom: var(--strip-h); }
+/* The corner buttons keep 20 px from every physical screen edge and stay inside the safe area, in
+   both the turned and the plain layout (the --safe-* above already name the view's edges). iOS
+   keeps the screen's edges for itself: the status bar and Control Center's corner, Notification
+   Center's top edge and the home indicator. Hugging an edge 4 px away (as before) put a button in
+   reach of those gestures. Each is a 44 x 44 px target, absolutely placed in the player box. */
+html.landscape .watch {
+  --edge-t: max(20px, var(--safe-top));
+  --edge-r: max(20px, var(--safe-right));
+  --edge-b: max(20px, var(--safe-bottom));
+  --edge-l: max(20px, var(--safe-left));
+}
+html.landscape .btn-home { top: var(--edge-t); left: var(--edge-l); }
+html.landscape .btn-full { top: auto; left: auto; right: var(--edge-r); bottom: var(--strip-h); }
 html.landscape .toolbar, html.landscape .toolbar-space { display: none; }
 
 html.landscape #lyrics {
@@ -690,11 +701,11 @@ html.landscape .back-to-now { top: 8px; bottom: auto; left: auto; right: calc(16
 html.landscape .scrubber {
   z-index: 5;
   left: 0;
-  right: calc(52px + var(--safe-right)); /* the exit button's room: the bar must not cover it */
+  right: calc(48px + var(--edge-r)); /* the exit button's room: the bar must not cover it */
   max-width: none;
   margin: 0;
   bottom: var(--strip-h);
-  padding: 0 4px 0 calc(20px + var(--safe-left));
+  padding: 0 4px 0 var(--edge-l);
   opacity: 0;
   visibility: hidden;
   transition: opacity 0.25s var(--spring), visibility 0.25s;
