@@ -7,10 +7,15 @@ How `server/server.py` plans windows, decodes them and turns Whisper output into
 `plan_window()` in `server/server.py` decides what to transcribe next: if the playhead is not
 inside a covered range, a short `--first-window` (20 s) starts at the playhead; otherwise the next
 `--window` (30 s) continues from the end of the covered range, up to `--lookahead` seconds ahead.
-`--lookahead` is 180 s (it was 900): the buffer only absorbs variance in how fast it refills, and the
-GPU refills it at 4-13x realtime (large-v3 on an RTX 3090, a week of logs), so 180 s survives long GPU
-contention while an abandoned video costs at most 3 minutes of decode past where the viewer left, plus
-the one window that starts at the limit (`plan_window()` stops only once the covered end is past it).
+Without the flag the backend the model loaded on decides (`default_lookahead_for()`, settled by
+`App.settle_lookahead()`, again after a switch or a CPU fallback): 180 s on CUDA, 900 s on MLX and the
+CPU. The buffer only absorbs variation in refill speed. On CUDA the GPU refills at 4-13x real time
+(large-v3 on an RTX 3090), so 180 s is ample. With 900 the server decoded about 15 minutes ahead
+within the first 80 s of watching, so a viewer who stopped N minutes in cost N+15 minutes of decode;
+now it is N+3, plus the one window that starts at the limit. A closed tab already stopped costing
+after `--client-timeout`. MLX and the CPU refill near real time or slower, so they keep 900: there a
+pause is the viewer's cushion. The extension does not know the number: a paused tab syncs every
+second only while nothing is covered at the playhead, then every 5 s (`shouldSync()`).
 30 s is faster-whisper's own chunk, and that is why the window is no longer 40: with
 `condition_on_previous_text` false the library drops the initial prompt after the first chunk of a
 call (checked in 1.2.1), so a 40 s window decoded its last ten seconds unprompted.
