@@ -668,8 +668,8 @@ html.landscape.turned body {
   bottom: auto;
   width: 100vh;
   height: 100vw;
-  width: 100dvh;
-  height: 100dvw;
+  width: var(--turn-w, 100dvh); /* app.js viewChanged(): the viewport's own px */
+  height: var(--turn-h, 100dvw);
   transform-origin: 0 0;
   transform: rotate(90deg) translateY(-100%);
 }

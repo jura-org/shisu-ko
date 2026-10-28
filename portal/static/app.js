@@ -1217,6 +1217,11 @@
     const turned = state.landscape.on && L.shouldTurn(window.innerWidth, window.innerHeight);
     if (turned !== root.classList.contains("turned")) root.classList.add("switching");
     root.classList.toggle("turned", turned);
+    // The turned body is the viewport the other way round, in the viewport's own px: dvh/dvw can
+    // disagree with the layout viewport the fixed body fills (a browser bar, a stale value), and
+    // then the whole view slid sideways, its top cut off and closed sheets peeking past its bottom.
+    root.style.setProperty("--turn-w", turned ? `${window.innerHeight}px` : "");
+    root.style.setProperty("--turn-h", turned ? `${window.innerWidth}px` : "");
     state.focusKey = null;
     if (state.sheet.open) capSheet(state.sheet.cue);
     measureScrubber();
@@ -1933,6 +1938,8 @@
     }, { passive: false });
 
     window.addEventListener("resize", viewChanged);
+    // iOS reports a browser bar coming or going here, not always as a window resize.
+    if (window.visualViewport) window.visualViewport.addEventListener("resize", viewChanged);
   }
 
   // ------------------------------------------------------------ the word sheet
