@@ -150,6 +150,10 @@ DEFAULT_MODEL = "large-v3"  # --model when neither the flag nor config.json name
 # decoder layers instead of thirty-two and 1.5 GB of weights, so it fits and stays at 7.9x real
 # time with the browser running, for one misheard word in the twenty-two lines of that window.
 MLX_DEFAULT_MODEL = "large-v3-turbo"
+# --lookahead when the operator gives none, by the backend the model runs on (default_lookahead_for()).
+# The buffer ahead of the playhead only absorbs variation in how fast it refills.
+CUDA_LOOKAHEAD = 180.0  # an NVIDIA GPU refills at 4-13x real time: 3 minutes outlast any slowdown measured
+SLOW_LOOKAHEAD = 900.0  # MLX and the CPU refill near real time or slower: a pause is how the viewer gets ahead
 # Kitsune-Transcribe's Japanese students (kitsune_engine.py), by name. Each repo holds the training
 # run's bf16 export at its root (the bare name) and each precision in a folder of its own, as
 # `python -m kitsune.quant export` writes it: kitsune-0.6b-int8 loads <repo>/int8-w8a16.
@@ -6386,6 +6390,10 @@ class App:
         self.model = model
         self.device = device
         self.compute_type = compute_type
+        # The operator's --lookahead holds whatever runs; without one it follows the loaded model's
+        # backend, which a switch or a CPU fallback can change (settle_lookahead()).
+        self.lookahead_given = getattr(args, "lookahead", None) is not None
+        self.settle_lookahead()
         # Which model is loaded, which one the client last asked for, and how the last switch went.
         # Only the transcriber thread replaces self.model (switch_model_if_wanted, between windows),
         # so the HTTP threads never touch a model that is being freed or loaded. Names are kept in
@@ -6583,6 +6591,7 @@ class App:
             self.model_name = wanted
             self.model_loading = None
             self.model_error = None
+        self.settle_lookahead()
         self.restart_sessions()
         return True
 
@@ -6661,6 +6670,18 @@ class App:
         with self.lock:
             self.model, self.device, self.compute_type = loaded
             self.model_loading = None
+        self.settle_lookahead()
+
+    def settle_lookahead(self) -> None:
+        """Set args.lookahead, which every planner reads, to the default for the backend now loaded,
+        unless the operator gave --lookahead (0 included)."""
+        if self.lookahead_given:
+            return
+        lookahead = default_lookahead_for(self.device)
+        if getattr(self.args, "lookahead", None) != lookahead:
+            self.args.lookahead = lookahead
+            log.info("Transcribing up to %d s ahead of the playhead on %s (--lookahead changes it)",
+                     lookahead, self.device)
 
     def restart_sessions(self) -> None:
         with self.lock:
@@ -7556,6 +7577,11 @@ def resolve_device(device: str) -> str:
     if mlx_available():
         return "mlx"
     return "cuda" if cuda_available() else "cpu"
+
+
+def default_lookahead_for(device: str) -> float:
+    """The built-in --lookahead for a backend resolve_device() named; see CUDA_LOOKAHEAD and SLOW_LOOKAHEAD."""
+    return CUDA_LOOKAHEAD if device == "cuda" else SLOW_LOOKAHEAD
 
 
 def mlx_repo_for(name: str) -> str:
@@ -8928,6 +8954,8 @@ def run_check(device: str = "auto") -> None:
     print("Downloaded models: " + (", ".join(models) if models else "none yet (setup or the first start downloads one)"))
     chosen = configured_model()
     print(f"Default model: {chosen or default_model_for(device)} " + ("(chosen at setup)" if chosen else "(built-in default)"))
+    print(f"Default lookahead: {default_lookahead_for(resolve_device(device)):.0f} s ahead of the playhead "
+          "(built-in default for that backend; --lookahead changes it)")
     browser = configured_cookies_browser()
     if browser:
         print(f"YouTube sign-in: {browser}'s cookies go with every download (chosen at setup)"
@@ -9018,7 +9046,9 @@ def parse_args(argv=None):
                         "in --language, see DEFAULT_PROMPTS; pass an empty string for none)")
     p.add_argument("--window", type=float, default=30.0, help="seconds of audio transcribed per step (shorter reacts faster to seeking; 30 is faster-whisper's own chunk, and the initial prompt reaches only the first chunk of a window)")
     p.add_argument("--first-window", type=float, default=20.0, help="shorter first step after a seek so subtitles appear quickly")
-    p.add_argument("--lookahead", type=float, default=180.0, help="stop transcribing this many seconds ahead of the playhead (0 = whole video)")
+    p.add_argument("--lookahead", type=float, default=None,
+                   help="stop transcribing this many seconds ahead of the playhead (0 = whole video; "
+                        f"default: {CUDA_LOOKAHEAD:.0f} on an NVIDIA GPU, {SLOW_LOOKAHEAD:.0f} on the Apple GPU or the CPU)")
     p.add_argument("--max-cue-chars", type=int, default=30, help="26 is the Netflix Japanese limit (13 x 2 lines); 30 keeps more mined sentences whole")
     p.add_argument("--max-cue-seconds", type=float, default=7.0)
     p.add_argument("--min-cue-seconds", type=float, default=0.8, help="cues shorter than this are extended or merged")

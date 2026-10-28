@@ -205,9 +205,48 @@ def test_plan_window_stops_at_lookahead_limit():
     assert server.plan_window(s, make_args(lookahead=10.0)) is None
 
 
-def test_default_lookahead_stops_planning_three_minutes_ahead():
-    args = server.parse_args([])
-    assert args.lookahead == 180.0
+def test_default_lookahead_is_left_to_the_backend():
+    # No flag: parse_args() leaves it open, and the loaded model's backend decides.
+    assert server.parse_args([]).lookahead is None
+    assert server.default_lookahead_for("cuda") == 180.0
+    assert server.default_lookahead_for("mlx") == 900.0
+    assert server.default_lookahead_for("cpu") == 900.0
+
+
+def lookahead_app(monkeypatch, tmp_path, device, argv=()):
+    monkeypatch.setattr(server, "CACHE_DIR", tmp_path)
+    args = server.parse_args(["--model", "large-v3", *argv])
+    return server.App(args, model=None, device=device, compute_type="float16")
+
+
+@pytest.mark.parametrize("device, expected", [("cuda", 180.0), ("mlx", 900.0), ("cpu", 900.0)])
+def test_app_resolves_the_default_lookahead_for_its_backend(monkeypatch, tmp_path, device, expected):
+    assert lookahead_app(monkeypatch, tmp_path, device).args.lookahead == expected
+
+
+@pytest.mark.parametrize("given", ["300", "0"])
+def test_an_explicit_lookahead_wins_on_every_backend(monkeypatch, tmp_path, given):
+    for device in ("cuda", "mlx", "cpu"):
+        app = lookahead_app(monkeypatch, tmp_path, device, ["--lookahead", given])
+        assert app.args.lookahead == float(given), device
+        app.device = "cpu" if device == "cuda" else "cuda"  # a switch or a CPU fallback moves nothing
+        app.settle_lookahead()
+        assert app.args.lookahead == float(given), device
+
+
+def test_the_default_lookahead_follows_a_backend_change(monkeypatch, tmp_path):
+    # A CUDA load that fell back to the CPU refills near real time: the slow default applies.
+    app = lookahead_app(monkeypatch, tmp_path, "cuda")
+    app.device = "cpu"
+    app.settle_lookahead()
+    assert app.args.lookahead == 900.0
+    app.device = "cuda"
+    app.settle_lookahead()
+    assert app.args.lookahead == 180.0
+
+
+def test_default_lookahead_on_cuda_stops_planning_three_minutes_ahead(monkeypatch, tmp_path):
+    args = lookahead_app(monkeypatch, tmp_path, "cuda").args
 
     def session(covered_end):
         return server.Session(
