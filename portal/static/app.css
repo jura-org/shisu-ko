@@ -465,10 +465,11 @@ rt { font-size: 0.45em; color: var(--label-2); font-weight: 400; }
 .settings-sheet { max-height: 88vh; background: #000; }
 .settings-sheet .sheet-scroll { padding-bottom: calc(24px + var(--safe-bottom)); }
 .sheet-title { font-size: 17px; font-weight: 600; text-align: center; margin: 0 0 8px; }
-/* The title row of a tall sheet: the title centred, its close button at the right edge. */
-.sheet-head { position: relative; }
+/* The title row of a tall sheet, outside its scroller so it never scrolls away: the title centred,
+   its close button at the right edge, a whole 44 x 44 px target centred on the title's line. */
+.sheet-head { flex: none; position: relative; padding: 0 calc(20px + var(--safe-right)) 0 calc(20px + var(--safe-left)); }
 .sheet-head .sheet-title { padding: 0 44px; line-height: 30px; }
-.sheet-close { position: absolute; top: -7px; right: -7px; width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; color: var(--label-2); }
+.sheet-close { position: absolute; top: -7px; right: calc(13px + var(--safe-right)); width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; color: var(--label-2); }
 .sheet-close::before { content: ""; position: absolute; width: 30px; height: 30px; border-radius: 50%; background: var(--fill); }
 .sheet-close svg { position: relative; width: 16px; height: 16px; stroke-width: 2.4; }
 .sheet-close:active { opacity: 0.45; }
