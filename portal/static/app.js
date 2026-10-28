@@ -1854,7 +1854,6 @@
       showControls(); // the controls stay up a moment in the new layout
     });
     for (const name of ["fullscreenchange", "webkitfullscreenchange"]) document.addEventListener(name, onFullscreenChange);
-    window.addEventListener("orientationchange", viewChanged);
 
     // The shield over the video, as in YouTube's app (lib.js shieldTap()): the middle plays or
     // pauses; a double tap on a side steps a line, each further tap one more. A lone side tap
@@ -1970,9 +1969,23 @@
       browseIdle();
     }, { passive: false });
 
-    window.addEventListener("resize", viewChanged);
-    // iOS reports a browser bar coming or going here, not always as a window resize.
-    if (window.visualViewport) window.visualViewport.addEventListener("resize", viewChanged);
+    // iOS reports a browser bar coming or going on the visual viewport, not always as a window
+    // resize. Both land in one frame's single check, and only a new window size re-lays the view:
+    // a pinch or the keyboard resizes the visual viewport alone, and a rotation fires all three.
+    let sized = `${window.innerWidth}x${window.innerHeight}`;
+    let pending = 0;
+    const resized = () => {
+      if (pending) return;
+      pending = requestAnimationFrame(() => {
+        pending = 0;
+        const size = `${window.innerWidth}x${window.innerHeight}`;
+        if (size === sized) return;
+        sized = size;
+        viewChanged();
+      });
+    };
+    for (const name of ["resize", "orientationchange"]) window.addEventListener(name, resized);
+    if (window.visualViewport) window.visualViewport.addEventListener("resize", resized);
   }
 
   // ------------------------------------------------------------ the word sheet
