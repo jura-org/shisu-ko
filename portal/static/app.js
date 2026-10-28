@@ -1796,10 +1796,10 @@
   }
 
   // Back always means the line before, wherever the playhead sits in this one (as in the
-  // extension). Nothing happens at either end.
+  // extension); on the first line it replays that line. Forward on the last line does nothing.
   function stepLine(delta) {
-    const { idx, moved } = L.stepTarget(state.cues.length, lineNow(), delta);
-    if (moved) seek(state.cues[idx].start, true);
+    const { idx } = L.stepTarget(state.cues.length, lineNow(), delta);
+    if (idx >= 0) seek(state.cues[idx].start, true);
   }
 
   // The controls (back, exit, scrubber) for 3 s, as after any tap on the video.
@@ -1887,10 +1887,10 @@
           state.stepIdx = null;
         }
         const { idx, moved } = L.stepTarget(state.cues.length, state.stepBase, tap.delta);
-        if (!moved) return; // no line that way: nothing seeks, no badge claims a step
+        if (idx < 0) return; // no line that way: nothing seeks, no badge claims a step
         if (idx !== state.stepIdx) seek(state.cues[idx].start, true); // past the end, taps repeat nothing
         state.stepIdx = idx;
-        showStepBadge(zone, moved, landscape);
+        if (moved) showStepBadge(zone, moved, landscape); // a replay of the first line moved no line
         return;
       }
       if (tap.action === "controls-later") {

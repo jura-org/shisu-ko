@@ -325,8 +325,9 @@ A run counts from the line being said when it began, read from the player's own 
 (`lineNow()`), and each tap lands at `stepTarget()`: back is the line before wherever the playhead
 sits in the line (the extension's rule), and the run clamps at the list's ends. The badge on that
 side reads the lines really moved, "1 line »" or "« 3 lines", and covers exactly the side zone
-(`TAP_MIDDLE`, `sideShare()`). A step with no line that way (back on the first, forward on the
-last) seeks nothing and shows no badge.
+(`TAP_MIDDLE`, `sideShare()`). Back on the first line replays that line from its start and
+shows no badge, since no line moved; the swipe and the back button do the same. Forward on the
+last line seeks nothing and shows no badge.
 
 **Why the step is checked.** On an iPhone (26, home-screen app) a double tap showed the badge
 while the line stayed put. WebKitGTK and Chromium seek correctly, so the iPhone's cause is not

@@ -699,15 +699,20 @@ test("the badge covers exactly the side zone a tap lands in", () => {
   assert.equal(L.sideShare(L.TAP_MIDDLE.landscape), 0.4);
 });
 
-test("stepTarget: mid-line back is the line before; the ends move nothing", () => {
+test("stepTarget: mid-line back is the line before; back on the first line replays it", () => {
   // Five lines; the run began on line 2 (the playhead anywhere inside it).
   assert.deepEqual(L.stepTarget(5, 2, -1), { idx: 1, moved: 1 });
   assert.deepEqual(L.stepTarget(5, 2, 1), { idx: 3, moved: 1 });
   assert.deepEqual(L.stepTarget(5, 2, -3), { idx: 0, moved: 2 }); // clamped: the badge says 2, not 3
   assert.deepEqual(L.stepTarget(5, 2, 4), { idx: 4, moved: 2 });
-  // No line that way: no seek, no badge.
-  assert.deepEqual(L.stepTarget(5, 0, -1), { idx: -1, moved: 0 });
+  // Back on the first line: that line again from its start, no line moved, so no badge; a
+  // double tap's later taps land on the same line and seek nothing more.
+  assert.deepEqual(L.stepTarget(5, 0, -1), { idx: 0, moved: 0, replay: true });
+  assert.deepEqual(L.stepTarget(5, 0, -3), { idx: 0, moved: 0, replay: true });
+  assert.deepEqual(L.stepTarget(1, 0, -1), { idx: 0, moved: 0, replay: true });
+  // Forward on the last line: no line that way, no seek, no badge.
   assert.deepEqual(L.stepTarget(5, 4, 1), { idx: -1, moved: 0 });
+  assert.deepEqual(L.stepTarget(1, 0, 1), { idx: -1, moved: 0 });
   assert.deepEqual(L.stepTarget(0, 0, 1), { idx: -1, moved: 0 });
   // Before the first line (-1): back has nowhere to go; forward reaches the first line.
   assert.deepEqual(L.stepTarget(5, -1, -1), { idx: -1, moved: 0 });

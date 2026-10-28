@@ -972,16 +972,19 @@
     return Math.abs(f - 0.5) <= middle / 2 ? "middle" : f < 0.5 ? "left" : "right";
   }
 
-  // Where a double tap's run lands: `delta` lines from `base`, the line being said when the run
-  // began (activeCueIndex(), so mid-line back means the line before, as in the extension; -1
-  // before the first line), clamped to the list. `moved` is how many lines that really is, and 0
-  // when there is no line that way (back on the first line, forward on the last): then nothing
-  // seeks and no badge claims a step.
+  // Where a step lands (back, forward, a swipe, a double tap's run): `delta` lines from `base`,
+  // the line being said when the run began (activeCueIndex(), so mid-line back means the line
+  // before, as in the extension; -1 before the first line), clamped to the list. `moved` is how
+  // many lines that really is; a badge counts it. Back on the first line has no line before it,
+  // so it replays that line from its start (`replay`, nothing moved, no badge). Forward on the
+  // last line, or back before the first, finds nothing: idx -1, and nothing seeks.
   function stepTarget(count, base, delta) {
     if (!count || !delta) return { idx: -1, moved: 0 };
     const idx = Math.min(count - 1, Math.max(0, base + delta));
     const moved = (idx - base) * Math.sign(delta);
-    return moved > 0 ? { idx, moved } : { idx: -1, moved: 0 };
+    if (moved > 0) return { idx, moved };
+    if (delta < 0 && base === 0) return { idx: 0, moved: 0, replay: true };
+    return { idx: -1, moved: 0 };
   }
 
   // The playhead from a frame report, when it is trustworthy. requestVideoFrameCallback's
