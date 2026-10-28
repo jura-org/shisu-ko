@@ -652,8 +652,9 @@ button.row-item { width: 100%; text-align: left; background: none; border-radius
 
 /* ------------------------------------------------ the landscape mode (app.js enterLandscape)
 
-   The video fills the view, the line being said is a strip along its bottom, the scrubber and the
-   way out sit just above the strip while the controls show, and the dictionary is a side panel.
+   The video fills the view; the line being said sits low in a box of its own, as the iPhone's own
+   subtitles do; the scrubber and the way out are a row along the bottom while the controls show,
+   and the line rises above them meanwhile; the dictionary is a side panel.
    The page is fixed to the viewport, or, on a phone held upright, turned a quarter clockwise and
    sized to the screen's other way round (html.turned): every fixed sheet, toast and bar then lies
    in the turned body, which a transform makes their containing block. Percentages below are of
@@ -687,7 +688,8 @@ html.landscape .watch {
   max-width: none;
   margin: 0;
   padding: 0;
-  --strip-h: clamp(88px, 32%, 168px);
+  /* The subtitle's size follows the view's height (cqh), as broadcast guidelines size theirs. */
+  container-type: size;
 }
 html.landscape .player-box { position: absolute; inset: 0; width: auto; max-height: none; aspect-ratio: auto; }
 /* The corner buttons keep 20 px from every physical screen edge and stay inside the safe area, in
@@ -700,42 +702,109 @@ html.landscape .watch {
   --edge-r: max(20px, var(--safe-right));
   --edge-b: max(20px, var(--safe-bottom));
   --edge-l: max(20px, var(--safe-left));
+  --ctl-h: 44px; /* the controls row: the scrubber and the exit button */
+  --sub-rest: max(14px, var(--safe-bottom)); /* the subtitle box's bottom, controls hidden */
+  --sub-up: calc(var(--edge-b) + var(--ctl-h) + 6px); /* and with the controls showing */
 }
 html.landscape .btn-home { top: var(--edge-t); left: var(--edge-l); }
-html.landscape .btn-full { top: auto; left: auto; right: var(--edge-r); bottom: var(--strip-h); }
+html.landscape .btn-full { top: auto; left: auto; right: var(--edge-r); bottom: var(--edge-b); }
 html.landscape .toolbar, html.landscape .toolbar-space { display: none; }
+/* While the controls show, a soft shade under them keeps the times readable over a bright picture;
+   it goes with them. Nothing else darkens the video. */
+html.landscape .player-box::after {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: calc(var(--edge-b) + var(--ctl-h) + 40px);
+  background: linear-gradient(rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.4));
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s var(--spring);
+}
+html.landscape .player-box.show-back::after { opacity: 1; }
 
+/* The subtitle: the iPhone's own look (Settings > Accessibility > Subtitles & Captioning), white
+   text on a translucent black box with rounded corners that hugs the line, low on the picture. The
+   list is still the whole cue list, bottom-anchored (app.js placeTrack()), so a second row grows
+   upward. Only the boxes take taps: a tap beside one reaches the video. */
 html.landscape #lyrics {
+  --dim: rgba(235, 235, 245, 0.6); /* the sweep's unspoken text, readable on the box */
   position: absolute;
   z-index: 4;
   left: 0;
   right: 0;
-  bottom: 0;
-  height: var(--strip-h);
+  bottom: var(--sub-rest);
+  height: 50%;
   flex: none;
-  background: linear-gradient(rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.55) 35%, rgba(0, 0, 0, 0.72));
+  pointer-events: none;
   -webkit-mask-image: none;
   mask-image: none;
+  transition: transform 0.2s ease-out;
 }
-html.landscape .lyrics-track { padding: 0 calc(24px + var(--safe-right)) 0 calc(24px + var(--safe-left)); }
-html.landscape .lyrics.sheet-open .lyrics-track { padding-right: calc(var(--side-w) + 16px); }
-html.landscape .cue { font-size: 24px; margin-bottom: 14px; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8); }
+html.landscape .watch:has(.player-box.show-back) #lyrics { transform: translateY(calc(var(--sub-rest) - var(--sub-up))); }
+html.landscape .lyrics-track {
+  padding: 0 max(16%, calc(var(--edge-r) + 8px)) 0 max(16%, calc(var(--edge-l) + 8px)); /* lines of at most 68% of the view, as the BBC sets */
+}
+html.landscape .lyrics.sheet-open .lyrics-track { padding: 0 calc(var(--side-w) + 16px) 0 calc(var(--edge-l) + 8px); }
+html.landscape .cue {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto 14px;
+  padding: 0.12em 0.45em;
+  border-radius: 0.3em;
+  background: rgba(0, 0, 0, 0.6);
+  font-size: 24px;
+  font-size: clamp(18px, 6.2cqh, 40px);
+  line-height: 1.35;
+  pointer-events: auto;
+}
+html.landscape .cue.furigana { line-height: 1.95; }
+html.landscape .cue.active .tok.now { text-shadow: none; } /* a glow on the box only greys it */
+/* The picked word must show on the dark box: twice the portrait view's light. */
+html.landscape .cue .tok.picked { background: rgba(255, 255, 255, 0.28); }
+html.landscape .cue::highlight(picked), html.landscape .cue ::highlight(picked) { background-color: rgba(255, 255, 255, 0.28); color: var(--label); }
 /* The strip holds the line being said alone; a drag still browses its neighbours. */
 html.landscape .lyrics:not(.browsing) .cue:not([data-d="0"]) { visibility: hidden; opacity: 0; }
-html.landscape .back-to-now { top: 8px; bottom: auto; left: auto; right: calc(16px + var(--safe-right)); transform: none; }
+html.landscape .back-to-now { top: 8px; bottom: auto; left: auto; right: var(--edge-r); transform: none; pointer-events: auto; }
+html.landscape .lyrics-status {
+  left: 50%;
+  right: auto;
+  transform: translate(-50%, -100%);
+  padding: 4px 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.6);
+  color: var(--label);
+  white-space: nowrap;
+}
 
+/* The controls row, as in the iPhone's and YouTube's players: elapsed time, a thin bar, the time
+   left, then the exit button, inside the safe area. */
 html.landscape .scrubber {
   z-index: 5;
-  left: 0;
-  right: calc(48px + var(--edge-r)); /* the exit button's room: the bar must not cover it */
+  left: var(--edge-l);
+  right: calc(var(--edge-r) + 52px); /* the exit button's room: the bar must not cover it */
+  bottom: var(--edge-b);
+  height: var(--ctl-h);
   max-width: none;
   margin: 0;
-  bottom: var(--strip-h);
-  padding: 0 4px 0 var(--edge-l);
+  padding: 0;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  column-gap: 12px;
+  align-items: center;
   opacity: 0;
   visibility: hidden;
   transition: opacity 0.25s var(--spring), visibility 0.25s;
 }
+html.landscape .watch:has(.lyrics.sheet-open) .scrubber { right: calc(var(--side-w) + 12px); }
+html.landscape .scrub-times { display: contents; font-size: 13px; color: rgba(255, 255, 255, 0.9); text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6); }
+html.landscape #scrub-elapsed { grid-area: 1 / 1; }
+html.landscape .scrub-track { grid-area: 1 / 2; }
+html.landscape #scrub-remaining { grid-area: 1 / 3; }
+html.landscape .scrub-live { grid-area: 1 / 1; margin: 0; }
 html.landscape .watch:has(.player-box.show-back) .scrubber, html.landscape .scrubber.dragging { opacity: 1; visibility: visible; }
 
 html.landscape .word-sheet {
@@ -755,7 +824,7 @@ html.landscape .word-sheet .grabber { display: none; }
 html.landscape .word-sheet .sheet-scroll { flex: 1 1 auto; padding: 0 calc(20px + var(--safe-right)) 8px 20px; }
 html.landscape .word-sheet .sheet-foot { padding: 8px calc(16px + var(--safe-right)) calc(8px + var(--safe-bottom)) 16px; }
 html.landscape .settings-sheet { max-height: 88%; }
-html.switching .sheet, html.switching .lyrics-track, html.switching .scrubber { transition: none !important; }
+html.switching .sheet, html.switching .lyrics-track, html.switching .scrubber, html.switching #lyrics { transition: none !important; }
 @media (prefers-reduced-motion: reduce) {
-  html.landscape .scrubber { transition: none; }
+  html.landscape .scrubber, html.landscape #lyrics, html.landscape .player-box::after { transition: none; }
 }

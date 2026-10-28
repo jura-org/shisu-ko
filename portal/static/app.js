@@ -1572,8 +1572,8 @@
   // The centre point: the middle of the list, or of the room left above the dictionary sheet.
   function focusY() {
     const box = $("lyrics");
-    // The landscape strip: its middle; the scrubber sits above it and the sheet beside it.
-    if (state.landscape.on) return box.clientHeight / 2;
+    // The landscape mode: the strip's bottom, where the line's box rests (placeTrack()).
+    if (state.landscape.on) return box.clientHeight;
     // The scrubber covers the list's faded bottom edge: centre in what is left above it.
     if (!state.sheet.open) return (box.clientHeight - $("scrubber").offsetHeight) / 2;
     const sheetTop = viewHeight() - $("sheet").offsetHeight;
@@ -1587,7 +1587,8 @@
     let anchor = 0;
     const whole = Number.isInteger(pos);
     const row = pos >= 0 ? state.rowById.get(state.cues[Math.floor(pos)]?.id) : null;
-    if (row && whole) anchor = row.offsetTop + row.offsetHeight / 2;
+    // The landscape mode anchors the line's bottom, so a second row grows upward, as on a TV.
+    if (row && whole) anchor = row.offsetTop + (state.landscape.on ? row.offsetHeight : row.offsetHeight / 2);
     else if (row) anchor = row.offsetTop + row.offsetHeight + 40; // the status slot after the last cue
     else anchor = -40; // nothing said yet: the first cue waits just below the centre
     state.trackBase = centre - anchor;
@@ -1602,7 +1603,8 @@
     if (state.browse.active) {
       // Browsing stops at the ends of the list.
       const min = focusY() - track.offsetHeight;
-      const max = focusY();
+      // Bottom-anchored (landscape), the first line's box stops at the anchor, not its top.
+      const max = focusY() - (state.landscape.on && track.firstElementChild ? track.firstElementChild.offsetHeight : 0);
       state.browse.offset = Math.min(max - state.trackBase, Math.max(min - state.trackBase, state.browse.offset));
     }
     const value = `translateY(${Math.round(state.trackBase + state.browse.offset)}px)`;
