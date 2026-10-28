@@ -112,6 +112,9 @@
   // values they need. English only for now.
   const STRINGS = {
     reconnecting: "Reconnecting…",
+    // The double tap's badge on the video: how many lines it stepped, the arrows pointing the way.
+    linesBack: (n) => `« ${n} ${n === 1 ? "line" : "lines"}`,
+    linesForward: (n) => `${n} ${n === 1 ? "line" : "lines"} »`,
     reconnectingDetail: (e) => `Reconnecting to the subtitle server…${e ? ` (${e})` : ""}`,
     reconnectingError: (e) => `Reconnecting… (${e})`,
     connecting: "Connecting…",
@@ -889,6 +892,36 @@
     return height > width;
   }
 
+  const DOUBLE_TAP_MS = 300;
+
+  // A tap on the video, as in YouTube's app. `zone` is where it fell (tapZone()), `last` what the
+  // previous tap left (null at first). On a side, a second tap within `windowMs` steps a line that
+  // way, and each further tap in time steps one more (`steps` counts them from the run's first
+  // step). What a lone tap does depends on the layout:
+  // - Portrait: the middle third plays or pauses at once. A lone side tap plays at once while
+  //   paused, since iOS lets play() run only inside the tap itself; a pause needs no gesture, so
+  //   while playing it pauses only once the window passes with no second tap ("pause-later"), and
+  //   a double tap never stops the video first.
+  // - Landscape: the middle fifth plays or pauses at once; a lone tap anywhere else shows or hides
+  //   the controls once the window has passed ("controls-later") and never pauses.
+  function shieldTap(last, tap, { landscape = false, windowMs = DOUBLE_TAP_MS } = {}) {
+    const side = tap.zone === "left" || tap.zone === "right";
+    if (side && last && last.zone === tap.zone && tap.at - last.at < windowMs) {
+      const steps = last.steps + 1;
+      return { action: "step", delta: tap.zone === "left" ? -steps : steps, steps, next: { at: tap.at, zone: tap.zone, steps } };
+    }
+    if (!side) return { action: "toggle", next: null };
+    const action = landscape ? "controls-later" : tap.playing ? "pause-later" : "play";
+    return { action, next: { at: tap.at, zone: tap.zone, steps: 0 } };
+  }
+
+  // Where a tap fell across a box, both in the view's frame: "middle" within the central
+  // `middle` share of its width (a third in portrait, a fifth in landscape), else its side.
+  function tapZone(x, box, middle = 1 / 3) {
+    const f = (x - box.left) / box.width;
+    return Math.abs(f - 0.5) <= middle / 2 ? "middle" : f < 0.5 ? "left" : "right";
+  }
+
   function hasKanji(text) {
     return /[㐀-鿿豈-﫿々]/.test(String(text || ""));
   }
@@ -903,6 +936,7 @@
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
     ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs, nearestBox, lookupResume, LOOKUP_LEAD_S,
     watchHistoryText, newWatchLog, watchAt, watchClose, watchDrain, watchNextMs, clientInfo, viewPoint, viewDelta, viewRect, shouldTurn,
+    shieldTap, tapZone, DOUBLE_TAP_MS,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.PortalLib = api;

@@ -17,7 +17,6 @@
   const FROM_HOME = "portal.fromHome"; // sessionStorage: this video was opened from the home page
   const LINE_HOLD_S = 2.5; // a line stays up this long after it ends, then the space is empty
   const GLIDE_MS = 400; // the list's transition (app.css .lyrics-track)
-  const DOUBLE_TAP_MS = 300;
   const TOAST_MS = 2000;
   // /api/watched: the first report 10 s after play starts (YouTube's first scheduled flush), then
   // when the server's answer says (`next`, YouTube's own schedule), and a final one at every pause,
@@ -109,6 +108,9 @@
     watchDueAt: Infinity, // the next scheduled /api/watched report; Infinity until a play starts the schedule
     watchGapMs: WATCH_FIRST_MS, // playing time from a resume to that report: the server's last `next`
     lastShieldTap: null,
+    shieldTimer: null,
+    controlsHidden: false, // a side tap hid the controls (landscape); renderBack()
+    stepBase: -1, // a double tap's run steps from the line it began on
     inDeck: new Map(), // term -> boolean, from /api/canadd
     // The word colours: the deck's rows as the server sent them (L.applyDeck), and the words.js
     // index built from them; wordsKey is its entries as JSON, so an unchanged deck draws nothing.
@@ -804,6 +806,9 @@
   // neither plays nor downloads.
   function teardownWatch() {
     exitLandscape(); // leaving by any way (home, the end of the video, a link) restores the page
+    clearTimeout(state.shieldTimer); // a lone tap's pending pause or controls toggle
+    state.lastShieldTap = null;
+    state.controlsHidden = false;
     if (!state.player || state.tornDown) return;
     state.tornDown = true;
     try {
@@ -1033,6 +1038,8 @@
   }
 
   function onPlayerState(s) {
+    // A new pause or end shows the controls again, even after a tap hid them (landscape).
+    if (s !== state.ytState && (s === YT_PAUSED || s === YT_ENDED)) state.controlsHidden = false;
     state.ytState = s;
     state.playing = s === YT_PLAYING || s === YT_BUFFERING;
     if (s === YT_PLAYING && state.player.kind === "youtube" && !state.resumeLanded && state.resumeTarget !== null) {
@@ -1118,7 +1125,7 @@
 
   // The way home over the video: with the paused scrim, and for 3 s after any tap on the video.
   function renderBack() {
-    const show = state.ytState === YT_PAUSED || state.ytState === YT_ENDED || Date.now() < state.backUntil;
+    const show = !state.controlsHidden && (state.ytState === YT_PAUSED || state.ytState === YT_ENDED || Date.now() < state.backUntil);
     document.querySelector(".player-box").classList.toggle("show-back", show);
   }
 
@@ -1744,10 +1751,39 @@
   // ------------------------------------------------------------ line navigation
 
   function stepLine(delta) {
-    if (!state.cues.length) return;
     // Back always means the line before, wherever the playhead sits in this one (as in the extension).
-    const target = state.cues[Math.min(state.cues.length - 1, Math.max(0, state.activeIdx + delta))];
+    stepTo(state.activeIdx + delta);
+  }
+
+  function stepTo(idx) {
+    if (!state.cues.length) return;
+    const target = state.cues[Math.min(state.cues.length - 1, Math.max(0, idx))];
     if (target) seek(target.start, true);
+  }
+
+  // The controls (back, exit, scrubber) for 3 s, as after any tap on the video.
+  function showControls() {
+    state.controlsHidden = false;
+    state.backUntil = Date.now() + 3000;
+    setTimeout(renderBack, 3050);
+    renderBack();
+  }
+
+  // Hidden until the next tap, pause or end shows them (a side tap in the landscape mode).
+  function hideControls() {
+    state.controlsHidden = true;
+    state.backUntil = 0;
+    renderBack();
+  }
+
+  // The double tap's badge on the tapped side: how many lines the run has stepped.
+  function showStepBadge(zone, steps) {
+    const badge = $("step-badge");
+    badge.textContent = zone === "left" ? S.linesBack(steps) : S.linesForward(steps);
+    badge.dataset.side = zone;
+    badge.classList.remove("show");
+    void badge.offsetWidth; // restart the fade for every tap of the run
+    badge.classList.add("show");
   }
 
   function replayLine() {
@@ -1781,30 +1817,46 @@
       ev.stopPropagation();
       if (state.landscape.on) exitLandscape();
       else enterLandscape();
-      state.backUntil = Date.now() + 3000; // the controls stay up a moment in the new layout
-      setTimeout(renderBack, 3050);
-      renderBack();
+      showControls(); // the controls stay up a moment in the new layout
     });
     for (const name of ["fullscreenchange", "webkitfullscreenchange"]) document.addEventListener(name, onFullscreenChange);
     window.addEventListener("orientationchange", viewChanged);
 
-    // The shield over the video: a tap toggles play; a quick second tap on the left or right third
-    // steps a line back or forward (and plays). Both act inside the tap itself.
+    // The shield over the video, as in YouTube's app (lib.js shieldTap()): the middle plays or
+    // pauses; a double tap on a side steps a line, each further tap one more. A lone side tap
+    // pauses in portrait, and shows or hides the controls in the landscape mode.
     $("shield").addEventListener("click", (ev) => {
-      const box = viewRect(ev.currentTarget);
-      const x = (viewPoint(ev.clientX, ev.clientY).x - box.left) / box.width;
-      const zone = x < 1 / 3 ? "left" : x > 2 / 3 ? "right" : "middle";
-      const last = state.lastShieldTap;
+      const landscape = state.landscape.on;
+      const zone = L.tapZone(viewPoint(ev.clientX, ev.clientY).x, viewRect(ev.currentTarget), landscape ? 0.2 : 1 / 3);
       const now = Date.now();
-      if (last && now - last.at < DOUBLE_TAP_MS && last.zone === zone && zone !== "middle") {
-        state.lastShieldTap = null;
-        stepLine(zone === "left" ? -1 : 1);
+      const tap = L.shieldTap(state.lastShieldTap, { at: now, zone, playing: state.playing }, { landscape });
+      state.lastShieldTap = tap.next;
+      clearTimeout(state.shieldTimer);
+      if (tap.action === "step") {
+        if (tap.steps === 1) state.stepBase = state.activeIdx; // the run counts from here
+        stepTo(state.stepBase + tap.delta);
+        showStepBadge(zone, tap.steps);
         return;
       }
-      state.lastShieldTap = { at: now, zone };
-      state.backUntil = now + 3000;
-      setTimeout(renderBack, 3050);
-      togglePlay();
+      if (tap.action === "controls-later") {
+        state.shieldTimer = setTimeout(() => {
+          state.lastShieldTap = null;
+          if ($("btn-home").closest(".show-back")) hideControls();
+          else showControls();
+        }, L.DOUBLE_TAP_MS);
+        return;
+      }
+      if (tap.action === "pause-later") {
+        // Pausing needs no gesture: wait out the window for a second tap.
+        state.shieldTimer = setTimeout(() => {
+          state.lastShieldTap = null;
+          if (state.playing) pause("user");
+          showControls();
+        }, L.DOUBLE_TAP_MS);
+        return;
+      }
+      showControls();
+      togglePlay(); // inside the tap: iOS plays only from a gesture's own call stack
     });
 
     const lyrics = $("lyrics");
@@ -2503,6 +2555,7 @@
       state.previewT = null;
       if (commit) seek(scrub.target, false); // one seek, one saved position, on release
       scrub.shownSec = -1;
+      if (state.landscape.on) showControls(); // the bar stays a moment after the drag
     };
     track.addEventListener("pointerup", () => end(true));
     track.addEventListener("pointercancel", () => end(false));

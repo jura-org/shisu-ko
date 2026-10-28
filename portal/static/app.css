@@ -181,6 +181,32 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 .shield.paused { background: rgba(0, 0, 0, 0.8); }
 .shield.ended { background: linear-gradient(rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0.45)), var(--poster, none) center / cover, #000; }
 .shield.passthrough { pointer-events: none; }
+/* The double tap's badge: a soft light over the tapped side third, the line count in its middle,
+   fading out as YouTube's "10 seconds" does. It never takes a tap. */
+.step-badge {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  bottom: 0;
+  width: 34%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--label);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+  opacity: 0;
+}
+.step-badge[data-side="left"] { left: 0; border-radius: 0 50% 50% 0 / 0 50% 50% 0; background: radial-gradient(farthest-side at 0 50%, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0.08)); }
+.step-badge[data-side="right"] { right: 0; border-radius: 50% 0 0 50% / 50% 0 0 50%; background: radial-gradient(farthest-side at 100% 50%, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0.08)); }
+.step-badge.show { animation: step-badge 0.7s ease-out; }
+@keyframes step-badge { 0%, 45% { opacity: 1; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .step-badge.show { animation: step-badge-still 0.7s steps(1, end); }
+  @keyframes step-badge-still { 0% { opacity: 1; } 100% { opacity: 0; } }
+}
 .shield-play { width: 56px; height: 56px; fill: rgba(255, 255, 255, 0.92); stroke: none; opacity: 0; transition: opacity 0.25s; }
 .shield.paused .shield-play, .shield.ended .shield-play { opacity: 1; }
 

@@ -636,3 +636,59 @@ test("watchedToggle: an unfinished video goes to its end, a finished one back to
   assert.equal(L.watchedToggle({ t: 120 }), null); // no duration: no action
   assert.equal(L.watchedToggle(null), null);
 });
+
+test("shieldTap: the middle toggles at once; a side double tap steps, and every further tap one more", () => {
+  const W = L.DOUBLE_TAP_MS;
+  assert.deepEqual(L.shieldTap(null, { at: 0, zone: "middle", playing: true }), { action: "toggle", next: null });
+  // A lone side tap: pause later while playing, play at once while paused (iOS: inside the tap).
+  const first = L.shieldTap(null, { at: 1000, zone: "right", playing: true });
+  assert.equal(first.action, "pause-later");
+  assert.equal(L.shieldTap(null, { at: 1000, zone: "left", playing: false }).action, "play");
+  // Second and third taps in time: +1, then +2 from where the run began.
+  const second = L.shieldTap(first.next, { at: 1000 + W - 50, zone: "right", playing: true });
+  assert.equal(second.action, "step");
+  assert.equal(second.delta, 1);
+  const third = L.shieldTap(second.next, { at: 1000 + 2 * W - 100, zone: "right", playing: true });
+  assert.equal(third.delta, 2);
+  assert.equal(third.steps, 2);
+  // Left steps back.
+  const left = L.shieldTap(L.shieldTap(null, { at: 0, zone: "left", playing: true }).next, { at: 120, zone: "left", playing: true });
+  assert.equal(left.delta, -1);
+  // Too slow, the other side, or the middle: a new start, never a step.
+  assert.equal(L.shieldTap(first.next, { at: 1000 + W, zone: "right", playing: true }).action, "pause-later");
+  assert.equal(L.shieldTap(first.next, { at: 1100, zone: "left", playing: true }).action, "pause-later");
+  assert.equal(L.shieldTap(first.next, { at: 1100, zone: "middle", playing: true }).action, "toggle");
+  // The window runs from the last tap, so a steady run keeps going.
+  let run = L.shieldTap(null, { at: 0, zone: "right", playing: true });
+  for (let i = 1; i <= 5; i++) run = L.shieldTap(run.next, { at: i * (W - 20), zone: "right", playing: true });
+  assert.equal(run.delta, 5);
+});
+
+test("shieldTap in landscape: a lone side tap shows or hides the controls later, never pauses", () => {
+  const opt = { landscape: true };
+  assert.equal(L.shieldTap(null, { at: 0, zone: "middle", playing: true }, opt).action, "toggle");
+  for (const playing of [true, false]) {
+    const first = L.shieldTap(null, { at: 0, zone: "right", playing }, opt);
+    assert.equal(first.action, "controls-later");
+    const second = L.shieldTap(first.next, { at: 150, zone: "right", playing }, opt);
+    assert.equal(second.action, "step");
+    assert.equal(second.delta, 1);
+  }
+});
+
+test("tapZone: thirds in portrait, the middle fifth in landscape", () => {
+  const box = { left: 100, width: 300 };
+  assert.equal(L.tapZone(150, box), "left");
+  assert.equal(L.tapZone(250, box), "middle");
+  assert.equal(L.tapZone(350, box), "right");
+  // Landscape: 20% of 300 px is 60 px around the centre, 220-280.
+  assert.equal(L.tapZone(225, box, 0.2), "middle");
+  assert.equal(L.tapZone(275, box, 0.2), "middle");
+  assert.equal(L.tapZone(215, box, 0.2), "left");
+  assert.equal(L.tapZone(285, box, 0.2), "right");
+});
+
+test("the double tap's badge counts lines", () => {
+  assert.equal(L.STRINGS.linesBack(1), "« 1 line");
+  assert.equal(L.STRINGS.linesForward(3), "3 lines »");
+});
