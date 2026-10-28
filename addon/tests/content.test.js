@@ -41,14 +41,21 @@ test("shouldSync skips the request when a paused video needs nothing", () => {
   assert.equal(api.shouldSync(idle(), NOW), false);
 });
 
-test("shouldSync keeps asking while the server still has work around the playhead", () => {
+test("shouldSync asks every tick while nothing is covered at the playhead", () => {
   const { api } = loadContent();
-  // Covered only to 200 s of a 1200 s video, and the server transcribes 180 s ahead of 100 s.
-  assert.equal(api.shouldSync(idle({ covered: [[0, 200]] }), NOW), true);
-  // Covered 180 s past the playhead: the server's lookahead is reached, the heartbeat is enough.
-  assert.equal(api.shouldSync(idle({ covered: [[0, 280]] }), NOW), false);
-  // The playhead is not inside any covered range at all.
+  // The viewer paused on a line the server has not reached: they are waiting for it.
   assert.equal(api.shouldSync(idle({ t: 900, covered: [[0, 200]] }), NOW), true);
+  assert.equal(api.shouldSync(idle({ covered: [] }), NOW), true);
+});
+
+test("shouldSync leaves a paused tab on the heartbeat once the playhead is covered", () => {
+  const { api } = loadContent();
+  // However far short of the end the server stopped: its lookahead is its own business.
+  assert.equal(api.shouldSync(idle({ covered: [[0, 200]] }), NOW), false);
+  assert.equal(api.shouldSync(idle({ covered: [[0, 101]] }), NOW), false);
+  assert.equal(api.shouldSync(idle({ covered: [[0, 200]], duration: 0 }), NOW), false);
+  // The heartbeat still goes out.
+  assert.equal(api.shouldSync(idle({ covered: [[0, 200]], lastSyncAt: NOW - 5000 }), NOW), true);
 });
 
 test("shouldSync tells the server at once that the video paused", () => {
@@ -74,16 +81,10 @@ test("shouldSync still beats every five seconds while paused", () => {
   assert.equal(api.shouldSync(idle({ lastSyncAt: 0 }), NOW), true);
 });
 
-test("shouldSync asks while the duration is still unknown", () => {
+test("shouldSync leaves a paused tab on the heartbeat once the covered range reaches the video's end", () => {
   const { api } = loadContent();
-  assert.equal(api.shouldSync(idle({ duration: 0 }), NOW), true);
-});
-
-test("shouldSync stops once the covered range reaches the end of a short video", () => {
-  const { api } = loadContent();
-  // Shorter than the server's lookahead: the end of the video is the target, not playhead + 180 s.
   assert.equal(api.shouldSync(idle({ t: 30, duration: 60, covered: [[0, 60]] }), NOW), false);
-  assert.equal(api.shouldSync(idle({ t: 30, duration: 60, covered: [[0, 45]] }), NOW), true);
+  assert.equal(api.shouldSync(idle({ t: 60, duration: 60, covered: [[0, 60]] }), NOW), false);
 });
 
 // ------------------------------------------------------------------ coveredEnd
@@ -3586,4 +3587,32 @@ test("the server's automatic attaches are toasted when they worked, its refusal 
   assert.equal(api.state.toastEl.textContent, "", "the same refusal is not toasted every second");
   api.takeMined({ cues: [] }); // an older server: no log at all
   assert.equal(api.state.minedSince, 2);
+});
+
+test("a paused tab asks every tick until its line is covered, then only beats", async () => {
+  const { api, sandbox } = loadContent();
+  await settled();
+  serverAnswering(sandbox, [
+    { status: "decoding", session: "a", cues: [], next: 0, duration: 1200 },
+    { status: "ready", session: "a", cues: [], next: 0, covered: [], duration: 1200 },
+    { status: "ready", session: "a", cues: [], next: 0, covered: [[0, 30]], duration: 1200 },
+    { status: "ready", session: "a", cues: [], next: 0, covered: [[0, 60]], duration: 1200 },
+  ]);
+  api.state.videoId = "abcdef1234";
+  api.state.video = { currentTime: 10, paused: true };
+  const steps = [];
+  for (let i = 0; i < 4; i++) {
+    await api.sync();
+    const decision = {
+      paused: true,
+      sentPaused: api.state.sentPaused,
+      t: api.playhead(),
+      status: api.state.serverStatus,
+      covered: api.state.covered,
+      lastSyncAt: api.state.lastSyncAt,
+    };
+    steps.push([api.shouldSync(decision, api.state.lastSyncAt + 1000), api.shouldSync(decision, api.state.lastSyncAt + 5000)]);
+  }
+  // Decoding, then ready with nothing covered: every tick. Covered at the playhead: the 5 s beat alone.
+  assert.deepEqual(steps, [[true, true], [true, true], [false, true], [false, true]]);
 });

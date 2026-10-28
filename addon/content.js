@@ -32,9 +32,6 @@
   // Heartbeat while a paused video needs nothing: slow enough to be free, far below the server's
   // 30 s client timeout (it stops transcribing for a session nobody has synced since then).
   const SYNC_IDLE_INTERVAL_MS = 5000;
-  // The server's own --lookahead default: it transcribes no further ahead than this, so once the
-  // covered range reaches it there is nothing left to ask for until the playhead moves.
-  const SYNC_LOOKAHEAD_S = 180;
   const RESUME_DELAY_MS = 350;
   const TOAST_MS = 3500;
   const TOAST_MAX_CHARS = 240;
@@ -1145,13 +1142,14 @@
   }
 
   // Should the tick actually talk to the server? While the video plays, always: the playhead moves
-  // and cues are wanted. While it is paused, only while the server still has work around the
-  // playhead, plus a slow heartbeat so a restart, an error or a late cue is still noticed — and so
-  // the server does not drop the session for want of a client.
+  // and cues are wanted. While it is paused, every tick only until the playhead's line is covered
+  // (the viewer is waiting for it), then a slow heartbeat that still notices a restart, an error or
+  // a late cue, and keeps the server from dropping the session for want of a client. How far ahead
+  // the server transcribes is its own business (--lookahead): a paused viewer needs none of it now.
   // A mine the viewer asked for goes out, and is answered, on the next tick, and so does a pause
   // or a resume: the server looks at Anki every second while a viewer mining has paused.
-  // Pure: { mining, paused, sentPaused, t, status, covered, duration, lastSyncAt, standby } and a
-  // clock in, a decision out.
+  // Pure: { mining, paused, sentPaused, t, status, covered, lastSyncAt, standby } and a clock in,
+  // a decision out.
   function shouldSync(st, now) {
     if (!st.paused || st.mining || st.paused !== st.sentPaused) return true;
     if (now - (st.lastSyncAt || 0) >= SYNC_IDLE_INTERVAL_MS) return true;
@@ -1161,10 +1159,7 @@
     // what makes taking the right back immediate the moment the viewer looks at it.
     if (st.standby) return false;
     if (st.status !== "ready") return true; // still fetching, decoding, erroring: keep watching
-    const duration = Number(st.duration) || 0;
-    const target = duration > 0 ? Math.min(duration, st.t + SYNC_LOOKAHEAD_S) : Infinity;
-    const ahead = coveredEnd(st.covered, st.t);
-    return ahead === null || ahead < target - 0.5;
+    return coveredEnd(st.covered, st.t) === null;
   }
 
   function syncTick() {
@@ -1178,7 +1173,6 @@
       t: playhead(),
       status: state.serverStatus,
       covered: state.covered,
-      duration: state.duration,
       lastSyncAt: state.lastSyncAt,
       standby: state.standby,
     };
