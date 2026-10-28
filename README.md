@@ -521,6 +521,8 @@ DVR disabled cannot be followed, since the server needs the numbered audio segme
 The phone portal plays a YouTube video on a phone or tablet with Shisu-ko's subtitles, looks words
 up with Yomitan and mines them into Anki, all served by the computer that runs the server. It needs
 no app and no extension on the phone: open a page in its browser (or add it to the home screen).
+The button in the video's bottom-right corner, shown while paused, turns the phone's screen into a
+large landscape player with the line being said along the bottom, still tappable for lookups.
 
 <p>
 <img src="docs/images/portal-watch.png" width="190" alt="The watch view: the video, and the line being said in the middle with its words lighting up as they are spoken">
@@ -552,13 +554,33 @@ nix run .#portal -- --mode lan      (Nix)
 On the phone, paste a YouTube link. The video plays in the page's own player, streamed through the
 computer; the subtitles below it centre the line being said and light up its words as they are
 spoken. Drag the bar above the buttons to move through the video; the list shows the line you will land
-on. Tap a word for its dictionary entry, tap a definition to pick it, and Mine adds the card
+on. Tap a word for its dictionary entry (the video pauses, and closing the entry plays again from a
+second before the tap, or from the line's start: Settings), tap a definition to pick it, and Mine adds the card
 with that sentence, its audio and a picture of the video. The first Mine asks which deck and note
 type to use, and guesses what each field gets from its name; Settings > Anki changes it. The
 server syncs Anki with AnkiWeb a minute after the card appears (see
 [Sentence mining](#sentence-mining)), and Settings > Anki shows when it last did, or why it could
-not. The list of videos remembers how far you got, on every device. How it works, and its security model:
+not. The list of videos remembers how far you got, on every device; swipe a video left to mark it
+watched or delete it, and a video watched to its end returns to the list. How it works, and its security model:
 [docs/dev/portal.md](docs/dev/portal.md).
+
+`--watch-history on` (off by default) makes a video you watch in the portal count on your YouTube
+account, as if watched on YouTube: it lands in your watch history, and your recommendations see the
+time you actually watched. It reports through the YouTube cookies of the browser the server sends
+(`--save-cookies-from-browser firefox`; on Windows Chrome and Edge lock their cookies away) and
+does nothing without them. It asks YouTube once per video, signed in, for the addresses YouTube's
+own player reports to. Then, from your computer and under your account (those cookies, and the
+header `X-Goog-AuthUser: 0`), it sends a playback ping when the video first plays, and a
+watch-time ping every 10 to 40 s of play, after a pause, and at once when a viewing ends (the end,
+the page hidden or left, home, the switch to YouTube's player). Each ping carries a random id for
+the viewing; the stretches played, the position and the video's length; whether it plays or is
+paused, and the seconds since the viewing began; the phone's browser and system with their
+versions (from its User-Agent); the milliseconds since your last touch or key on the page; the
+volume and whether it is muted; the video and audio formats playing; the web client and country
+YouTube's answer named; and the parameters YouTube put into those addresses itself. Only the
+portal's own player reports; YouTube's player, the fallback, records its own. YouTube's
+history bar takes the position on videos of about 20 minutes or more; on shorter ones it shows a
+10% "started" mark, as it does for every client outside YouTube's own apps.
 
 ## Settings
 

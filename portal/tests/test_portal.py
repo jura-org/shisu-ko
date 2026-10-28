@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pure helpers of portal/portal.py: allowlist, host check, cloze, glossary sanitiser, tokens."""
 
+import http.client
 import importlib.util
 import json
+import threading
 import time
+from http.server import ThreadingHTTPServer
 from types import SimpleNamespace
 import sys
 from pathlib import Path
@@ -64,6 +67,23 @@ def test_build_cloze_escapes_and_splits():
             portal.build_cloze("abcdef", start, end)
     with pytest.raises(ValueError):
         portal.build_cloze("", 0, 1)
+
+
+def test_spans_count_utf16_units_as_the_page_does():
+    # 𠮟 (U+20B9F) is one Python character and two JavaScript ones. The page's span [3, 6) in
+    # 先生に𠮟られた is 𠮟ら: counted in code points, the cloze would bold 𠮟られ.
+    text = "先生に𠮟られた"
+    assert portal.utf16_length(text) == 8 and len(text) == 7
+    assert portal.build_cloze(text, 3, 6) == ("先生に", "𠮟ら", "れた")
+    assert portal.build_cloze(text, 3, 5) == ("先生に", "𠮟", "られた")
+    assert portal.build_cloze(text, 0, 8)[1] == text
+    for start, end in ((3, 4), (4, 6), (0, 9)):  # half of 𠮟, or past the end
+        with pytest.raises(ValueError):
+            portal.build_cloze(text, start, end)
+    # The entry's match is reported in the same units, so the page's span ends after 𠮟る.
+    entries = portal.compact_entries({"dictionaryEntries": [_entry("𠮟る", "しかる", "𠮟られた"), _entry("𠮟る", "しかる", "𠮟ら")]})
+    assert entries[0]["matched"] == 5
+    assert portal.match_length(_entry("𠮟", "しつ", "𠮟")) == 2
 
 
 def test_render_template_and_markers():
@@ -168,14 +188,39 @@ def test_valid_video_id_and_frame_time():
     assert portal.frame_time(10.0, 20.0) == 10.75
 
 
-def test_compact_entries_keeps_only_the_longest_matches():
-    def entry(term, reading, matched):
-        return {"headwords": [{"term": term, "reading": reading, "sources": [{"originalText": matched}]}],
-                "definitions": [{"dictionary": "D", "entries": [term]}]}
-    data = {"dictionaryEntries": [entry("天気", "てんき", "天気"), entry("天", "てん", "天"), entry("天", "あま", "天")]}
-    assert [e["term"] for e in portal.compact_entries(data)] == ["天気"]
-    data = {"dictionaryEntries": [entry("天", "てん", "天"), entry("天", "あま", "天")]}
-    assert [e["reading"] for e in portal.compact_entries(data)] == ["てん", "あま"]
+def _entry(term, reading, matched):
+    return {"headwords": [{"term": term, "reading": reading, "sources": [{"originalText": matched}]}],
+            "definitions": [{"dictionary": "D", "entries": [term]}]}
+
+
+def test_compact_entries_puts_the_longest_matches_first_then_the_shorter():
+    data = {"dictionaryEntries": [_entry("天", "てん", "天"), _entry("天気", "てんき", "天気"), _entry("天", "あま", "天")]}
+    entries = portal.compact_entries(data)
+    # The sheet opens on the longest match; the readings of 天 follow, in Yomitan's order.
+    assert [(e["term"], e["reading"], e["matched"]) for e in entries] == [
+        ("天気", "てんき", 2), ("天", "てん", 1), ("天", "あま", 1)]
+
+
+def test_compact_entries_keeps_yomitans_order_within_a_length_and_drops_repeats():
+    data = {"dictionaryEntries": [
+        _entry("降る", "ふる", "降っています"), _entry("降る", "くだる", "降っています"),
+        _entry("降って", "くだって", "降って"), _entry("降", "こう", "降"),
+        _entry("降る", "ふる", "降っています"),  # the same headword again (another dictionary's entry)
+        _entry("降", "ふり", "降"),
+    ]}
+    entries = portal.compact_entries(data)
+    assert [(e["term"], e["reading"], e["matched"]) for e in entries] == [
+        ("降る", "ふる", 6), ("降る", "くだる", 6), ("降って", "くだって", 3), ("降", "こう", 1), ("降", "ふり", 1)]
+
+
+def test_compact_entries_caps_the_choices():
+    data = {"dictionaryEntries": [_entry("天気", "てんき", "天気")]
+            + [_entry("天", f"r{i}", "天") for i in range(20)]}
+    entries = portal.compact_entries(data)
+    assert len(entries) == portal.LOOKUP_ENTRIES
+    assert entries[0]["term"] == "天気"
+    assert [e["reading"] for e in portal.compact_entries(data, limit=3)] == ["てんき", "r0", "r1"]
+    assert portal.compact_entries({}) == [] and portal.compact_entries(None) == []
 
 
 # ---------------------------------------------------------------- retries
@@ -375,6 +420,62 @@ def test_position_store(tmp_path):
     assert again.get("AAAAAAAAAAA")["t"] == 118.3
     again.delete("AAAAAAAAAAA")
     assert portal.PositionStore(tmp_path / "s.json").get("AAAAAAAAAAA") is None
+
+
+def test_a_bare_position_keeps_the_title_and_duration(tmp_path):
+    # The home list's Mark as unwatched posts a position of 0 with no title: the row keeps its name.
+    store = portal.PositionStore(tmp_path / "s.json")
+    store.put("AAAAAAAAAAA", 500, 1033, "first", updated=1000)
+    entry = store.put("AAAAAAAAAAA", 0)
+    assert (entry["t"], entry["duration"], entry["title"]) == (0.0, 1033.0, "first")
+
+
+def test_keep_order_keeps_the_entry_s_place(tmp_path):
+    # Mark as watched / unwatched posts with keep_order: the row neither jumps to the top nor
+    # changes which entries the cap drops.
+    store = portal.PositionStore(tmp_path / "s.json")
+    store.put("AAAAAAAAAAA", 500, 1033, "first", updated=1000)
+    store.put("BBBBBBBBBBB", 5, 600, "second", updated=2000)
+    entry = store.put("AAAAAAAAAAA", 1033, 1033, keep_order=True)
+    assert (entry["t"], entry["updated"]) == (1033.0, 1000)
+    assert [v["id"] for v in store.all()] == ["BBBBBBBBBBB", "AAAAAAAAAAA"]
+    assert store.put("AAAAAAAAAAA", 0)["updated"] > 2000  # a plain save is a watch: to the top
+    # A mark on a video deleted meanwhile (on another device) does not bring it back.
+    store.delete("BBBBBBBBBBB")
+    assert store.put("BBBBBBBBBBB", 600, 600, keep_order=True) is None
+    assert store.get("BBBBBBBBBBB") is None and [v["id"] for v in store.all()] == ["AAAAAAAAAAA"]
+
+
+def test_api_position_keep_order_is_a_bool(tmp_path, monkeypatch):
+    services = make_services(tmp_path, "local")
+    services.positions = services.state
+    services.state.put("AAAAAAAAAAA", 500, 1033, "first", updated=1000)
+    monkeypatch.setattr(portal.Handler, "services", services)
+    monkeypatch.setattr(portal.Handler, "allowed_hosts", {"127.0.0.1"})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), portal.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+    def post(body):
+        conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+        conn.request("POST", "/api/position", json.dumps(body), {"Host": "127.0.0.1", "Content-Type": "application/json"})
+        res = conn.getresponse()
+        answer = (res.status, json.loads(res.read()))
+        conn.close()
+        return answer
+
+    try:
+        for bad in ("yes", 1, None):
+            assert post({"video_id": "AAAAAAAAAAA", "t": 1033, "keep_order": bad})[0] == 400
+        status, answer = post({"video_id": "AAAAAAAAAAA", "t": 1033, "duration": 1033, "keep_order": True})
+        assert status == 200 and answer["position"]["updated"] == 1000
+        assert post({"video_id": "AAAAAAAAAAA", "t": 0})[1]["position"]["updated"] > 1000
+        # A mark on a video that is gone: 404, nothing created.
+        assert post({"video_id": "CCCCCCCCCCC", "t": 600, "duration": 600, "keep_order": True}) == (
+            404, {"ok": False, "error": "no such video"})
+        assert services.state.get("CCCCCCCCCCC") is None
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
 
 
 def test_validate_card():
@@ -657,3 +758,87 @@ def test_the_page_gets_the_extensions_own_words_js():
     assert not (PATH.parent / "static" / "words.js").exists(), "one words.js, served from addon/"
     html = (PATH.parent / "static" / "index.html").read_text(encoding="utf-8")
     assert html.index('src="words.js"') < html.index('src="app.js"')
+
+
+# ---------------------------------------------------------------- the HLS resolve: anonymous first
+
+
+def fake_resolver(monkeypatch, tmp_path, outcomes, cookies=True):
+    """yt-dlp stand-in: `outcomes` maps signed in (True/False) to an info dict or an exception.
+    Returns the list of option dicts each YoutubeDL was made with."""
+    monkeypatch.setattr(portal, "SHISUKO_HOME", tmp_path)
+    if cookies:
+        (tmp_path / "config.json").write_text('{"cookies_from_browser": "firefox"}', encoding="utf-8")
+    made = []
+
+    class YoutubeDL:
+        def __init__(self, options):
+            self.options = options
+            made.append(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, url, download):
+            outcome = outcomes["cookiesfrombrowser" in self.options]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+    monkeypatch.setattr(portal, "import_ytdlp", lambda: SimpleNamespace(YoutubeDL=YoutubeDL))
+    monkeypatch.setattr(portal, "http_open", lambda url, headers=None, timeout=20.0: SimpleNamespace(read=lambda: b"#EXTM3U"))
+    monkeypatch.setattr(portal, "rewrite_master", lambda text, prefix: ("#EXTM3U", {"v1": "u"}, {"v1": 720}))
+    return made
+
+
+HLS_INFO = {"duration": 60, "title": "t", "formats": [{"protocol": "m3u8_native", "manifest_url": "https://example.invalid/m"}]}
+NO_HLS_INFO = {"duration": 60, "title": "t", "formats": [{"protocol": "https", "url": "https://example.invalid/v"}]}
+
+
+def test_resolve_takes_the_anonymous_hls_and_never_reads_the_cookies(tmp_path, monkeypatch):
+    made = fake_resolver(monkeypatch, tmp_path, {False: HLS_INFO, True: AssertionError("signed in")})
+    video = portal.HlsVideo("dQw4w9WgXcQ")
+    portal.HlsProxy().resolve(video)
+    assert video.master and len(made) == 1 and "cookiesfrombrowser" not in made[0]
+
+
+@pytest.mark.parametrize("anonymous", [NO_HLS_INFO, RuntimeError("Sign in to confirm you're not a bot")])
+def test_resolve_tries_the_cookies_when_anonymous_gives_no_hls(tmp_path, monkeypatch, anonymous):
+    made = fake_resolver(monkeypatch, tmp_path, {False: anonymous, True: HLS_INFO})
+    video = portal.HlsVideo("dQw4w9WgXcQ")
+    portal.HlsProxy().resolve(video)
+    assert video.master and ["cookiesfrombrowser" in o for o in made] == [False, True]
+    assert made[1]["cookiesfrombrowser"] == ("firefox",)
+
+
+def test_resolve_without_cookies_or_with_both_failing_raises(tmp_path, monkeypatch):
+    made = fake_resolver(monkeypatch, tmp_path, {False: NO_HLS_INFO, True: HLS_INFO}, cookies=False)
+    with pytest.raises(portal.UpstreamError, match="no HLS"):
+        portal.HlsProxy().resolve(portal.HlsVideo("dQw4w9WgXcQ"))
+    assert len(made) == 1  # no browser chosen: no second try
+    # Both tries failing in their own ways: the signed-in error, unless the anonymous try's clean
+    # "no HLS" came first, which sends the page to YouTube's player (422) rather than a 502.
+    fake_resolver(monkeypatch, tmp_path, {False: NO_HLS_INFO, True: RuntimeError("members only")})
+    with pytest.raises(portal.UpstreamError, match="no HLS") as caught:
+        portal.HlsProxy().resolve(portal.HlsVideo("dQw4w9WgXcQ"))
+    assert caught.value.status == 422
+    fake_resolver(monkeypatch, tmp_path, {False: RuntimeError("bot check"), True: RuntimeError("members only")})
+    with pytest.raises(RuntimeError, match="members only"):
+        portal.HlsProxy().resolve(portal.HlsVideo("dQw4w9WgXcQ"))
+
+
+def test_a_live_stream_is_not_tried_again_with_cookies(tmp_path, monkeypatch):
+    made = fake_resolver(monkeypatch, tmp_path, {False: {**HLS_INFO, "is_live": True}, True: HLS_INFO})
+    with pytest.raises(portal.UpstreamError, match="live"):
+        portal.HlsProxy().resolve(portal.HlsVideo("dQw4w9WgXcQ"))
+    assert len(made) == 1
+
+
+def test_only_the_hls_resolve_goes_without_cookies(tmp_path, monkeypatch):
+    monkeypatch.setattr(portal, "SHISUKO_HOME", tmp_path)
+    (tmp_path / "config.json").write_text('{"cookies_from_browser": "firefox"}', encoding="utf-8")
+    assert portal.ydl_options("best")["cookiesfrombrowser"] == ("firefox",)  # the picture's stream URL
+    assert "cookiesfrombrowser" not in portal.ydl_options(cookies=False)

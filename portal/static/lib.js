@@ -58,6 +58,23 @@
     return idx;
   }
 
+  // Where playback picks up when the dictionary sheet closes. `at` is the playhead at the tap, which
+  // comes a second or more after the words that made the viewer stop: resuming there loses them.
+  // The line is the tapped word's when it is the line being said or the one before it (still on
+  // screen), else the line being said. "line" resumes at its start; anything else LOOKUP_LEAD_S
+  // before the tap, never before the line's start and never after the tap. Before the first line
+  // (an intro, or a tap on the line still to come) there is no line to anchor to: both modes
+  // resume LOOKUP_LEAD_S before the tap, so a long intro is never rewound to 0:00.
+  const LOOKUP_LEAD_S = 1;
+  function lookupResume(cues, at, tappedId, mode) {
+    const active = activeCueIndex(cues, at);
+    const tapped = cues.findIndex((c) => c.id === tappedId);
+    const cue = cues[tapped >= 0 && (tapped === active || tapped === active - 1) ? tapped : active] || null;
+    const lead = at - LOOKUP_LEAD_S;
+    const t = !cue ? lead : mode === "line" ? cue.start : Math.max(cue.start, lead);
+    return { t: Math.max(0, Math.min(at, t)), cue };
+  }
+
   function formatTime(seconds) {
     const s = Math.max(0, Math.floor(Number(seconds) || 0));
     const h = Math.floor(s / 3600);
@@ -95,6 +112,9 @@
   // values they need. English only for now.
   const STRINGS = {
     reconnecting: "Reconnecting…",
+    // The double tap's badge on the video: how many lines it stepped, the arrows pointing the way.
+    linesBack: (n) => `« ${n} ${n === 1 ? "line" : "lines"}`,
+    linesForward: (n) => `${n} ${n === 1 ? "line" : "lines"} »`,
     reconnectingDetail: (e) => `Reconnecting to the subtitle server…${e ? ` (${e})` : ""}`,
     reconnectingError: (e) => `Reconnecting… (${e})`,
     connecting: "Connecting…",
@@ -121,7 +141,32 @@
     transcribing: "Transcribing…",
     // the page
     notALink: "That isn't a YouTube link or video ID.",
-    removeVideo: (name) => `Remove ${name}`,
+    rowActions: (name) => `Actions for ${name}`, // the edit minus: Mark as watched (with a duration) and Delete
+    deleteVideo: (name) => `Delete ${name}`,
+    markWatchedVideo: (name) => `Mark as watched: ${name}`,
+    markUnwatchedVideo: (name) => `Mark as unwatched: ${name}`,
+    delete: "Delete",
+    markWatched: "Watched",
+    markUnwatched: "Unwatched",
+    edit: "Edit",
+    done: "Done",
+    close: "Close",
+    back: "Back",
+    settings: "Settings",
+    // Settings > Subtitle style (the landscape mode's caption box)
+    subtitleStyle: "Subtitle style",
+    captionBackground: "Background",
+    captionSize: "Text size",
+    captionPosition: "Position",
+    captionNone: "None",
+    captionSmall: "Small",
+    captionMedium: "Medium",
+    captionLarge: "Large",
+    captionLower: "Lower",
+    captionDefault: "Default",
+    captionHigher: "Higher",
+    captionSample: "今日は雨が降っています",
+    captionStyleNote: "For the subtitle over the video in the landscape mode.",
     play: "Play",
     pause: "Pause",
     lookingUp: "Looking up…",
@@ -161,9 +206,17 @@
     deviceSeen: (when) => `last seen ${when}`,
     notPaired: "This device is no longer paired.",
     usingYouTube: "Using YouTube's player",
+    watchHistoryOn: "YouTube history: on, what you watch here counts on your YouTube account",
+    watchHistoryOff: "YouTube history: off (start the portal with --watch-history on)",
+    watchHistoryNoCookies: "YouTube history: needs the server's YouTube cookies (--save-cookies-from-browser)",
     position: "Position",
     positionOf: (at, total) => `${at} of ${total}`,
     live: "LIVE",
+    resumeAfterLookup: "Resume after a lookup",
+    resumeBeforeTap: "Just before where I tapped",
+    resumeLineStart: "Start of the line",
+    fullscreen: "Full screen",
+    exitFullscreen: "Exit full screen",
   };
 
   function statusText(view) {
@@ -395,13 +448,13 @@
   // ---- resuming
 
   // Where to start a video: a ?t= in the link wins; else the saved position minus 2 s, except near
-  // the start (under 10 s: start over) or near the end (within 30 s: it was finished, start over).
+  // the start (under 10 s: start over) or once finished() (it was watched: start over).
   function resumeTime({ saved, duration, urlT }) {
     if (urlT !== null && urlT !== undefined && Number.isFinite(urlT)) return Math.max(0, urlT);
     if (!saved || !Number.isFinite(saved.t)) return 0;
     const d = Number(saved.duration) || Number(duration) || 0;
     if (saved.t < 10) return 0;
-    if (d && saved.t >= d - 30) return 0;
+    if (finished(saved.t, d)) return 0;
     return Math.max(0, saved.t - 2);
   }
 
@@ -429,13 +482,110 @@
     return Math.abs(t - resumeTarget) <= 2;
   }
 
-  // How far in, 0..1, for the progress bar under a thumbnail; a finished video reads as 1.
+  // Whether a position save would post what the last one posted a moment ago: the same video, the
+  // same time within SAVE_SAME_S, sent less than SAVE_REPEAT_MS before. A video's end fires pause,
+  // then ended, then the way home saves: one post is enough. last is null after a failed post, so a
+  // save the server never received is never skipped; after the window a save goes out again, in
+  // case another device moved the position meanwhile.
+  const SAVE_SAME_S = 0.05;
+  const SAVE_REPEAT_MS = 5000;
+  function repeatsSave(last, videoId, t, now) {
+    return !!last && last.videoId === videoId && Math.abs(last.t - t) <= SAVE_SAME_S && now - last.at < SAVE_REPEAT_MS;
+  }
+
+  // The one rule for a watched video, read by the home bar (full), Mark as watched / unwatched and
+  // the resume (start over): the last tenth of it, never less than END_SLOP_S and never more than
+  // FINISHED_S. So a long video is finished in its last 30 s (the credits, an outro), a 2-minute
+  // one in its last 12 s, and a short clip in its last 2 s, not a third of it.
+  const FINISHED_S = 30;
+  const FINISHED_SHARE = 0.1;
+  // A playhead this close to the end is at the end: players stop a frame or a segment short.
+  const END_SLOP_S = 2;
+
+  function finished(t, duration) {
+    if (!(Number.isFinite(duration) && duration > 0 && Number.isFinite(t))) return false;
+    return t >= duration - Math.min(FINISHED_S, Math.max(END_SLOP_S, duration * FINISHED_SHARE));
+  }
+
+  // Whether an "ended" is the real end, for the way home: an HLS stream may stop a segment early,
+  // and that must not count. Narrower than finished(), on purpose: it asks where the player
+  // stopped, not whether the viewer has seen the video.
+  function atEnd(t, duration) {
+    return Number.isFinite(duration) && duration > 0 && Number.isFinite(t) && t >= duration - END_SLOP_S;
+  }
+
+  // How far in, 0..1, for the bar under a thumbnail: the position over the duration, a finished
+  // video 1. No duration, no bar.
   function watchedFraction(entry) {
     const d = Number(entry && entry.duration) || 0;
     const t = Number(entry && entry.t) || 0;
-    if (!d) return 0;
-    if (t >= d - 30) return 1;
-    return Math.max(0, Math.min(1, t / d));
+    if (!(d > 0) || !(t > 0)) return 0;
+    if (finished(t, d)) return 1;
+    return Math.min(1, t / d);
+  }
+
+  // Mark as watched / unwatched: the position it sets. A finished video goes back to 0, any other
+  // to its end, so the bar reads full; null without a duration (no end to set).
+  function watchedToggle(entry) {
+    const d = Number(entry && entry.duration) || 0;
+    if (!(d > 0)) return null;
+    return finished(Number(entry.t) || 0, d) ? 0 : d;
+  }
+
+  // ---- swiping a home row (iOS Mail's swipe to the left)
+
+  // SLOP: px of movement before the gesture picks an axis; a vertical one is the page's scroll.
+  // OPEN: the share of the actions' width a slow release must pass to open them (from open, the
+  // share it must close by to close them). DELETE: the share of the row's width past which a release
+  // deletes. FLICK: px/ms; a release this fast goes the way it moved, however short. DAMP: how much of
+  // the finger's travel past the actions the row follows. BAND: px; the rubber band to the right of
+  // closed tends to it. VELOCITY_MS: the stretch of movement the release speed is read from.
+  const SWIPE = { SLOP: 10, OPEN: 1 / 3, DELETE: 0.6, FLICK: 0.4, DAMP: 0.8, BAND: 60, VELOCITY_MS: 100 };
+
+  // null until the finger has moved SLOP px, then "x" or "y".
+  function swipeAxis(dx, dy) {
+    if (Math.hypot(dx, dy) < SWIPE.SLOP) return null;
+    return Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+  }
+
+  // Where a released row goes: "open", "closed" or "delete". shift is how far left it sits (px),
+  // actions the buttons' width, row the row's width, wasOpen how the swipe began, velocity the
+  // release speed (swipeVelocity(): px/ms, leftward positive). A flick back to the right closes
+  // first of all, as in iOS Mail: a finger pulling back is taking the delete back.
+  function swipeSettle({ shift, actions, row, wasOpen, velocity = 0 }) {
+    if (velocity <= -SWIPE.FLICK) return "closed";
+    if (shift >= row * SWIPE.DELETE) return "delete";
+    if (velocity >= SWIPE.FLICK) return "open";
+    const needed = wasOpen ? actions * (1 - SWIPE.OPEN) : actions * SWIPE.OPEN;
+    return shift >= needed ? "open" : "closed";
+  }
+
+  // How far left a row sits while dragged (px; negative is right of closed). It follows the finger
+  // 1:1 up to the actions' width, DAMP of it past them up to the row's width, and to the right of
+  // closed it stretches like iOS's rubber band, (1 - 1 / (x * 0.55 / BAND + 1)) * BAND.
+  function swipeShift({ start, dx, row, actions }) {
+    const raw = start - dx;
+    if (raw < 0) return -(1 - 1 / ((-raw * 0.55) / SWIPE.BAND + 1)) * SWIPE.BAND;
+    if (raw <= actions) return raw;
+    return Math.min(row, actions + (raw - actions) * SWIPE.DAMP);
+  }
+
+  // The release speed, px/ms leftward, from pointer samples [{t, x}] (oldest first, the release
+  // last): across those of the last VELOCITY_MS, so a finger that stopped before lifting reads 0.
+  function swipeVelocity(samples) {
+    if (samples.length < 2) return 0;
+    const last = samples[samples.length - 1];
+    const first = samples.find((p) => last.t - p.t <= SWIPE.VELOCITY_MS);
+    const dt = last.t - first.t;
+    return dt > 0 ? (first.x - last.x) / dt : 0;
+  }
+
+  // Where each of n action buttons sits behind a row shifted by shift px, as iOS reveals them: each
+  // takes an equal share of the uncovered width, so all grow with the drag. Each answer is the
+  // button's left edge, in px left of the row's right edge. full: the last (Delete) takes it all.
+  function actionOffsets(shift, n, full) {
+    const s = Math.max(0, shift);
+    return Array.from({ length: n }, (_, i) => (full && i === n - 1 ? s : (s * (n - i)) / n));
   }
 
   // ---- retries
@@ -565,6 +715,98 @@
     return S.ankiSyncWaiting;
   }
 
+  // Settings' line on the portal's --watch-history (/api/info watch_history); "" from a portal without it.
+  function watchHistoryText(mode) {
+    const S = STRINGS;
+    return { on: S.watchHistoryOn, off: S.watchHistoryOff, "no-cookies": S.watchHistoryNoCookies }[mode] || "";
+  }
+
+  // ------------------------------------------------------------ the YouTube watch history
+  //
+  // The stretches of media time our own player played, [start, end] each, which the page reports
+  // to /api/watched when the portal runs with --watch-history on. A seek, pause, rate change or
+  // the end closes a stretch (watchClose()); so does a jump the events missed.
+
+  const WATCH_JUMP_S = 3; // further than playback moves between two timeupdates: a seek
+
+  function newWatchLog() {
+    return { open: null, closed: [] };
+  }
+
+  // While playing: the open stretch runs on to t, or a new one starts at t.
+  function watchAt(log, t) {
+    if (!Number.isFinite(t) || t < 0) return;
+    const open = log.open;
+    if (open && t >= open[1] - 0.25 && t - open[1] <= WATCH_JUMP_S) {
+      open[1] = Math.max(open[1], t);
+      return;
+    }
+    watchClose(log);
+    log.open = [t, t];
+  }
+
+  function watchClose(log) {
+    if (log.open && log.open[1] > log.open[0]) log.closed.push(log.open);
+    log.open = null;
+  }
+
+  // One report's stretches, at most `max` (the rest wait for the next), rounded to the
+  // millisecond. The open stretch closes at t; while playing, the next one starts there.
+  function watchDrain(log, t, playing, max = 20) {
+    if (log.open) {
+      watchAt(log, t);
+      const end = log.open[1];
+      watchClose(log);
+      if (playing) log.open = [end, end];
+    }
+    const ms = (x) => Math.round(x * 1000) / 1000;
+    return log.closed.splice(0, max).map(([a, b]) => [ms(a), ms(b)]);
+  }
+
+  // /api/watched's answer: milliseconds of playing until the next scheduled report (YouTube's own
+  // flush schedule, `next` in seconds), or null when it names none.
+  function watchNextMs(answer) {
+    const next = answer && answer.next;
+    return typeof next === "number" && Number.isFinite(next) && next > 0 && next <= 3600 ? next * 1000 : null;
+  }
+
+  // The browser and system a User-Agent names, as YouTube's pings name them (cbr, cbrver, cos,
+  // cosver): {browser, browser_version, os, os_version}, only the parts it names plainly. The
+  // version keeps the User-Agent's own spelling (iOS "17_5").
+  function clientInfo(ua) {
+    const text = String(ua || "");
+    const out = {};
+    const os = [
+      [/\b(iPhone|iPad|iPod)\b.*?\bOS (\d+(?:_\d+)*)/, (m) => [m[1], m[2]]],
+      [/\bAndroid (\d+(?:\.\d+)*)/, (m) => ["Android", m[1]]],
+      [/\bWindows NT (\d+\.\d+)/, (m) => ["Windows", m[1]]],
+      [/\bMac OS X (\d+(?:[_.]\d+)*)/, (m) => ["Macintosh", m[1]]],
+      [/\bCrOS\b/, () => ["CrOS", ""]],
+      [/\b(X11|Linux)\b/, () => ["X11", ""]],
+    ];
+    for (const [re, take] of os) {
+      const m = re.exec(text);
+      if (!m) continue;
+      [out.os, out.os_version] = take(m);
+      break;
+    }
+    const browsers = [
+      [/\bEdg(?:e|A|iOS)?\/(\d+(?:\.\d+)*)/, "Edge"],
+      [/\b(?:Firefox|FxiOS)\/(\d+(?:\.\d+)*)/, "Firefox"],
+      [/\b(?:CriOS|Chrome)\/(\d+(?:\.\d+)*)/, "Chrome"],
+      [/\bVersion\/(\d+(?:\.\d+)*).*\bSafari\//, "Safari"],
+    ];
+    for (const [re, name] of browsers) {
+      const m = re.exec(text);
+      if (!m) continue;
+      out.browser = name;
+      out.browser_version = m[1];
+      break;
+    }
+    for (const key of Object.keys(out)) if (!/^[A-Za-z0-9._ -]{1,32}$/.test(out[key])) delete out[key];
+    return out;
+  }
+
   // ------------------------------------------------------------ word colours
   //
   // The server reads the Anki deck and sends its rows with /sync (`deck`), [id, word, reading,
@@ -627,6 +869,178 @@
     return out;
   }
 
+  // The box a tap at (x, y) falls in, or the nearest one: its index, or -1 for none. Boxes are
+  // {left, top, right, bottom}, one per character of a tapped word.
+  function nearestBox(boxes, x, y) {
+    let best = -1;
+    let bestDistance = Infinity;
+    boxes.forEach((box, i) => {
+      const dx = Math.max(box.left - x, 0, x - box.right);
+      const dy = Math.max(box.top - y, 0, y - box.bottom);
+      const distance = dx * dx + dy * dy;
+      if (distance < bestDistance) {
+        best = i;
+        bestDistance = distance;
+      }
+    });
+    return best;
+  }
+
+  // ---- the dictionary sheet's choices
+
+  // What a scan looks up: up to `n` UTF-16 units of the line from `start`, never ending inside a
+  // character beyond the BMP (𠮟 is two units), whose lone half Yomitan cannot match.
+  function scanText(text, start, n) {
+    let end = Math.min(text.length, start + n);
+    if (end > start && end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1])) end--;
+    return text.slice(start, end);
+  }
+
+  // The line's span an entry stands for. A lookup starts at the tapped span's start, and each
+  // entry says how many characters of it matched. A scan (Japanese, from the tapped character on)
+  // takes every entry's own length; a token looked up whole keeps the token for its longest
+  // matches and narrows only for a shorter one.
+  //   span: the tapped [start, end]; length: the line's length; longest: entries[0].matched.
+  // Offsets and `matched` are UTF-16 code units, JavaScript's own (the server counts them so too).
+  function entrySpan({ span, matched, longest, scan, length }) {
+    if (!(matched > 0) || (!scan && matched >= longest)) return [span[0], span[1]];
+    return [span[0], Math.min(length, span[0] + matched)];
+  }
+
+  // The sheet's tabs: [{term, reading, shorter}]. The reading shows only where the term alone
+  // would be ambiguous (the same term twice); `shorter` marks the first of the entries that
+  // matched less of the line than the default one, where the row draws a divider.
+  function candidateTabs(entries) {
+    const count = new Map();
+    for (const e of entries) count.set(e.term, (count.get(e.term) || 0) + 1);
+    const first = entries.findIndex((e) => e.matched < entries[0].matched);
+    return entries.map((e, i) => ({
+      term: e.term,
+      reading: count.get(e.term) > 1 && e.reading && e.reading !== e.term ? e.reading : null,
+      shorter: i === first,
+    }));
+  }
+
+  // The landscape mode on a phone held upright turns the page a quarter clockwise (app.css
+  // html.turned): the view's top lies along the screen's right edge, and `turn.height` is the view's
+  // own height, which is the screen's width. Pointer events and getBoundingClientRect() speak in
+  // screen coordinates; these put them in the view's frame. `turn` is null when nothing is turned.
+  function viewPoint(x, y, turn) {
+    return turn ? { x: y, y: turn.height - x } : { x, y };
+  }
+
+  function viewDelta(dx, dy, turn) {
+    return turn ? { dx: dy, dy: -dx } : { dx, dy };
+  }
+
+  function viewRect(rect, turn) {
+    if (!turn) return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height };
+    return { left: rect.top, top: turn.height - rect.right, right: rect.bottom, bottom: turn.height - rect.left, width: rect.height, height: rect.width };
+  }
+
+  // A viewport taller than wide shows the landscape mode turned: the viewer turns the phone, even
+  // with its rotation lock on, which is the only way an iPhone's page goes sideways.
+  function shouldTurn(width, height) {
+    return height > width;
+  }
+
+  const DOUBLE_TAP_MS = 300;
+
+  // A tap on the video, as in YouTube's app. `zone` is where it fell (tapZone()), `last` what the
+  // previous tap left (null at first). On a side, a second tap within `windowMs` steps a line that
+  // way, and each further tap in time steps one more (`steps` counts them from the run's first
+  // step). What a lone tap does depends on the layout:
+  // - Portrait: the middle third plays or pauses at once. A lone side tap plays at once while
+  //   paused, since iOS lets play() run only inside the tap itself; a pause needs no gesture, so
+  //   while playing it pauses only once the window passes with no second tap ("pause-later"), and
+  //   a double tap never stops the video first.
+  // - Landscape: the middle fifth plays or pauses at once; a lone tap anywhere else shows or hides
+  //   the controls once the window has passed ("controls-later") and never pauses.
+  function shieldTap(last, tap, { landscape = false, windowMs = DOUBLE_TAP_MS } = {}) {
+    const side = tap.zone === "left" || tap.zone === "right";
+    if (side && last && last.zone === tap.zone && tap.at - last.at < windowMs) {
+      const steps = last.steps + 1;
+      return { action: "step", delta: tap.zone === "left" ? -steps : steps, steps, next: { at: tap.at, zone: tap.zone, steps } };
+    }
+    if (!side) return { action: "toggle", next: null };
+    const action = landscape ? "controls-later" : tap.playing ? "pause-later" : "play";
+    return { action, next: { at: tap.at, zone: tap.zone, steps: 0 } };
+  }
+
+  // The middle zone's share of the video's width: a third in portrait, a fifth in landscape. Each
+  // side zone is what is left of it, halved; the double tap's badge covers exactly that.
+  const TAP_MIDDLE = { portrait: 1 / 3, landscape: 0.2 };
+  function sideShare(middle) {
+    return (1 - middle) / 2;
+  }
+
+  // Where a tap fell across a box, both in the view's frame: "middle" within the central
+  // `middle` share of its width, else its side.
+  function tapZone(x, box, middle = TAP_MIDDLE.portrait) {
+    const f = (x - box.left) / box.width;
+    return Math.abs(f - 0.5) <= middle / 2 ? "middle" : f < 0.5 ? "left" : "right";
+  }
+
+  // Where a step lands (back, forward, a swipe, a double tap's run): `delta` lines from `base`,
+  // the line being said when the run began (activeCueIndex(), so mid-line back means the line
+  // before, as in the extension; -1 before the first line), clamped to the list. `moved` is how
+  // many lines that really is; a badge counts it. Back on the first line has no line before it,
+  // so it replays that line from its start (`replay`, nothing moved, no badge). Forward on the
+  // last line, or back before the first, finds nothing: idx -1, and nothing seeks.
+  function stepTarget(count, base, delta) {
+    if (!count || !delta) return { idx: -1, moved: 0 };
+    const idx = Math.min(count - 1, Math.max(0, base + delta));
+    const moved = (idx - base) * Math.sign(delta);
+    if (moved > 0) return { idx, moved };
+    if (delta < 0 && base === 0) return { idx: 0, moved: 0, replay: true };
+    return { idx: -1, moved: 0 };
+  }
+
+  // The playhead from a frame report, when it is trustworthy. requestVideoFrameCallback's
+  // mediaTime is exact to the frame on screen, but right after a seek a browser can still report
+  // frames from before it (Safari does), so it only refines the element's own currentTime, the
+  // authority: never while seeking, never more than `slack` seconds away from it.
+  function framePlayhead(frame, current, { seeking = false, slack = 0.5 } = {}) {
+    if (seeking || !Number.isFinite(frame) || Math.abs(frame - current) > slack) return current;
+    return frame;
+  }
+
+  // Settings > Subtitle style: the landscape caption box's background, text size and resting
+  // height, each one of a few fixed choices; `fallback` is the default and today's look. Anything
+  // else read back from storage becomes the default.
+  const CAPTION_CHOICES = {
+    captionBg: { values: [0, 0.3, 0.45, 0.6, 0.8], fallback: 0.6 },
+    captionSize: { values: ["small", "medium", "large"], fallback: "medium" },
+    captionPosition: { values: ["lower", "default", "higher"], fallback: "default" },
+  };
+  const CAPTION_SCALE = { small: 0.85, medium: 1, large: 1.2 }; // times the size clamp in app.css
+  const CAPTION_LIFT = { lower: -8, default: 0, higher: 24 }; // px off the resting height, inside the safe area
+
+  function captionStyle(saved) {
+    const out = {};
+    for (const [key, { values, fallback }] of Object.entries(CAPTION_CHOICES)) {
+      const v = saved ? saved[key] : undefined;
+      out[key] = values.includes(v) ? v : fallback;
+    }
+    return out;
+  }
+
+  // The custom properties app.css reads, as plain numbers clamped to sane ranges whatever comes in:
+  // nothing from storage reaches the stylesheet unchecked. Below a 45% box the text gets a shadow
+  // of its own (--cap-shadow), as the iPhone's own outline styles do, or white text on a bright
+  // picture is lost.
+  function captionVars(saved) {
+    const s = captionStyle(saved);
+    const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, Number.isFinite(x) ? x : lo));
+    const bg = clamp(s.captionBg, 0, 1);
+    return {
+      "--cap-bg": String(bg),
+      "--cap-scale": String(clamp(CAPTION_SCALE[s.captionSize], 0.5, 2)),
+      "--cap-lift": `${clamp(CAPTION_LIFT[s.captionPosition], -16, 48)}px`,
+      "--cap-shadow": bg < 0.45 ? "0.9" : "0",
+    };
+  }
+
   function hasKanji(text) {
     return /[㐀-鿿豈-﫿々]/.test(String(text || ""));
   }
@@ -634,11 +1048,15 @@
   const api = {
     parseVideoInput, parseStart, activeCueIndex, formatTime, coveredUntil, statusText, tokenOffsets,
     morae, pitchPattern, splitFurigana, hasKanji, VIDEO_ID_RE, watchStatus, freqLabel,
-    STRINGS, resumeTime, saveAllowed, dismissAction, GHOST_CLICK_MS, watchedFraction, formatClock, spokenTime,
+    STRINGS, resumeTime, saveAllowed, repeatsSave, SAVE_REPEAT_MS, dismissAction, GHOST_CLICK_MS, watchedFraction, finished, FINISHED_S, atEnd, END_SLOP_S,
+    watchedToggle, SWIPE, swipeAxis, swipeSettle, swipeShift, swipeVelocity, actionOffsets, formatClock, spokenTime,
     SCHEDULES, backoffDelay, isTransient, withRetry, retryLeft,
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
-    ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs,
+    ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs, nearestBox, entrySpan, scanText, candidateTabs, lookupResume, LOOKUP_LEAD_S,
+    watchHistoryText, newWatchLog, watchAt, watchClose, watchDrain, watchNextMs, clientInfo, viewPoint, viewDelta, viewRect, shouldTurn,
+    shieldTap, tapZone, TAP_MIDDLE, sideShare, stepTarget, framePlayhead, DOUBLE_TAP_MS,
+    CAPTION_CHOICES, captionStyle, captionVars,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.PortalLib = api;

@@ -73,14 +73,34 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 .home-head { display: flex; align-items: baseline; justify-content: space-between; }
 .edit-btn { font-size: 17px; color: var(--label); min-height: 44px; padding: 0 4px; }
 .recent { list-style: none; margin: 32px 0 0; padding: 0; }
-.recent li { display: flex; align-items: center; }
+/* A row: the actions behind, the row in front, which a swipe slides left off them. pan-y leaves
+   vertical scrolling to the browser; app.js takes a gesture only once it went sideways. Each action
+   button is a full-row-wide slab parked just past the right edge; app.js slides it in by transform,
+   so a drag never lays anything out. Later buttons lie on top: Delete, last, covers the rest when it
+   takes the whole width. */
+.recent li { position: relative; overflow: hidden; touch-action: pan-y; -webkit-user-select: none; user-select: none; }
+.recent .row-front { position: relative; z-index: 1; display: flex; align-items: center; background: #000; }
+.recent .row-front, .recent .row-actions button, .recent .act-face { transition: transform 0.3s cubic-bezier(0.25, 1, 0.5, 1); }
+.recent li.live .row-front, .recent li.live .row-actions button { will-change: transform; }
+.recent li.dragging .row-front, .recent li.dragging .row-actions button, .recent li.dragging .act-face { transition: none; }
+.recent li.dragging .row-actions button.expanding, .recent li.dragging .expanding .act-face { transition: transform 0.2s cubic-bezier(0.25, 1, 0.5, 1); }
+.recent li.collapsing { opacity: 0; transition: height 0.3s var(--spring), opacity 0.3s; }
+.recent .row-actions { position: absolute; inset: 0; }
+.recent .row-actions button { position: absolute; top: 0; bottom: 0; left: 100%; width: 100%; overflow: hidden; color: #fff; text-align: left; }
+.recent .row-actions button:active { opacity: 1; }
+.recent .act-face { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; width: 80px; height: 100%; font-size: 13px; font-weight: 500; }
+.recent .act-face svg { width: 22px; height: 22px; stroke-width: 2; }
+.recent .mark { background: #0a84ff; }
+.recent .delete { background: #ff453a; }
 .recent a { flex: 1; min-width: 0; display: flex; gap: 16px; align-items: center; padding: 8px 0; color: inherit; text-decoration: none; }
 .recent a:active { opacity: 0.55; }
 .thumb { position: relative; flex: none; width: 128px; aspect-ratio: 16 / 9; border-radius: 8px; overflow: hidden; background: var(--grouped); }
 .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
-/* How far in: a thin track along the thumbnail's bottom edge. */
-.thumb .progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(0, 0, 0, 0.55); }
-.thumb .progress span { display: block; height: 100%; background: rgba(235, 235, 245, 0.9); }
+/* How far in, as YouTube draws it: a translucent grey track flush with the bottom edge, the watched
+   part in YouTube's brand red. 4 px on YouTube's ~200 px-tall thumbnails; 3 px on these 72 px ones.
+   A few seconds in still shows a sliver. The thumbnail's rounded corners clip both. */
+.thumb .progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(255, 255, 255, 0.35); }
+.thumb .progress span { display: block; height: 100%; min-width: 3px; background: #ff0033; }
 .recent .title { font-size: 15px; line-height: 1.35; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .recent .remove { display: none; flex: none; width: 44px; height: 44px; position: relative; }
 .recent .remove::before { content: ""; position: absolute; left: 11px; top: 11px; width: 22px; height: 22px; border-radius: 50%; background: #ff453a; }
@@ -100,6 +120,9 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
    - It is taller than the box: the video still fills the box exactly, while the title row (top)
      and the logo and share buttons (bottom) land in the letterbox, which the box clips away. */
 .player-box { --crop: 72px; }
+/* A phone held sideways outside the landscape mode: the box never runs off the screen, so its
+   corner buttons stay in reach. Upright, 16:9 is far below this. */
+.player-box { max-height: 70vh; max-height: 70dvh; }
 /* Our own <video>: no crop, no scale; the box is exactly the picture. */
 .player-box video#player { top: 0; height: 100%; width: 100%; transform: none; object-fit: contain; background: #000; }
 .btn-home {
@@ -128,6 +151,10 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 }
 .btn-home svg { position: relative; width: 20px; height: 20px; stroke-width: 2.2; }
 .player-box.show-back .btn-home { opacity: 1; pointer-events: auto; }
+/* The full-screen button: the back button's twin, in the opposite corner. */
+.btn-full { left: auto; top: auto; right: calc(4px + var(--safe-right)); bottom: 4px; }
+.btn-full .icon-collapse, .btn-full.on .icon-expand { display: none; }
+.btn-full.on .icon-collapse { display: block; }
 .player-box iframe, .player-box #player {
   position: absolute;
   left: 0;
@@ -154,6 +181,33 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 .shield.paused { background: rgba(0, 0, 0, 0.8); }
 .shield.ended { background: linear-gradient(rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0.45)), var(--poster, none) center / cover, #000; }
 .shield.passthrough { pointer-events: none; }
+/* The double tap's badge: a soft light over the tapped side zone, the line count in its middle,
+   fading out as YouTube's "10 seconds" does. It never takes a tap. Its width is the zone's own
+   (app.js showStepBadge(), from lib.js tapZone()'s geometry); this is the portrait third. */
+.step-badge {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  bottom: 0;
+  width: 33.333%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--label);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+  opacity: 0;
+}
+.step-badge[data-side="left"] { left: 0; border-radius: 0 50% 50% 0 / 0 50% 50% 0; background: radial-gradient(farthest-side at 0 50%, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0.08)); }
+.step-badge[data-side="right"] { right: 0; border-radius: 50% 0 0 50% / 50% 0 0 50%; background: radial-gradient(farthest-side at 100% 50%, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0.08)); }
+.step-badge.show { animation: step-badge 0.7s ease-out; }
+@keyframes step-badge { 0%, 45% { opacity: 1; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .step-badge.show { animation: step-badge-still 0.7s steps(1, end); }
+  @keyframes step-badge-still { 0% { opacity: 1; } 100% { opacity: 0; } }
+}
 .shield-play { width: 56px; height: 56px; fill: rgba(255, 255, 255, 0.92); stroke: none; opacity: 0; transition: opacity 0.25s; }
 .shield.paused .shield-play, .shield.ended .shield-play { opacity: 1; }
 
@@ -273,6 +327,7 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 .cue .wc[data-status="new"] { text-decoration-color: rgba(255, 69, 58, 0.9); }
 .word:active { background: var(--fill); }
 .tok.picked { background: rgba(255, 255, 255, 0.14); color: var(--label); }
+::highlight(picked) { background-color: rgba(255, 255, 255, 0.14); color: var(--label); }
 rt { font-size: 0.45em; color: var(--label-2); font-weight: 400; }
 
 .toolbar {
@@ -313,11 +368,11 @@ rt { font-size: 0.45em; color: var(--label-2); font-weight: 400; }
   border-radius: 14px 14px 0 0;
   transform: translateY(calc(100% + 24px));
   transition: transform 0.35s var(--spring);
+  padding-top: 20px;
   pointer-events: none;
 }
 .sheet.open { transform: translateY(0); pointer-events: auto; }
 .sheet.dragging { transition: none; }
-.grabber { flex: none; width: 36px; height: 5px; border-radius: 3px; background: var(--label-3); margin: 8px auto 8px; }
 .sheet-scroll { flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 calc(20px + var(--safe-right)) 8px calc(20px + var(--safe-left)); }
 
 .headword { font-size: 34px; font-weight: 600; line-height: 1.25; letter-spacing: 0.02em; }
@@ -330,11 +385,27 @@ rt { font-size: 0.45em; color: var(--label-2); font-weight: 400; }
 .speaker svg { width: 20px; height: 20px; }
 .freq { font-size: 15px; color: var(--label-2); font-variant-numeric: tabular-nums; }
 
-.tabs { display: flex; gap: 24px; overflow-x: auto; scrollbar-width: none; margin: 0 0 8px; }
+/* One row of every match, scrolled sideways. Each tab's padding is its tap target; the row's
+   negative margin lines the first tab's text up with the headword, and its edges fade where a
+   scrolled tab is cut (the padding's width, so an unscrolled row shows every glyph whole). */
+.tabs {
+  display: flex;
+  overflow-x: auto;
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+  margin: 0 -12px 8px;
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 12px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 12px), transparent);
+}
 .tabs::-webkit-scrollbar { display: none; }
-.tab { flex: none; min-height: 44px; font-size: 17px; color: var(--label-2); border-bottom: 2px solid transparent; }
+.tab { position: relative; flex: none; min-width: 44px; min-height: 44px; padding: 0 12px; font-size: 17px; color: var(--label-2); white-space: nowrap; }
+.tab::after { content: ""; position: absolute; left: 12px; right: 12px; bottom: 0; height: 2px; border-radius: 1px; }
 .tab .tab-reading { font-size: 13px; color: var(--label-2); margin-left: 4px; }
-.tab.on { color: var(--label); border-bottom-color: var(--label); }
+.tab.on { color: var(--label); }
+.tab.on::after { background: var(--label); }
+/* Past this line, the matches that took less of the line than the default one. */
+.tab.shorter { margin-left: 8px; }
+.tab.shorter::before { content: ""; position: absolute; left: 0; top: 12px; bottom: 12px; width: 1px; background: var(--separator); }
 
 .defs { padding-bottom: 8px; }
 .gloss { font-size: 17px; line-height: 1.5; overflow-wrap: anywhere; }
@@ -394,6 +465,53 @@ rt { font-size: 0.45em; color: var(--label-2); font-weight: 400; }
 .settings-sheet { max-height: 88vh; background: #000; }
 .settings-sheet .sheet-scroll { padding-bottom: calc(24px + var(--safe-bottom)); }
 .sheet-title { font-size: 17px; font-weight: 600; text-align: center; margin: 0 0 8px; }
+/* The title row of a tall sheet, outside its scroller so it never scrolls away: the title centred,
+   its close button at the right edge, a whole 44 x 44 px target centred on the title's line. */
+.sheet-head { flex: none; position: relative; padding: 0 calc(20px + var(--safe-right)) 0 calc(20px + var(--safe-left)); }
+.sheet-head .sheet-title { padding: 0 44px; line-height: 30px; }
+.sheet-close { position: absolute; top: -7px; right: calc(13px + var(--safe-right)); width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; color: var(--label-2); }
+.sheet-close::before { content: ""; position: absolute; width: 30px; height: 30px; border-radius: 50%; background: var(--fill); }
+.sheet-close svg { position: relative; width: 16px; height: 16px; stroke-width: 2.4; }
+.sheet-close:active { opacity: 0.45; }
+/* A sub-page's way back, the close button's twin at the left edge. */
+.sheet-back { position: absolute; top: -7px; left: calc(13px + var(--safe-left)); width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; color: var(--accent); }
+.sheet-back[hidden] { display: none; }
+.sheet-back svg { width: 22px; height: 22px; stroke-width: 2.4; }
+.sheet-back:active { opacity: 0.45; }
+
+/* Settings' pages share one grid cell and slide sideways: the sub-page in from the right, the main
+   list a little to the left beneath it, as iOS Settings pushes a page. Each page scrolls itself. */
+.sheet-pages { flex: 0 1 auto; min-height: 0; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); overflow: hidden; }
+.sheet-page { grid-area: 1 / 1; transition: transform 0.35s var(--spring), visibility 0.35s; }
+.page-sub { transform: translateX(100%); visibility: hidden; }
+.settings-sheet.sub .page-main { transform: translateX(-30%); visibility: hidden; }
+.settings-sheet.sub .page-sub { transform: none; visibility: visible; }
+.sheet-pages.instant .sheet-page { transition: none; }
+.row-item.stacked { flex-direction: column; align-items: stretch; gap: 8px; padding: 10px 16px 12px; }
+.row-item.stacked .segmented button { flex: 1 1 0; min-width: 0; }
+
+/* The caption box as Subtitle style sets it, over a stand-in for a picture so its transparency
+   shows. The same custom properties as the landscape box (app.js applyCaptionStyle()). */
+.caption-sample {
+  height: 120px;
+  margin: 4px 0 16px;
+  border-radius: 10px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: calc(14px + var(--cap-lift, 0px));
+  background: linear-gradient(135deg, #5b7fa6, #c9a46b 55%, #e8e1d0);
+  overflow: hidden;
+}
+.caption-sample-box {
+  padding: 0.12em 0.45em;
+  border-radius: 0.3em;
+  background: rgba(0, 0, 0, var(--cap-bg, 0.6));
+  color: #fff;
+  font-size: calc(20px * var(--cap-scale, 1));
+  line-height: 1.35;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, var(--cap-shadow, 0)), 0 0 2px rgba(0, 0, 0, var(--cap-shadow, 0));
+}
 .group-label { font-size: 13px; font-weight: 400; text-transform: uppercase; color: var(--label-2); margin: 24px 16px 8px; letter-spacing: 0.02em; }
 .group { background: var(--grouped); border-radius: 10px; overflow: hidden; }
 .group-note { font-size: 13px; color: var(--label-2); margin: 8px 16px 0; }
@@ -442,6 +560,22 @@ rt { font-size: 0.45em; color: var(--label-2); font-weight: 400; }
 /* On is shown by position and a light track: the app keeps its one saturated colour for Mine. */
 .switch:checked { background: rgba(235, 235, 245, 0.75); }
 .switch:checked::after { transform: translateX(20px); background: #1c1c1e; }
+
+/* A choice among rows: a checkmark on the chosen one, drawn by the radio itself. */
+.check {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  width: 14px;
+  height: 8px;
+  margin: 0 4px 4px 0;
+  border: solid transparent;
+  border-width: 0 0 2.5px 2.5px;
+  border-radius: 0;
+  transform: rotate(-45deg);
+  cursor: pointer;
+}
+.check:checked { border-color: var(--label); }
 
 .segmented { display: flex; padding: 2px; border-radius: 9px; background: var(--fill); }
 .segmented button { min-width: 48px; height: 28px; border-radius: 7px; font-size: 13px; font-weight: 500; color: var(--label); }
@@ -577,4 +711,216 @@ button.row-item { width: 100%; text-align: left; background: none; border-radius
 .lyrics { -webkit-mask-image: linear-gradient(transparent 0, #000 16%, #000 calc(84% - var(--scrub-h)), transparent calc(100% - var(--scrub-h))); mask-image: linear-gradient(transparent 0, #000 16%, #000 calc(84% - var(--scrub-h)), transparent calc(100% - var(--scrub-h))); }
 @media (prefers-reduced-motion: reduce) {
   .scrub-rail, .scrub-thumb { transition: none; }
+  .recent .row-front, .recent .row-actions button, .recent .act-face, .recent li.dragging .row-actions button.expanding, .recent li.dragging .expanding .act-face { transition: none; }
+}
+
+/* ------------------------------------------------ the landscape mode (app.js enterLandscape)
+
+   The video fills the view; the line being said sits low in a box of its own, as the iPhone's own
+   subtitles do; the scrubber and the way out are a row along the bottom while the controls show,
+   and the line rises above them meanwhile; the dictionary is a side panel.
+   The page is fixed to the viewport, or, on a phone held upright, turned a quarter clockwise and
+   sized to the screen's other way round (html.turned): every fixed sheet, toast and bar then lies
+   in the turned body, which a transform makes their containing block. Percentages below are of
+   the view, never vw/vh, which stay the screen's. */
+
+html.landscape, html.landscape body { height: 100%; overflow: hidden; }
+html.landscape body { position: fixed; inset: 0; }
+html.landscape { --side-w: min(400px, 46%); }
+html.landscape.turned body {
+  right: auto;
+  bottom: auto;
+  width: 100vh;
+  height: 100vw;
+  width: var(--turn-w, 100dvh); /* app.js viewChanged(): the viewport's own px */
+  height: var(--turn-h, 100dvw);
+  transform-origin: 0 0;
+  transform: rotate(90deg) translateY(-100%);
+}
+/* The screen's top (the notch) is the turned view's left, its bottom (the home bar) the view's right. */
+html.landscape.turned {
+  --safe-top: env(safe-area-inset-right, 0px);
+  --safe-right: env(safe-area-inset-bottom, 0px);
+  --safe-bottom: env(safe-area-inset-left, 0px);
+  --safe-left: env(safe-area-inset-top, 0px);
+}
+
+html.landscape .watch {
+  position: absolute;
+  inset: 0;
+  height: auto;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  /* The subtitle's size follows the view's height (cqh), as broadcast guidelines size theirs. */
+  container-type: size;
+}
+html.landscape .player-box { position: absolute; inset: 0; width: auto; max-height: none; aspect-ratio: auto; }
+/* The corner buttons keep 20 px from every physical screen edge and stay inside the safe area, in
+   both the turned and the plain layout (the --safe-* above already name the view's edges). iOS
+   keeps the screen's edges for itself: the status bar and Control Center's corner, Notification
+   Center's top edge and the home indicator. Hugging an edge 4 px away (as before) put a button in
+   reach of those gestures. Each is a 44 x 44 px target, absolutely placed in the player box. */
+html.landscape .watch {
+  --edge-t: max(20px, var(--safe-top));
+  --edge-r: max(20px, var(--safe-right));
+  --edge-b: max(20px, var(--safe-bottom));
+  --edge-l: max(20px, var(--safe-left));
+  --ctl-h: 44px; /* the controls row: the scrubber and the exit button */
+  --sub-rest: max(calc(14px + var(--cap-lift, 0px)), var(--safe-bottom)); /* the subtitle box's bottom, controls hidden; Subtitle style's Position moves it */
+  --sub-up: calc(var(--edge-b) + var(--ctl-h) + 6px); /* and with the controls showing */
+}
+html.landscape .btn-home { top: var(--edge-t); left: var(--edge-l); }
+html.landscape .btn-full { top: auto; left: auto; right: var(--edge-r); bottom: var(--edge-b); }
+.btn-corner-settings { display: none; }
+html.landscape .btn-corner-settings { display: flex; left: auto; top: var(--edge-t); right: var(--edge-r); }
+html.landscape .toolbar, html.landscape .toolbar-space { display: none; }
+/* While the controls show, a soft shade under them keeps the times readable over a bright picture;
+   it goes with them. Nothing else darkens the video. */
+html.landscape .player-box::after {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: calc(var(--edge-b) + var(--ctl-h) + 40px);
+  background: linear-gradient(rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.4));
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s var(--spring);
+}
+html.landscape .player-box.show-back::after { opacity: 1; }
+
+/* The subtitle: the iPhone's own look (Settings > Accessibility > Subtitles & Captioning), white
+   text on a translucent black box with rounded corners that hugs the line, low on the picture. The
+   list is still the whole cue list, bottom-anchored (app.js placeTrack()), so a second row grows
+   upward. Only the boxes take taps: a tap beside one reaches the video. */
+html.landscape #lyrics {
+  --dim: rgba(235, 235, 245, 0.6); /* the sweep's unspoken text, readable on the box */
+  position: absolute;
+  z-index: 4;
+  left: 0;
+  right: 0;
+  bottom: var(--sub-rest);
+  height: 50%;
+  flex: none;
+  pointer-events: none;
+  -webkit-mask-image: none;
+  mask-image: none;
+  transition: transform 0.2s ease-out;
+}
+html.landscape .watch:has(.player-box.show-back) #lyrics { transform: translateY(calc(var(--sub-rest) - var(--sub-up))); }
+html.landscape .lyrics-track {
+  padding: 0 max(16%, calc(var(--edge-r) + 8px)) 0 max(16%, calc(var(--edge-l) + 8px)); /* lines of at most 68% of the view, as the BBC sets */
+}
+html.landscape .lyrics.sheet-open .lyrics-track { padding: 0 calc(var(--side-w) + 16px) 0 calc(var(--edge-l) + 8px); }
+html.landscape .cue {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto 14px;
+  padding: 0.12em 0.45em;
+  border-radius: 0.3em;
+  /* Settings > Subtitle style: --cap-bg, --cap-scale and --cap-shadow (app.js applyCaptionStyle()). */
+  background: rgba(0, 0, 0, var(--cap-bg, 0.6));
+  font-size: 24px;
+  font-size: clamp(calc(18px * var(--cap-scale, 1)), calc(6.2cqh * var(--cap-scale, 1)), calc(40px * var(--cap-scale, 1)));
+  line-height: 1.35;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, var(--cap-shadow, 0)), 0 0 2px rgba(0, 0, 0, var(--cap-shadow, 0));
+  pointer-events: auto;
+}
+html.landscape .cue.furigana { line-height: 1.95; }
+html.landscape .cue.active .tok.now { text-shadow: inherit; } /* a glow on the box only greys it; the box's own shadow stays */
+/* The picked word must show on the dark box: twice the portrait view's light. */
+html.landscape .cue .tok.picked { background: rgba(255, 255, 255, 0.28); }
+html.landscape .cue::highlight(picked), html.landscape .cue ::highlight(picked) { background-color: rgba(255, 255, 255, 0.28); color: var(--label); }
+/* The strip holds the line being said alone; a drag still browses its neighbours. */
+html.landscape .lyrics:not(.browsing) .cue:not([data-d="0"]) { visibility: hidden; opacity: 0; }
+html.landscape .back-to-now { top: 8px; bottom: auto; left: auto; right: var(--edge-r); transform: none; pointer-events: auto; }
+html.landscape .lyrics-status {
+  left: 50%;
+  right: auto;
+  transform: translate(-50%, -100%);
+  padding: 4px 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.6);
+  color: var(--label);
+  white-space: nowrap;
+}
+
+/* The controls row, as in the iPhone's and YouTube's players: elapsed time, a thin bar, the time
+   left, then the exit button, inside the safe area. */
+html.landscape .scrubber {
+  z-index: 5;
+  left: var(--edge-l);
+  right: calc(var(--edge-r) + 52px); /* the exit button's room: the bar must not cover it */
+  bottom: var(--edge-b);
+  height: var(--ctl-h);
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  column-gap: 12px;
+  align-items: center;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.25s var(--spring), visibility 0.25s;
+}
+html.landscape .watch:has(.lyrics.sheet-open) .scrubber { right: calc(var(--side-w) + 12px); }
+html.landscape .scrub-times { display: contents; font-size: 13px; color: rgba(255, 255, 255, 0.9); text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6); }
+html.landscape #scrub-elapsed { grid-area: 1 / 1; }
+html.landscape .scrub-track { grid-area: 1 / 2; }
+html.landscape #scrub-remaining { grid-area: 1 / 3; }
+html.landscape .scrub-live { grid-area: 1 / 1; margin: 0; }
+html.landscape .watch:has(.player-box.show-back) .scrubber, html.landscape .scrubber.dragging { opacity: 1; visibility: visible; }
+
+html.landscape .word-sheet {
+  left: auto;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--side-w);
+  max-width: none;
+  margin: 0;
+  padding-top: calc(12px + var(--safe-top));
+  border-radius: 14px 0 0 14px;
+  transform: translateX(calc(100% + 24px));
+}
+html.landscape .word-sheet.open { transform: translateX(0); }
+html.landscape .word-sheet .sheet-scroll { flex: 1 1 auto; padding: 0 calc(20px + var(--safe-right)) 8px 20px; }
+html.landscape .word-sheet .sheet-foot { padding: 8px calc(16px + var(--safe-right)) calc(8px + var(--safe-bottom)) 16px; }
+/* Settings and the Anki setup are a side panel too, so the caption box stays in sight beside them
+   (Subtitle style shows its changes on the real box), the line moved out of their way; the
+   backdrop only catches the tap that closes them. */
+html.landscape .settings-sheet {
+  left: auto;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--side-w);
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding-top: calc(12px + var(--safe-top));
+  border-radius: 14px 0 0 14px;
+  transform: translateX(calc(100% + 24px));
+}
+html.landscape .settings-sheet.open { transform: translateX(0); }
+html.landscape .settings-sheet .sheet-head { padding-right: calc(20px + var(--safe-right)); }
+html.landscape .settings-sheet .sheet-close { right: calc(13px + var(--safe-right)); }
+html.landscape .settings-sheet .sheet-scroll { padding: 0 calc(20px + var(--safe-right)) calc(8px + var(--safe-bottom)) 20px; }
+html.landscape .backdrop { background: transparent; }
+html.landscape .caption-sample { display: none; }
+html.landscape:has(.settings-sheet.open) .lyrics-track { padding: 0 calc(var(--side-w) + 16px) 0 calc(var(--edge-l) + 8px); }
+/* Meanwhile the line sits where it rests while the video plays, over the bare picture: the
+   controls and the pause scrim out of its way, so Position and Background show what they do. */
+html.landscape:has(.settings-sheet.open) .watch #lyrics { transform: none; }
+html.landscape:has(.settings-sheet.open) .watch .scrubber,
+html.landscape:has(.settings-sheet.open) .watch .player-box::after,
+html.landscape:has(.settings-sheet.open) .watch .shield-play { opacity: 0; visibility: hidden; }
+html.landscape:has(.settings-sheet.open) .watch .shield { background: none; }
+html.switching .sheet, html.switching .lyrics-track, html.switching .scrubber, html.switching #lyrics { transition: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  html.landscape .scrubber, html.landscape #lyrics, html.landscape .player-box::after { transition: none; }
 }

@@ -8,7 +8,11 @@
   const SETTINGS_KEY = "portal.settings";
   const RECENT_KEY = "portal.recent";
   // wordColours is off by default, like the extension's cardStatus.
-  const DEFAULTS = { pauseOnLookup: true, autoPause: false, speed: 1, listening: false, furigana: false, sweep: true, wordColours: false };
+  // captionBg, captionSize and captionPosition are Settings > Subtitle style (lib.js captionStyle()).
+  const DEFAULTS = {
+    pauseOnLookup: true, lookupResume: "tap", autoPause: false, speed: 1, listening: false, furigana: false, sweep: true, wordColours: false,
+    ...L.captionStyle(null),
+  };
   const SPEEDS = [0.75, 1, 1.25, 1.5];
   const SYNC_PLAYING_MS = 1000;
   const SYNC_PAUSED_MS = 5000;
@@ -17,8 +21,13 @@
   const FROM_HOME = "portal.fromHome"; // sessionStorage: this video was opened from the home page
   const LINE_HOLD_S = 2.5; // a line stays up this long after it ends, then the space is empty
   const GLIDE_MS = 400; // the list's transition (app.css .lyrics-track)
-  const DOUBLE_TAP_MS = 300;
   const TOAST_MS = 2000;
+  // /api/watched: the first report 10 s after play starts (YouTube's first scheduled flush), then
+  // when the server's answer says (`next`, YouTube's own schedule), and a final one at every pause,
+  // end, hide and leave.
+  const WATCH_FIRST_MS = 10000;
+  const WATCH_UNANSWERED_MS = 40000; // the next report when no answer names one
+  const END_HOME_MS = 1500; // a finished video goes home after this beat, so its end is seen
   // YT.PlayerState values, usable before the API has loaded.
   const YT_ENDED = 0;
   const YT_PLAYING = 1;
@@ -36,6 +45,8 @@
     window.portalDebug = debug;
   }
   if (!SPEEDS.includes(settings.speed)) settings.speed = 1;
+  if (settings.lookupResume !== "line") settings.lookupResume = "tap"; // "tap" or "line": lib.js lookupResume()
+  Object.assign(settings, L.captionStyle(settings)); // an unknown stored choice is the default
 
   const state = {
     videoId: null,
@@ -79,6 +90,11 @@
     reanchor: false,
     glideUntil: 0,
     tornDown: false,
+    endTimer: null,
+    lastSave: null, // the last position posted: { videoId, t, at, request }
+    endGen: 0, // bumped by every cancel: an endHome() past its await checks it still holds
+    endWaiting: false, // endHome() waits on the end's save: still the beat
+    endHeld: false, // the current touch or key cancelled the beat, so it must not also play
     sheetClosedAt: 0,
     resumeTarget: null,
     resumeLanded: true,
@@ -93,7 +109,14 @@
     renderedCount: 0,
     title: null,
     lastSavedAt: 0,
+    watch: L.newWatchLog(), // the stretches our own player played, for /api/watched
+    watchDueAt: Infinity, // the next scheduled /api/watched report; Infinity until a play starts the schedule
+    watchGapMs: WATCH_FIRST_MS, // playing time from a resume to that report: the server's last `next`
     lastShieldTap: null,
+    shieldTimer: null,
+    controlsHidden: false, // a side tap hid the controls (landscape); renderBack()
+    stepBase: -1, // a double tap's run steps from the line it began on
+    stepIdx: null, // and the line it last put the playhead on
     inDeck: new Map(), // term -> boolean, from /api/canadd
     // The word colours: the deck's rows as the server sent them (L.applyDeck), and the words.js
     // index built from them; wordsKey is its entries as JSON, so an unchanged deck draws nothing.
@@ -101,6 +124,8 @@
     wordIndex: null,
     wordsKey: "",
     sheet: { open: false, pausedIt: false, cue: null, span: null, entries: [], pick: 0, def: null, seq: 0 },
+    // The landscape mode: on, and whether the browser's fullscreen holds the page for it.
+    landscape: { on: false, fullscreen: false },
   };
 
   function readJson(key, fallback) {
@@ -216,11 +241,9 @@
         }
       });
     }
-    $("edit-btn").addEventListener("click", () => {
-      const editing = !$("home").classList.contains("editing");
-      $("home").classList.toggle("editing", editing);
-      $("edit-btn").textContent = editing ? "Done" : "Edit";
-    });
+    $("edit-btn").textContent = S.edit;
+    $("edit-btn").addEventListener("click", () => setEditing(!$("home").classList.contains("editing")));
+    bindSwipe();
     bindAnkiSetup();
     renderRecent(recentList()); // the local copy at once; the server's list replaces it
     // Opening a video from here: its back button may return here with history.back().
@@ -293,45 +316,361 @@
     return img;
   }
 
+  // Each row: the actions behind it (actionsFor()), and in front the row itself, which a swipe to
+  // the left slides off them. Edit mode's red minus opens the same actions.
   function renderRecent(list) {
     const ul = $("recent");
+    swipe.open = null;
+    swipe.drag = null;
     ul.replaceChildren();
-    $("recent-empty").hidden = list.length > 0;
-    $("edit-btn").hidden = !list.length;
-    for (const r of list) {
-      const li = document.createElement("li");
-      const a = document.createElement("a");
-      a.href = `?v=${encodeURIComponent(r.id)}`;
-      const thumb = document.createElement("div");
-      thumb.className = "thumb";
-      thumb.append(thumbImage(r.id));
-      const fraction = L.watchedFraction(r);
-      if (fraction > 0) {
-        const bar = document.createElement("div");
-        bar.className = "progress";
-        const fill = document.createElement("span");
-        fill.style.width = `${(fraction * 100).toFixed(1)}%`;
-        bar.append(fill);
-        thumb.append(bar);
+    for (const r of list) ul.append(recentRow(r));
+    listChanged();
+  }
+
+  function recentRow(r) {
+    const name = r.title || r.id;
+    const li = document.createElement("li");
+    const actions = document.createElement("div");
+    actions.className = "row-actions";
+    actions.inert = true;
+    const buttons = actionsFor(r).map((spec) => {
+      const button = document.createElement("button");
+      fillAction(button, spec, name);
+      button.addEventListener("click", () => button.spec.run(li, r));
+      return button;
+    });
+    actions.append(...buttons);
+    swipe.rows.set(li, { r, buttons, width: buttons.length * ACTION_W });
+
+    const front = document.createElement("div");
+    front.className = "row-front";
+    const a = document.createElement("a");
+    a.href = `?v=${encodeURIComponent(r.id)}`;
+    a.draggable = false; // a mouse drag swipes; it never drags the link away
+    const thumb = document.createElement("div");
+    thumb.className = "thumb";
+    thumb.append(thumbImage(r.id));
+    const title = document.createElement("div");
+    title.className = "title";
+    title.textContent = name;
+    a.append(thumb, title);
+    const remove = document.createElement("button");
+    remove.className = "remove";
+    remove.setAttribute("aria-label", S.rowActions(name));
+    remove.addEventListener("click", () => {
+      if (swipe.open === li) closeRow();
+      else {
+        openRow(li);
+        buttons[0].focus({ preventScroll: true });
       }
-      const title = document.createElement("div");
-      title.className = "title";
-      title.textContent = r.title || r.id;
-      a.append(thumb, title);
-      const remove = document.createElement("button");
-      remove.className = "remove";
-      remove.setAttribute("aria-label", S.removeVideo(r.title || r.id));
-      remove.addEventListener("click", async () => {
-        li.remove();
-        localStorage.setItem(RECENT_KEY, JSON.stringify(recentList().filter((x) => x.id !== r.id)));
-        try {
-          await api("/api/position/delete", { video_id: r.id });
-        } catch {
-          // gone locally; the server copy goes next time
+    });
+    front.append(remove, a);
+    li.append(actions, front);
+    drawBar(li, r);
+    return li;
+  }
+
+  // The watch bar under the thumbnail, drawn again whenever the position changes.
+  function drawBar(li, r) {
+    const thumb = li.querySelector(".thumb");
+    const old = thumb.querySelector(".progress");
+    if (old) old.remove();
+    const fraction = L.watchedFraction(r);
+    if (fraction <= 0) return;
+    const bar = document.createElement("div");
+    bar.className = "progress";
+    const fill = document.createElement("span");
+    fill.style.width = `${(fraction * 100).toFixed(1)}%`;
+    bar.append(fill);
+    thumb.append(bar);
+  }
+
+  // Line icons in the page's own SVG style (app.css svg), from path data.
+  const ICONS = {
+    trash: ["M4 7h16", "M9.5 7V4.5h5V7", "M6.5 7l1 12.5h9l1-12.5", "M10 11v5", "M14 11v5"],
+    eyeCheck: ["M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z", "M9 12.2l2.1 2.1 3.9-3.9"],
+    eyeOff: ["M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z", "M4 4l16 16"],
+  };
+
+  function icon(name) {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    for (const d of ICONS[name]) {
+      const path = document.createElementNS(NS, "path");
+      path.setAttribute("d", d);
+      svg.append(path);
+    }
+    return svg;
+  }
+
+  // The swipe's actions, left to right; Delete is always last (a full swipe runs it). Mark as
+  // watched needs the duration, which a row moved over from an old device's list may lack.
+  function actionsFor(r) {
+    const del = { className: "delete", icon: "trash", label: S.delete, aria: S.deleteVideo, run: deleteRow };
+    if (L.watchedToggle(r) === null) return [del];
+    return [markAction(r), del];
+  }
+
+  function markAction(r) {
+    return L.watchedToggle(r) === 0
+      ? { className: "mark", icon: "eyeOff", label: S.markUnwatched, aria: S.markUnwatchedVideo, run: markWatched }
+      : { className: "mark", icon: "eyeCheck", label: S.markWatched, aria: S.markWatchedVideo, run: markWatched };
+  }
+
+  function fillAction(button, spec, name) {
+    button.spec = spec;
+    button.className = spec.className;
+    const face = document.createElement("span");
+    face.className = "act-face";
+    const label = document.createElement("span");
+    label.textContent = spec.label;
+    face.append(icon(spec.icon), label);
+    const old = button.firstChild;
+    if (old) {
+      face.style.cssText = old.style.cssText;
+      label.style.opacity = old.lastChild.style.opacity;
+    }
+    button.replaceChildren(face);
+    button.setAttribute("aria-label", spec.aria(name));
+  }
+
+  function setEditing(editing) {
+    $("home").classList.toggle("editing", editing);
+    $("edit-btn").textContent = editing ? S.done : S.edit;
+    closeRow();
+  }
+
+  // Called directly, never through a synthetic click: the swipe's click guard would eat one.
+  function listChanged() {
+    const empty = !$("recent").children.length;
+    $("recent-empty").hidden = !empty;
+    $("edit-btn").hidden = empty;
+    if (empty && $("home").classList.contains("editing")) setEditing(false);
+  }
+
+  function forget(id) {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(recentList().filter((x) => x.id !== id)));
+  }
+
+  async function deleteRow(li, r) {
+    if (swipe.open === li) swipe.open = null;
+    collapse(li);
+    forget(r.id);
+    try {
+      await api("/api/position/delete", { video_id: r.id });
+    } catch {
+      // gone locally; the server copy goes next time
+    }
+  }
+
+  // Mark as watched sets the position to the end, here and on the PC, so the bar reads full and the
+  // next open starts at 0 (resumeTime() starts a finished() video over); on a finished video it marks it
+  // unwatched: 0, the bar gone. The button then offers the other.
+  async function markWatched(li, r) {
+    const t = L.watchedToggle(r);
+    if (t === null) return;
+    closeRow();
+    r.t = t;
+    drawBar(li, r);
+    fillAction(swipe.rows.get(li).buttons[0], markAction(r), r.title || r.id);
+    localStorage.setItem(RECENT_KEY, JSON.stringify(recentList().map((x) => (x.id === r.id ? { ...x, t } : x))));
+    try {
+      // keep_order: a mark is not a watch, so the row keeps its place here and on the PC. A video
+      // deleted on another device is not brought back by a mark: its row goes here too.
+      const res = await api("/api/position", { video_id: r.id, t, duration: r.duration, keep_order: true });
+      if (res.status === 404 && li.isConnected) {
+        if (swipe.open === li) swipe.open = null;
+        collapse(li);
+        forget(r.id);
+      }
+    } catch {
+      // offline: the PC keeps the old position until the video is played again
+    }
+  }
+
+  // ------------------------------------------------------------ swiping a home row
+
+  // How it stays smooth: during a drag only transforms change (the row, and each button sliding in
+  // from the right edge), written once per frame; nothing is measured but the row's width, read at
+  // the touch. Released, the row springs to where swipeSettle() sends it (the finger's speed
+  // included) on a CSS transition; li.live holds will-change while a row moves.
+  const ACTION_W = 80; // one action button's share of an open row
+  const SETTLE_MS = 300; // app.css .recent .row-front transition
+  const EXPAND_MS = 200; // app.css .recent li .row-actions button.expanding
+  const COLLAPSE_MS = 300; // app.css .recent li.collapsing
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  // open: the row whose actions show. drag: the gesture under way. eat: the click this gesture would
+  // make is swallowed (it closed a row, or it was a swipe).
+  const swipe = { open: null, openScrollY: 0, drag: null, eat: false, gesture: 0, rows: new WeakMap() };
+
+  // shift px left of closed (negative: the rubber band to the right); rowW the row's width.
+  function setShift(li, shift, rowW) {
+    const row = swipe.rows.get(li);
+    li.querySelector(".row-front").style.transform = shift ? `translateX(${-shift}px)` : "";
+    // Past the delete point Delete takes the whole width, as in iOS Mail, with a tick where the
+    // device has one (Android; iOS gives the web none).
+    const full = shift >= rowW * L.SWIPE.DELETE;
+    const last = row.buttons[row.buttons.length - 1];
+    if (full !== li.classList.contains("full")) {
+      li.classList.toggle("full", full);
+      last.classList.add("expanding");
+      clearTimeout(last.expandTimer);
+      last.expandTimer = setTimeout(() => last.classList.remove("expanding"), EXPAND_MS);
+      if (full && navigator.vibrate) navigator.vibrate(8);
+    }
+    const offsets = L.actionOffsets(shift, row.buttons.length, full);
+    row.buttons.forEach((b, i) => {
+      b.style.transform = `translateX(${-offsets[i]}px)`;
+      // Its icon and label stay centred in the part of it that shows, until that is a full slot.
+      const shown = offsets[i] - (offsets[i + 1] || 0);
+      b.firstChild.style.transform = shown < ACTION_W ? `translateX(${(shown - ACTION_W) / 2}px)` : "";
+      // The label fades in over the second half of the slot: clipped words read worse than none.
+      b.firstChild.lastChild.style.opacity = Math.max(0, Math.min(1, (shown - ACTION_W / 2) / (ACTION_W / 2)));
+    });
+  }
+
+  function settle(li, shift) {
+    li.classList.add("live");
+    clearTimeout(li.settleTimer);
+    setShift(li, shift, li.offsetWidth);
+    if (!shift) li.settleTimer = setTimeout(() => li.classList.remove("live"), SETTLE_MS);
+  }
+
+  function openRow(li) {
+    if (swipe.open && swipe.open !== li) closeRow();
+    swipe.open = li;
+    swipe.openScrollY = window.scrollY;
+    li.querySelector(".row-actions").inert = false;
+    settle(li, swipe.rows.get(li).width);
+  }
+
+  function closeRow() {
+    const li = swipe.open;
+    if (!li) return;
+    swipe.open = null;
+    li.querySelector(".row-actions").inert = true;
+    settle(li, 0);
+  }
+
+  // The row slides off to the left, then its space closes.
+  function collapse(li) {
+    if (reducedMotion.matches) {
+      li.remove();
+      listChanged();
+      return;
+    }
+    settle(li, li.offsetWidth);
+    li.style.height = `${li.offsetHeight}px`;
+    void li.offsetHeight; // the height above is the transition's start
+    li.classList.add("collapsing");
+    li.style.height = "0px";
+    setTimeout(() => {
+      li.remove();
+      listChanged();
+    }, COLLAPSE_MS);
+  }
+
+  // Pointer events, so touch and a mouse drag alike. The rows are touch-action: pan-y: the browser
+  // scrolls vertically itself, and a gesture becomes a swipe only once its first SLOP px went
+  // sideways.
+  function bindSwipe() {
+    const ul = $("recent");
+    document.addEventListener("pointerdown", (ev) => {
+      swipe.eat = false;
+      swipe.gesture++;
+      const open = swipe.open;
+      // With a row open, a touch anywhere but on its actions or on the row itself only closes it.
+      if (open && !open.contains(ev.target)) {
+        closeRow();
+        swipe.eat = true;
+      }
+    }, true);
+    document.addEventListener("click", (ev) => {
+      if (!swipe.eat) return;
+      swipe.eat = false;
+      ev.preventDefault();
+      ev.stopPropagation();
+    }, true);
+    document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeRow(); });
+    // A scroll closes the open row; a few px of jitter (a rubber band settling) does not.
+    window.addEventListener("scroll", () => {
+      if (swipe.open && Math.abs(window.scrollY - swipe.openScrollY) > L.SWIPE.SLOP) closeRow();
+    }, { passive: true });
+
+    ul.addEventListener("pointerdown", (ev) => {
+      if (!ev.isPrimary || ev.button > 0 || swipe.eat) return;
+      const li = ev.target.closest("li");
+      if (!li || ev.target.closest(".row-actions, .remove")) return;
+      const row = swipe.rows.get(li);
+      // live (will-change) now, so the layers exist by the time the first SLOP px are past.
+      li.classList.add("live");
+      clearTimeout(li.settleTimer);
+      swipe.drag = { li, row, rowW: li.offsetWidth, id: ev.pointerId, x0: ev.clientX, y0: ev.clientY, axis: null,
+        start: li === swipe.open ? row.width : 0, shift: 0, frame: 0, samples: [{ t: ev.timeStamp, x: ev.clientX }] };
+    });
+    ul.addEventListener("pointermove", (ev) => {
+      const d = swipe.drag;
+      if (!d || ev.pointerId !== d.id) return;
+      const dx = ev.clientX - d.x0;
+      d.samples.push({ t: ev.timeStamp, x: ev.clientX });
+      if (d.samples.length > 12) d.samples.shift();
+      if (!d.axis) {
+        d.axis = L.swipeAxis(dx, ev.clientY - d.y0);
+        if (!d.axis) return;
+        if (d.axis === "y") {
+          swipe.drag = null;
+          if (d.li !== swipe.open) settle(d.li, 0); // drops live
+          closeRow();
+          return;
         }
+        d.li.setPointerCapture(d.id);
+        d.li.classList.add("dragging");
+        if (swipe.open && swipe.open !== d.li) closeRow();
+        // Measured from here, so the row starts moving under the finger, not SLOP px behind it.
+        d.x0 = ev.clientX;
+      }
+      d.shift = L.swipeShift({ start: d.start, dx: ev.clientX - d.x0, row: d.rowW, actions: d.row.width });
+      if (!d.frame) {
+        d.frame = requestAnimationFrame(() => {
+          d.frame = 0;
+          setShift(d.li, d.shift, d.rowW);
+        });
+      }
+    });
+    const release = (ev) => {
+      const d = swipe.drag;
+      if (!d || ev.pointerId !== d.id) return;
+      swipe.drag = null;
+      cancelAnimationFrame(d.frame);
+      if (!d.axis) {
+        // A tap on the open row closes it and opens nothing.
+        if (d.li === swipe.open) {
+          closeRow();
+          swipe.eat = true;
+        } else settle(d.li, 0);
+        return;
+      }
+      swipe.eat = true; // a swipe is never also a tap on the link
+      d.samples.push({ t: ev.timeStamp, x: ev.clientX });
+      d.li.classList.remove("dragging");
+      const verdict = ev.type === "pointercancel" ? (d.start ? "open" : "closed")
+        : L.swipeSettle({ shift: d.shift, actions: d.row.width, row: d.rowW, wasOpen: d.start > 0, velocity: L.swipeVelocity(d.samples) });
+      if (verdict === "delete") deleteRow(d.li, d.row.r);
+      else if (verdict === "open") openRow(d.li);
+      else if (swipe.open === d.li) closeRow();
+      else settle(d.li, 0);
+    };
+    ul.addEventListener("pointerup", release);
+    ul.addEventListener("pointercancel", release);
+    // The click that follows a gesture comes right after its pointerup; one that never comes
+    // (a touch that moved) must not eat a later click, a keyboard's among them.
+    for (const name of ["pointerup", "pointercancel"]) {
+      document.addEventListener(name, () => {
+        const gesture = swipe.gesture;
+        if (swipe.eat) setTimeout(() => { if (swipe.gesture === gesture) swipe.eat = false; }, 600);
       });
-      li.append(remove, a);
-      ul.append(li);
     }
   }
 
@@ -343,24 +682,86 @@
   }
 
   // Saved on the PC (shared by every device) and locally. keepalive lets it outlive a page that is
-  // being hidden or left.
+  // being hidden or left. Answers the request, or null when there was nothing to save.
   function savePosition() {
-    if (!state.videoId || !state.playerReady || !state.everPlayed) return; // never overwrite with an unplayed 0
+    if (!state.videoId || !state.playerReady || !state.everPlayed) return null; // never overwrite with an unplayed 0
+    // A torn-down player reads 0: going home saved first, and the pagehide after it must not undo that.
+    if (state.tornDown) return null;
     const t = state.player.getCurrentTime();
-    if (!Number.isFinite(t)) return;
-    if (!L.saveAllowed(t, state.resumeTarget, state.resumeLanded)) return; // the resume has not landed yet
+    if (!Number.isFinite(t)) return null;
+    if (!L.saveAllowed(t, state.resumeTarget, state.resumeLanded)) return null; // the resume has not landed yet
     state.t = t;
     remember();
-    fetch("/api/position", {
+    // The same position again (the end's pause, ended and the way home): the post already sent,
+    // which endHome() can still wait on.
+    const now = Date.now();
+    if (L.repeatsSave(state.lastSave, state.videoId, t, now)) return state.lastSave.request;
+    const sent = { videoId: state.videoId, t, at: now, request: null };
+    sent.request = fetch("/api/position", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ video_id: state.videoId, t, duration: playerDuration(), title: state.title || null }),
       keepalive: true,
+    }).then((r) => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    }).catch(() => {
+      if (state.lastSave === sent) state.lastSave = null; // not received: the next save posts it again
+    });
+    state.lastSave = sent;
+    return sent.request;
+  }
+
+  // The portal's --watch-history: what our own player played goes to /api/watched, which reports
+  // it to the viewer's YouTube history. YouTube's iframe player reports its own watches: nothing
+  // from it. keepalive, as for the position.
+  // The last touch or key on the page: YouTube's pings say how long ago it was (lact).
+  let lastActivity = Date.now();
+  for (const name of ["pointerdown", "keydown"]) {
+    document.addEventListener(name, () => { lastActivity = Date.now(); }, { capture: true, passive: true });
+  }
+
+  // final: the viewing ends here (the end of the video, the page hidden or left, home, the switch
+  // to YouTube's player): YouTube gets this report's ping at once, marked final, as its own player
+  // ends a viewing. A pause is no end: it reports "paused" on the schedule. A later play goes on in
+  // the same session.
+  function reportWatch(final = false) {
+    // Whatever happens below, the next scheduled report: a gap on while our own player plays, none
+    // while it does not (a play restarts it). tick() calls this whenever the time is due, so an
+    // early return must never leave the time in the past.
+    const video = state.player && state.player.kind === "native" ? state.player.video : null;
+    const playing = Boolean(video) && !video.paused && !video.ended && !state.tornDown;
+    state.watchDueAt = playing ? Date.now() + state.watchGapMs : Infinity;
+    if (!state.info) return; // not known yet: the stretches wait
+    if (state.info.watch_history !== "on") {
+      state.watch = L.newWatchLog();
+      state.watchDueAt = Infinity;
+      return;
+    }
+    if (!video || state.tornDown) return;
+    const duration = playerDuration();
+    if (!duration) return;
+    const ranges = L.watchDrain(state.watch, video.currentTime, playing);
+    if (!ranges.length) return;
+    const sentAt = Date.now();
+    if (!final && playing) state.watchDueAt = sentAt + WATCH_UNANSWERED_MS;
+    fetch("/api/watched", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ video_id: state.videoId, ranges, cmt: Math.min(video.currentTime, duration), duration,
+        state: playing ? "playing" : "paused", final, lact: Date.now() - lastActivity, volume: Math.round(video.volume * 100),
+        muted: video.muted, client: L.clientInfo(navigator.userAgent) }),
+      keepalive: true,
+    }).then((r) => r.json()).then((answer) => {
+      const gap = L.watchNextMs(answer);
+      if (gap === null) return;
+      state.watchGapMs = gap;
+      if (!final && state.watchDueAt !== Infinity) state.watchDueAt = sentAt + state.watchGapMs;
     }).catch(() => {});
   }
 
   function goHome() {
-    savePosition();
+    savePosition(); // after endHome()'s save, the same position: nothing posted again (repeatsSave())
+    reportWatch(true);
     teardownWatch();
     // Opened from the home page: going back pops that entry (and swipe-back keeps working). Opened
     // any other way (a link, the home-screen app's start, a reload), there is no such entry: load home.
@@ -374,9 +775,55 @@
     }
   }
 
+  // A video that played to its end goes home after a beat, its position the end, so its bar there
+  // is full. Anything the viewer does in the beat keeps them here (cancelEndHome()), and so does a
+  // sheet already open. Not for a live stream, and not for an "ended" short of the end (an HLS
+  // stream may end a segment early): only the last END_SLOP_S counts (atEnd()). A scrub to the very
+  // end is an end like any other.
+  function scheduleEndHome() {
+    cancelEndHome();
+    if (!state.playerReady || (state.syncData && state.syncData.live)) return;
+    if (!L.atEnd(state.player.getCurrentTime(), playerDuration())) return;
+    if (state.sheet.open || $("settings").classList.contains("open") || document.visibilityState === "hidden") return;
+    state.endTimer = setTimeout(endHome, END_HOME_MS);
+  }
+
+  // A touch or key in the beat keeps the viewer here, and that is all it does: the tap on the
+  // video that stops the way home must not also restart the ended video from 0 and save that over
+  // the end. togglePlay() swallows it; the viewer's next tap plays. An explicit seek-and-play (a
+  // line, a double tap, back or forward) is no such tap: it plays. Decided anew by every touch and key.
+  function holdEnd() {
+    state.endHeld = state.endTimer !== null || state.endWaiting;
+    cancelEndHome();
+  }
+
+  function cancelEndHome() {
+    clearTimeout(state.endTimer);
+    state.endTimer = null;
+    state.endGen++;
+  }
+
+  async function endHome() {
+    state.endTimer = null;
+    const gen = state.endGen;
+    // The home list reads the positions as it loads: let the end's position land first (bounded,
+    // so a slow computer only delays the way home). goHome() also flushes the watch report.
+    const saved = savePosition();
+    state.endWaiting = true;
+    if (saved) await Promise.race([saved, new Promise((resolve) => setTimeout(resolve, 1000))]);
+    state.endWaiting = false;
+    // A touch, key, seek or play during that wait cancelled the beat: stay.
+    if (gen !== state.endGen || state.tornDown || document.visibilityState === "hidden") return;
+    goHome();
+  }
+
   // Leaving the video: stop it and let go of its stream, so a page kept in the back-forward cache
   // neither plays nor downloads.
   function teardownWatch() {
+    exitLandscape(); // leaving by any way (home, the end of the video, a link) restores the page
+    clearTimeout(state.shieldTimer); // a lone tap's pending pause or controls toggle
+    state.lastShieldTap = null;
+    state.controlsHidden = false;
     if (!state.player || state.tornDown) return;
     state.tornDown = true;
     try {
@@ -402,9 +849,18 @@
     bindSettings();
     setInterval(tick, 250);
     requestAnimationFrame(frame);
-    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") savePosition(); });
+    // Any touch, click or key in the beat after the end keeps the viewer here.
+    for (const name of ["pointerdown", "keydown"]) document.addEventListener(name, holdEnd, true);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        cancelEndHome();
+        savePosition();
+        reportWatch(true);
+      }
+    });
     window.addEventListener("pagehide", () => {
       savePosition();
+      reportWatch(true);
       teardownWatch();
     });
 
@@ -451,8 +907,22 @@
     // The time of the frame on screen, from requestVideoFrameCallback where there is one.
     let shown = null;
     const onFrame = (now, meta) => {
-      shown = { mediaTime: meta.mediaTime, at: now };
+      if (!video.seeking) shown = { mediaTime: meta.mediaTime, at: now }; // a frame from before the seek
       video.requestVideoFrameCallback(onFrame);
+    };
+    // A seek is checked once it should have landed: one the browser dropped (the playhead still
+    // far from it, nothing seeking) is made again, once.
+    let seekCheck = null;
+    const checkSeek = (t, retried) => {
+      clearTimeout(seekCheck);
+      seekCheck = setTimeout(() => {
+        if (video.seeking || Math.abs(video.currentTime - t) <= 1) return;
+        console.log(`seek: at ${video.currentTime.toFixed(1)} s instead of ${t.toFixed(1)} s${retried ? "" : ", seeking again"}`);
+        if (retried) return;
+        shown = null;
+        video.currentTime = t;
+        checkSeek(t, true);
+      }, 1000);
     };
     if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(onFrame);
     const emit = (s) => {
@@ -478,8 +948,26 @@
           state.resumeLanded = true;
         }
       }
+      // A start or a resume (not the end of a stall): the schedule goes on from the server's last
+      // answer. History off: no schedule (the page does not know yet: the first report finds out).
+      const history = state.info ? state.info.watch_history : "on";
+      if (state.watchDueAt === Infinity && history === "on") state.watchDueAt = Date.now() + state.watchGapMs;
       emit(YT_PLAYING);
     });
+    // The played stretches, once the resume has landed (before it the element may still say 0).
+    video.addEventListener("timeupdate", () => {
+      if (state.resumeLanded && !video.paused && !video.seeking) L.watchAt(state.watch, video.currentTime);
+    });
+    video.addEventListener("seeking", () => L.watchClose(state.watch));
+    video.addEventListener("ratechange", () => L.watchClose(state.watch));
+    // The end of the video ends the viewing; a pause (the viewer's, auto-pause, a lookup, a scrub)
+    // only says so. At the end the element fires "pause" too, with `ended` already true.
+    for (const name of ["pause", "ended"]) {
+      video.addEventListener(name, () => {
+        L.watchClose(state.watch);
+        reportWatch(video.ended);
+      });
+    }
     video.addEventListener("seeked", () => {
       if (!state.resumeLanded && state.resumeTarget !== null && Math.abs(video.currentTime - state.resumeTarget) <= 1.5) state.resumeLanded = true;
     });
@@ -500,15 +988,20 @@
       pauseVideo() { video.pause(); },
       seekTo(t) {
         shown = null;
-        if (video.readyState >= 1) video.currentTime = t;
-        else pendingSeek = t;
+        if (video.readyState >= 1) {
+          video.currentTime = t;
+          checkSeek(t, false);
+        } else {
+          pendingSeek = t;
+        }
       },
       getCurrentTime() {
         if (pendingSeek !== null) return pendingSeek;
         // Before the resume lands the element may still say 0: the page shows where it will be.
         if (!state.resumeLanded && state.resumeTarget !== null && video.currentTime < 0.5) return state.resumeTarget;
-        if (shown && !video.paused) return shown.mediaTime + ((performance.now() - shown.at) / 1000) * video.playbackRate;
-        return video.currentTime;
+        if (!shown || video.paused) return video.currentTime;
+        const frame = shown.mediaTime + ((performance.now() - shown.at) / 1000) * video.playbackRate;
+        return L.framePlayhead(frame, video.currentTime, { seeking: video.seeking });
       },
       getDuration() { return Number.isFinite(video.duration) ? video.duration : state.mediaDuration || 0; },
       setPlaybackRate(r) { video.playbackRate = r; },
@@ -529,6 +1022,7 @@
   function useYouTube(reason) {
     if (state.player && state.player.kind === "youtube") return;
     console.log("using YouTube's player:", reason);
+    reportWatch(true); // what our own player played until now
     if (state.player) {
       state.startAt = state.everPlayed ? state.player.getCurrentTime() : state.startAt;
       state.player.destroy();
@@ -582,6 +1076,8 @@
   }
 
   function onPlayerState(s) {
+    // A new pause or end shows the controls again, even after a tap hid them (landscape).
+    if (s !== state.ytState && (s === YT_PAUSED || s === YT_ENDED)) state.controlsHidden = false;
     state.ytState = s;
     state.playing = s === YT_PLAYING || s === YT_BUFFERING;
     if (s === YT_PLAYING && state.player.kind === "youtube" && !state.resumeLanded && state.resumeTarget !== null) {
@@ -595,6 +1091,8 @@
       state.player.setPlaybackRate(settings.speed);
     }
     if (s === YT_PAUSED || s === YT_ENDED) savePosition();
+    if (s === YT_ENDED) scheduleEndHome();
+    else cancelEndHome();
     renderPlayState();
     updateVeil();
     sync();
@@ -605,6 +1103,7 @@
   // come between the tap and this call.
   function play() {
     if (!state.playerReady) return;
+    state.endHeld = false;
     state.player.playVideo();
     setTimeout(() => {
       const ytState = state.player.getPlayerState();
@@ -627,13 +1126,16 @@
   function seek(t, andPlay) {
     if (!state.playerReady) return;
     state.resumeLanded = true; // the viewer chose a place: no resume correction, no saver guard
+    cancelEndHome();
     state.autoPausedFor = null;
     state.player.seekTo(Math.max(0, t), true);
     state.t = Math.max(0, t);
     state.clock.t = state.t; // steadyTime then takes the new, earlier time as it is
     state.clock.raw = null;
     state.sweep.count = -1;
-    if (andPlay) play();
+    // A playing video plays on from its new place; play() again right after the seek would only
+    // be one more request racing it.
+    if (andPlay && !state.playing) play();
     sync();
     savePosition();
   }
@@ -660,8 +1162,132 @@
 
   // The way home over the video: with the paused scrim, and for 3 s after any tap on the video.
   function renderBack() {
-    const show = state.ytState === YT_PAUSED || state.ytState === YT_ENDED || Date.now() < state.backUntil;
+    const show = !state.controlsHidden && (state.ytState === YT_PAUSED || state.ytState === YT_ENDED || Date.now() < state.backUntil);
     document.querySelector(".player-box").classList.toggle("show-back", show);
+  }
+
+  // ------------------------------------------------------------ the landscape mode
+
+  // The video as large as the screen allows, the line being said as a strip along its bottom.
+  // Where a page may go fullscreen (Android, iPad, desktop) the whole page does, so the subtitles
+  // and the dictionary sheet come along, and the screen is locked sideways where that is allowed.
+  // An iPhone lets only a bare <video> go fullscreen, into Apple's player with nothing of ours over
+  // it; there the mode is the page's own layout, turned a quarter (app.css html.turned) while the
+  // phone is held upright, so the viewer just turns the phone, rotation lock or not.
+  function canFullscreen() {
+    const root = document.documentElement;
+    return !!((document.fullscreenEnabled && root.requestFullscreen) || (document.webkitFullscreenEnabled && root.webkitRequestFullscreen));
+  }
+
+  function fullscreenElement() {
+    return document.fullscreenElement || document.webkitFullscreenElement || null;
+  }
+
+  // Runs inside the tap: a fullscreen request needs the gesture.
+  function enterLandscape() {
+    if (state.landscape.on) return;
+    state.landscape.on = true;
+    document.documentElement.classList.add("switching", "landscape");
+    if (canFullscreen()) {
+      const root = document.documentElement;
+      try {
+        const asked = root.requestFullscreen ? root.requestFullscreen({ navigationUI: "hide" }) : root.webkitRequestFullscreen();
+        if (asked && asked.catch) asked.catch((err) => console.log("fullscreen refused:", err.name));
+      } catch (err) {
+        console.log("fullscreen refused:", err.name); // the page-level layout stays
+      }
+    }
+    modeChanged();
+  }
+
+  function exitLandscape() {
+    if (!state.landscape.on) return;
+    state.landscape.on = false;
+    state.landscape.fullscreen = false;
+    state.controlsHidden = false; // a side tap's hide belongs to the mode: portrait's back button shows again
+    document.documentElement.classList.add("switching");
+    document.documentElement.classList.remove("landscape", "turned");
+    if (screen.orientation && screen.orientation.unlock) {
+      try {
+        screen.orientation.unlock();
+      } catch {
+        // never locked
+      }
+    }
+    if (fullscreenElement()) {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      try {
+        const left = exit.call(document);
+        if (left && left.catch) left.catch(() => {});
+      } catch {
+        // already leaving
+      }
+    }
+    modeChanged();
+  }
+
+  function onFullscreenChange() {
+    if (fullscreenElement()) {
+      if (!state.landscape.on) return;
+      state.landscape.fullscreen = true;
+      // Allowed only in fullscreen, and not everywhere then (a desktop, a tablet that refuses).
+      if (screen.orientation && screen.orientation.lock) screen.orientation.lock("landscape").catch(() => {});
+    } else if (state.landscape.fullscreen) {
+      exitLandscape(); // the browser's own way out: the back gesture, Escape
+    }
+  }
+
+  function modeChanged() {
+    const b = $("btn-full");
+    b.classList.toggle("on", state.landscape.on);
+    b.setAttribute("aria-label", state.landscape.on ? S.exitFullscreen : S.fullscreen);
+    exitBrowse(); // a browse offset is in the old layout's pixels
+    viewChanged();
+    renderBack();
+  }
+
+  // After the mode or the viewport changed: turned or not, the list re-centred without motion (the
+  // same cue stays the focus, L.focusMotion), the scrubber and an open sheet measured again.
+  function viewChanged() {
+    const root = document.documentElement;
+    // The closed sheets and the list jump to their new places instead of gliding across the
+    // screen: the new layout is committed with transitions off ("switching", also set by
+    // enterLandscape() and exitLandscape()), then they come back.
+    const turned = state.landscape.on && L.shouldTurn(window.innerWidth, window.innerHeight);
+    if (turned !== root.classList.contains("turned")) root.classList.add("switching");
+    root.classList.toggle("turned", turned);
+    // The turned body is the viewport the other way round, in the viewport's own px: dvh/dvw can
+    // disagree with the layout viewport the fixed body fills (a browser bar, a stale value), and
+    // then the whole view slid sideways, its top cut off and closed sheets peeking past its bottom.
+    root.style.setProperty("--turn-w", turned ? `${window.innerHeight}px` : "");
+    root.style.setProperty("--turn-h", turned ? `${window.innerWidth}px` : "");
+    state.focusKey = null;
+    if (state.sheet.open) capSheet(state.sheet.cue);
+    measureScrubber();
+    void document.body.offsetHeight;
+    root.classList.remove("switching");
+  }
+
+  // Pointer events and getBoundingClientRect() speak in screen coordinates; gestures and layout
+  // maths speak in the view's own frame, which the turned mode rotates (lib.js viewPoint()).
+  function viewTurn() {
+    return document.documentElement.classList.contains("turned") ? { height: document.body.clientHeight } : null;
+  }
+
+  function viewPoint(x, y) {
+    return L.viewPoint(x, y, viewTurn());
+  }
+
+  function viewDelta(dx, dy) {
+    return L.viewDelta(dx, dy, viewTurn());
+  }
+
+  function viewRect(el) {
+    return L.viewRect(el.getBoundingClientRect(), viewTurn());
+  }
+
+  function viewHeight() {
+    return state.landscape.on ? document.body.clientHeight : window.innerHeight;
   }
 
   // ------------------------------------------------------------ /sync
@@ -990,10 +1616,12 @@
   // The centre point: the middle of the list, or of the room left above the dictionary sheet.
   function focusY() {
     const box = $("lyrics");
+    // The landscape mode: the strip's bottom, where the line's box rests (placeTrack()).
+    if (state.landscape.on) return box.clientHeight;
     // The scrubber covers the list's faded bottom edge: centre in what is left above it.
     if (!state.sheet.open) return (box.clientHeight - $("scrubber").offsetHeight) / 2;
-    const sheetTop = window.innerHeight - $("sheet").offsetHeight;
-    const room = sheetTop - box.getBoundingClientRect().top;
+    const sheetTop = viewHeight() - $("sheet").offsetHeight;
+    const room = sheetTop - viewRect(box).top;
     return Math.max(40, Math.min(box.clientHeight / 2, room / 2));
   }
 
@@ -1003,7 +1631,8 @@
     let anchor = 0;
     const whole = Number.isInteger(pos);
     const row = pos >= 0 ? state.rowById.get(state.cues[Math.floor(pos)]?.id) : null;
-    if (row && whole) anchor = row.offsetTop + row.offsetHeight / 2;
+    // The landscape mode anchors the line's bottom, so a second row grows upward, as on a TV.
+    if (row && whole) anchor = row.offsetTop + (state.landscape.on ? row.offsetHeight : row.offsetHeight / 2);
     else if (row) anchor = row.offsetTop + row.offsetHeight + 40; // the status slot after the last cue
     else anchor = -40; // nothing said yet: the first cue waits just below the centre
     state.trackBase = centre - anchor;
@@ -1018,7 +1647,8 @@
     if (state.browse.active) {
       // Browsing stops at the ends of the list.
       const min = focusY() - track.offsetHeight;
-      const max = focusY();
+      // Bottom-anchored (landscape), the first line's box stops at the anchor, not its top.
+      const max = focusY() - (state.landscape.on && track.firstElementChild ? track.firstElementChild.offsetHeight : 0);
       state.browse.offset = Math.min(max - state.trackBase, Math.max(min - state.trackBase, state.browse.offset));
     }
     const value = `translateY(${Math.round(state.trackBase + state.browse.offset)}px)`;
@@ -1161,15 +1791,48 @@
       state.lastSavedAt = Date.now();
       savePosition();
     }
+    if (state.playing && Date.now() >= state.watchDueAt) reportWatch();
   }
 
   // ------------------------------------------------------------ line navigation
 
+  // The line being said, from the player's own playhead rather than the frame clock.
+  function lineNow() {
+    return L.activeCueIndex(state.cues, state.playerReady ? state.player.getCurrentTime() : state.t);
+  }
+
+  // Back always means the line before, wherever the playhead sits in this one (as in the
+  // extension); on the first line it replays that line. Forward on the last line does nothing.
   function stepLine(delta) {
-    if (!state.cues.length) return;
-    // Back always means the line before, wherever the playhead sits in this one (as in the extension).
-    const target = state.cues[Math.min(state.cues.length - 1, Math.max(0, state.activeIdx + delta))];
-    if (target) seek(target.start, true);
+    const { idx } = L.stepTarget(state.cues.length, lineNow(), delta);
+    if (idx >= 0) seek(state.cues[idx].start, true);
+  }
+
+  // The controls (back, exit, scrubber) for 3 s, as after any tap on the video.
+  function showControls() {
+    state.controlsHidden = false;
+    state.backUntil = Date.now() + 3000;
+    setTimeout(renderBack, 3050);
+    renderBack();
+  }
+
+  // Hidden until the next tap, pause or end shows them (a side tap in the landscape mode).
+  function hideControls() {
+    state.controlsHidden = true;
+    state.backUntil = 0;
+    renderBack();
+  }
+
+  // The double tap's badge on the tapped side: how many lines the run has stepped.
+  function showStepBadge(zone, steps, landscape) {
+    const badge = $("step-badge");
+    // Exactly the side zone the taps landed in (L.tapZone()).
+    badge.style.width = `${L.sideShare(landscape ? L.TAP_MIDDLE.landscape : L.TAP_MIDDLE.portrait) * 100}%`;
+    badge.textContent = zone === "left" ? S.linesBack(steps) : S.linesForward(steps);
+    badge.dataset.side = zone;
+    badge.classList.remove("show");
+    void badge.offsetWidth; // restart the fade for every tap of the run
+    badge.classList.add("show");
   }
 
   function replayLine() {
@@ -1180,6 +1843,8 @@
   function togglePlay() {
     if (state.playing) {
       pause("user");
+    } else if (state.endHeld) {
+      state.endHeld = false; // this tap only kept the viewer here (holdEnd())
     } else {
       state.autoPausedFor = state.cues[state.activeIdx] ? state.cues[state.activeIdx].id : null;
       play();
@@ -1194,29 +1859,65 @@
     $("btn-replay").addEventListener("click", replayLine);
     $("btn-play").addEventListener("click", togglePlay);
     $("btn-settings").addEventListener("click", openSettings);
+    $("btn-corner-settings").addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      openSettings();
+    });
     $("back-to-now").addEventListener("click", exitBrowse);
     $("btn-home").addEventListener("click", (ev) => {
       ev.stopPropagation();
       goHome();
     });
+    $("btn-full").addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (state.landscape.on) exitLandscape();
+      else enterLandscape();
+      showControls(); // the controls stay up a moment in the new layout
+    });
+    for (const name of ["fullscreenchange", "webkitfullscreenchange"]) document.addEventListener(name, onFullscreenChange);
 
-    // The shield over the video: a tap toggles play; a quick second tap on the left or right third
-    // steps a line back or forward (and plays). Both act inside the tap itself.
+    // The shield over the video, as in YouTube's app (lib.js shieldTap()): the middle plays or
+    // pauses; a double tap on a side steps a line, each further tap one more. A lone side tap
+    // pauses in portrait, and shows or hides the controls in the landscape mode.
     $("shield").addEventListener("click", (ev) => {
-      const box = ev.currentTarget.getBoundingClientRect();
-      const x = (ev.clientX - box.left) / box.width;
-      const zone = x < 1 / 3 ? "left" : x > 2 / 3 ? "right" : "middle";
-      const last = state.lastShieldTap;
+      if (Date.now() - state.gestureAt < 400) return; // the end of a swipe or drag on the strip, not a tap
+      const landscape = state.landscape.on;
+      const zone = L.tapZone(viewPoint(ev.clientX, ev.clientY).x, viewRect(ev.currentTarget), landscape ? L.TAP_MIDDLE.landscape : L.TAP_MIDDLE.portrait);
       const now = Date.now();
-      if (last && now - last.at < DOUBLE_TAP_MS && last.zone === zone && zone !== "middle") {
-        state.lastShieldTap = null;
-        stepLine(zone === "left" ? -1 : 1);
+      const tap = L.shieldTap(state.lastShieldTap, { at: now, zone, playing: state.playing }, { landscape });
+      state.lastShieldTap = tap.next;
+      clearTimeout(state.shieldTimer);
+      if (tap.action === "step") {
+        if (tap.steps === 1) {
+          state.stepBase = lineNow(); // the run counts from here
+          state.stepIdx = null;
+        }
+        const { idx, moved } = L.stepTarget(state.cues.length, state.stepBase, tap.delta);
+        if (idx < 0) return; // no line that way: nothing seeks, no badge claims a step
+        if (idx !== state.stepIdx) seek(state.cues[idx].start, true); // past the end, taps repeat nothing
+        state.stepIdx = idx;
+        if (moved) showStepBadge(zone, moved, landscape); // a replay of the first line moved no line
         return;
       }
-      state.lastShieldTap = { at: now, zone };
-      state.backUntil = now + 3000;
-      setTimeout(renderBack, 3050);
-      togglePlay();
+      if (tap.action === "controls-later") {
+        state.shieldTimer = setTimeout(() => {
+          state.lastShieldTap = null;
+          if ($("btn-home").closest(".show-back")) hideControls();
+          else showControls();
+        }, L.DOUBLE_TAP_MS);
+        return;
+      }
+      if (tap.action === "pause-later") {
+        // Pausing needs no gesture: wait out the window for a second tap.
+        state.shieldTimer = setTimeout(() => {
+          state.lastShieldTap = null;
+          if (state.playing) pause("user");
+          showControls();
+        }, L.DOUBLE_TAP_MS);
+        return;
+      }
+      showControls();
+      togglePlay(); // inside the tap: iOS plays only from a gesture's own call stack
     });
 
     const lyrics = $("lyrics");
@@ -1229,28 +1930,58 @@
       if (!cue) return;
       const word = ev.target.closest(".word");
       if (word) {
-        openSheet(cue, [Number(word.dataset.start), Number(word.dataset.end)], !!word.dataset.scan);
+        // Japanese looks up from the character under the finger, as Yomitan's scan does, so a
+        // token the parser started early (a particle glued on) cannot shift the word.
+        const scan = isJa() || !!word.dataset.scan;
+        const from = scan ? tappedIndex(word, ev.target, ev.clientX, ev.clientY) : Number(word.dataset.start);
+        openSheet(cue, [from, Number(word.dataset.end)], scan);
       } else if (!row.classList.contains("active")) {
         exitBrowse();
         seek(cue.start, state.playing || state.pauseCause !== "user");
       }
     });
 
-    // A vertical drag browses the list; a horizontal swipe steps a line.
+    bindListGestures(lyrics, () => true);
+    bindListGestures($("shield"), onStrip);
+
+    // iOS reports a browser bar coming or going on the visual viewport, not always as a window
+    // resize. Both land in one frame's single check, and only a new window size re-lays the view:
+    // a pinch or the keyboard resizes the visual viewport alone, and a rotation fires all three.
+    let sized = `${window.innerWidth}x${window.innerHeight}`;
+    let pending = 0;
+    const resized = () => {
+      if (pending) return;
+      pending = requestAnimationFrame(() => {
+        pending = 0;
+        const size = `${window.innerWidth}x${window.innerHeight}`;
+        if (size === sized) return;
+        sized = size;
+        viewChanged();
+      });
+    };
+    for (const name of ["resize", "orientationchange"]) window.addEventListener(name, resized);
+    if (window.visualViewport) window.visualViewport.addEventListener("resize", resized);
+  }
+
+  // A vertical drag browses the list; a horizontal swipe steps a line. On the subtitle list, and in
+  // the landscape mode on the video too wherever the strip lies: there only the caption box takes
+  // pointer events (a tap beside it must reach the video), so a gesture that starts beside the box,
+  // or in a gap between lines when no box shows, arrives at the shield instead.
+  function bindListGestures(el, accepts) {
+    const lyrics = $("lyrics");
     let touch = null;
-    lyrics.addEventListener("touchstart", (ev) => {
-      if (state.sheet.open || Date.now() - state.sheetClosedAt < L.GHOST_CLICK_MS) {
-        touch = null; // the sheet's own dismissal, not a swipe or a browse
+    el.addEventListener("touchstart", (ev) => {
+      if (state.sheet.open || Date.now() - state.sheetClosedAt < L.GHOST_CLICK_MS || !accepts(ev.touches[0])) {
+        touch = null; // the sheet's own dismissal, or not on the strip: not a swipe or a browse
         return;
       }
       const p = ev.touches[0];
       touch = { x: p.clientX, y: p.clientY, axis: null, offset: state.browse.offset };
     }, { passive: true });
-    lyrics.addEventListener("touchmove", (ev) => {
+    el.addEventListener("touchmove", (ev) => {
       if (!touch) return;
       const p = ev.touches[0];
-      const dx = p.clientX - touch.x;
-      const dy = p.clientY - touch.y;
+      const { dx, dy } = viewDelta(p.clientX - touch.x, p.clientY - touch.y);
       if (!touch.axis && Math.max(Math.abs(dx), Math.abs(dy)) > 8) touch.axis = Math.abs(dy) > Math.abs(dx) ? "y" : "x";
       if (touch.axis === "y" && !state.sheet.open) {
         if (!state.browse.active) {
@@ -1264,10 +1995,10 @@
       }
       if (touch.axis) ev.preventDefault();
     }, { passive: false });
-    lyrics.addEventListener("touchend", (ev) => {
+    el.addEventListener("touchend", (ev) => {
       if (!touch) return;
       const p = ev.changedTouches[0];
-      const dx = p.clientX - touch.x;
+      const { dx } = viewDelta(p.clientX - touch.x, p.clientY - touch.y);
       const { axis } = touch;
       touch = null;
       lyrics.classList.remove("dragging");
@@ -1275,8 +2006,8 @@
       if (axis === "y" && state.browse.active) browseIdle();
       if (axis === "x" && Math.abs(dx) > 60 && !state.sheet.open) stepLine(dx < 0 ? 1 : -1);
     }, { passive: true });
-    lyrics.addEventListener("wheel", (ev) => {
-      if (state.sheet.open) return;
+    el.addEventListener("wheel", (ev) => {
+      if (state.sheet.open || !accepts(ev)) return;
       ev.preventDefault();
       enterBrowse();
       lyrics.classList.add("dragging");
@@ -1286,41 +2017,107 @@
       state.wheelTimer = setTimeout(() => lyrics.classList.remove("dragging"), 120);
       browseIdle();
     }, { passive: false });
+  }
 
-    window.addEventListener("resize", () => { state.focusKey = null; });
+  // In the landscape mode, a point on the strip the subtitle lies in (#lyrics' box). A quarter
+  // turn maps a box to a box, so the screen rectangle answers for the turned view too.
+  function onStrip(p) {
+    if (!state.landscape.on) return false;
+    const r = $("lyrics").getBoundingClientRect();
+    return p.clientX >= r.left && p.clientX <= r.right && p.clientY >= r.top && p.clientY <= r.bottom;
   }
 
   // ------------------------------------------------------------ the word sheet
 
   // Content-sized, but always leaving room above it for the tapped cue.
   function capSheet(cue) {
+    if (state.landscape.on) {
+      $("sheet").style.maxHeight = ""; // a side panel, the view's full height
+      return;
+    }
     const row = state.rowById.get(cue.id);
-    const top = $("lyrics").getBoundingClientRect().top;
-    const room = window.innerHeight - top - (row ? row.offsetHeight : 80) - 40;
+    const top = viewRect($("lyrics")).top;
+    const room = viewHeight() - top - (row ? row.offsetHeight : 80) - 40;
     $("sheet").style.maxHeight = `${Math.max(240, room)}px`;
   }
 
+  // A token's text nodes with the cue offset each starts at. Furigana (<rt>) is not cue text.
+  function* tokenText(tok) {
+    let at = Number(tok.dataset.start);
+    const walk = document.createTreeWalker(tok, NodeFilter.SHOW_TEXT);
+    while (walk.nextNode()) {
+      const node = walk.currentNode;
+      if (node.parentElement.closest("rt")) continue;
+      yield { node, at };
+      at += node.data.length;
+    }
+  }
+
+  // The cue offset of the character under a tap on a word: the glyph whose box holds the point,
+  // or the nearest one; a tap on furigana picks among its ruby base. Glyph boxes, not
+  // caretPositionFromPoint(): a caret is the nearest boundary, so the right half of a glyph would
+  // answer the next one.
+  function tappedIndex(tok, target, x, y) {
+    const rt = target.closest("rt");
+    const scope = rt && tok.contains(rt) ? rt.parentElement : tok;
+    const offsets = [];
+    const boxes = [];
+    const range = document.createRange();
+    for (const { node, at } of tokenText(tok)) {
+      if (!scope.contains(node)) continue;
+      let i = 0;
+      for (const ch of node.data) {
+        range.setStart(node, i);
+        range.setEnd(node, i + ch.length);
+        offsets.push(at + i);
+        boxes.push(range.getBoundingClientRect());
+        i += ch.length;
+      }
+    }
+    const pick = L.nearestBox(boxes, x, y);
+    return pick < 0 ? Number(tok.dataset.start) : offsets[pick];
+  }
+
+  // Lights the span's characters exactly (a scan from inside a token covers part of it), or,
+  // without the CSS Highlight API, every unit the span touches.
   function markPicked(cue, span) {
     document.querySelectorAll("#lyrics .picked").forEach((el) => el.classList.remove("picked"));
+    const exact = typeof Highlight === "function" && window.CSS && CSS.highlights;
+    if (exact) CSS.highlights.delete("picked");
     const row = cue && state.rowById.get(cue.id);
     if (!row) return;
-    // Every unit inside the span: one token, or the characters a scan matched.
+    const ranges = [];
     for (const tok of row.querySelectorAll(".tok")) {
-      const at = Number(tok.dataset.start);
-      if (at >= span[0] && at < span[1]) tok.classList.add("picked");
+      if (Number(tok.dataset.start) >= span[1] || Number(tok.dataset.end) <= span[0]) continue;
+      if (!exact) {
+        tok.classList.add("picked");
+        continue;
+      }
+      for (const { node, at } of tokenText(tok)) {
+        const from = Math.max(span[0], at) - at;
+        const to = Math.min(span[1], at + node.data.length) - at;
+        if (from >= to) continue;
+        const range = document.createRange();
+        range.setStart(node, from);
+        range.setEnd(node, to);
+        ranges.push(range);
+      }
     }
+    if (exact && ranges.length) CSS.highlights.set("picked", new Highlight(...ranges));
   }
 
   async function openSheet(cue, span, scan = false) {
     const s = state.sheet;
     const seq = ++s.seq;
     if (!s.open) {
+      s.openedAt = state.player ? state.player.getCurrentTime() : state.t; // the playhead at the tap
       s.pausedIt = settings.pauseOnLookup && state.playing;
       if (s.pausedIt) pause("sheet");
-      s.openedAt = state.player ? state.player.getCurrentTime() : state.t; // where the close resumes
     }
     s.open = true;
     s.cue = cue;
+    s.tapped = span; // each entry's span starts here (entrySpan())
+    s.scan = scan;
     s.span = span;
     s.entries = [];
     s.pick = 0;
@@ -1334,10 +2131,10 @@
     sheet.style.transform = "";
     sheet.classList.add("open");
     sheet.setAttribute("aria-hidden", "false");
-    // A per-character tap (no tokens) looks up the text from there on, like Yomitan's scan; the
-    // longest match then becomes the span.
-    const surface = scan ? cue.text.slice(span[0], span[0] + 12) : cue.text.slice(span[0], span[1]);
-    $("sheet-headword").textContent = surface;
+    // A scan looks up the text from the tapped character on, like Yomitan's; the picked entry's
+    // match then becomes the span (the longest, until another is picked).
+    const surface = scan ? L.scanText(cue.text, span[0], 12) : cue.text.slice(span[0], span[1]);
+    $("sheet-headword").textContent = cue.text.slice(span[0], span[1]);
     $("sheet-reading").replaceChildren();
     $("sheet-freq").textContent = "";
     $("sheet-audio").hidden = true;
@@ -1357,10 +2154,6 @@
     if (!s.entries.length) {
       setSheetMessage(S.noEntry);
       return;
-    }
-    if (scan && s.entries[0].matched > 0) {
-      s.span = [span[0], Math.min(cue.text.length, span[0] + s.entries[0].matched)];
-      markPicked(cue, s.span);
     }
     renderCandidates();
     showEntry(0);
@@ -1396,26 +2189,37 @@
     if (res.status === 200 && res.data && res.data.ok) state.inDeck.set(term, !!res.data.in_deck);
   }
 
+  // Every match is a choice: the longest first (the default), then the shorter ones past a divider.
   function renderCandidates() {
     const box = $("sheet-candidates");
     box.replaceChildren();
     const entries = state.sheet.entries;
     if (entries.length < 2) return;
-    const repeated = new Set(entries.map((e) => e.term).filter((t, i, all) => all.indexOf(t) !== i));
-    entries.forEach((entry, i) => {
+    L.candidateTabs(entries).forEach((tab, i) => {
       const b = document.createElement("button");
-      b.className = "tab";
+      b.className = tab.shorter ? "tab shorter" : "tab";
       b.setAttribute("role", "tab");
-      b.append(entry.term);
-      if (repeated.has(entry.term) && entry.reading && entry.reading !== entry.term) {
+      b.setAttribute("aria-controls", "sheet-body");
+      b.append(tab.term);
+      if (tab.reading) {
         const r = document.createElement("span");
         r.className = "tab-reading";
-        r.textContent = entry.reading;
+        r.textContent = tab.reading;
         b.append(r);
       }
       b.addEventListener("click", () => showEntry(i));
       box.append(b);
     });
+  }
+
+  // The row scrolls sideways only: scrollIntoView() would scroll the sheet too. Sideways is the
+  // view's, which the turned mode puts along the screen's height (viewRect()).
+  function revealTab(tab) {
+    const box = tab.parentElement;
+    const r = viewRect(tab);
+    const b = viewRect(box);
+    if (r.left < b.left) box.scrollLeft -= b.left - r.left;
+    else if (r.right > b.right) box.scrollLeft += r.right - b.right;
   }
 
   function showEntry(i) {
@@ -1426,7 +2230,12 @@
     [...$("sheet-candidates").children].forEach((b, j) => {
       b.classList.toggle("on", j === i);
       b.setAttribute("aria-selected", String(j === i));
+      if (j === i) revealTab(b);
     });
+    // The line lights what this entry matched, and a mine clozes that.
+    s.span = L.entrySpan({ span: s.tapped, matched: entry.matched, longest: s.entries[0].matched,
+                           scan: s.scan, length: s.cue.text.length });
+    markPicked(s.cue, s.span);
     $("sheet-headword").textContent = entry.term;
 
     // One reading line; the pitch accent is drawn on it as an overline with a drop mark.
@@ -1517,13 +2326,13 @@
     state.sheetClosedAt = Date.now(); // the ghost-click guard counts from here
     if (s.pausedIt) {
       s.pausedIt = false;
-      // Resume the line the sheet was opened on, never further: if anything moved the playhead
-      // while the sheet was open, put it back first.
-      if (state.player && Number.isFinite(s.openedAt) && Math.abs(state.player.getCurrentTime() - s.openedAt) > 0.5) {
-        state.player.seekTo(s.openedAt, true);
-      }
+      // Back to just before the tap, or the line's start (Settings): never on from where it paused.
+      // Only when playback resumes: a sheet closed for something else (the Anki setup) leaves the
+      // playhead where it paused, and a seek to where the playhead already is would cost a saved
+      // position and a /sync for nothing.
+      const { t, cue } = L.lookupResume(state.cues, s.openedAt, s.cue && s.cue.id, settings.lookupResume);
+      if (resume && Number.isFinite(t) && Math.abs(t - state.player.getCurrentTime()) > 0.05) seek(t, false);
       // The line looked up may have ended while the sheet was open; auto-pause must not fire for it again.
-      const cue = state.cues[L.activeCueIndex(state.cues, s.openedAt)];
       state.autoPausedFor = cue ? cue.id : null;
       if (resume) play(); // still inside the gesture that closed the sheet
     }
@@ -1648,23 +2457,28 @@
     return copy.textContent.replace(/\s+/g, " ").trim().slice(0, 500);
   }
 
-  // Drag a sheet down to dismiss: from the grabber anywhere, from the content once it is scrolled
-  // to the top. The dismissal runs in touchend, so a resume inside it is still a gesture.
+  // Drag a sheet down to dismiss, from its content once that is scrolled to the top. No handle is
+  // drawn: the drag is a shortcut, and a tap outside or the close button is the visible way out.
+  // Every sheet in the landscape mode is a side panel and is dragged right instead.
+  // The dismissal runs in touchend, so a resume inside it is still a gesture.
   function makeDraggable(sheet, scroller, onDismiss) {
     let drag = null;
     sheet.addEventListener("touchstart", (ev) => {
       if (!sheet.classList.contains("open") || ev.target.closest("button, input, summary")) return;
-      const fromGrabber = !!ev.target.closest(".grabber");
-      drag = { y: ev.touches[0].clientY, dy: 0, active: false, fromGrabber };
+      const side = state.landscape.on; // every sheet is a side panel in the landscape mode
+      drag = { x: ev.touches[0].clientX, y: ev.touches[0].clientY, dy: 0, active: false, side };
     }, { passive: true });
     sheet.addEventListener("touchmove", (ev) => {
       if (!drag) return;
-      const dy = ev.touches[0].clientY - drag.y;
+      const d = viewDelta(ev.touches[0].clientX - drag.x, ev.touches[0].clientY - drag.y);
+      // Along the way out (down, or right for the side panel), and across it.
+      const [dy, across] = drag.side ? [d.dx, d.dy] : [d.dy, d.dx];
       if (!drag.active) {
-        if (dy > 8 && (drag.fromGrabber || scroller.scrollTop <= 0)) {
+        const scrolled = (typeof scroller === "function" ? scroller() : scroller).scrollTop;
+        if (dy > 8 && (drag.side ? Math.abs(across) < dy : scrolled <= 0)) {
           drag.active = true;
           sheet.classList.add("dragging");
-        } else if (Math.abs(dy) > 8) {
+        } else if (Math.max(Math.abs(dy), drag.side ? Math.abs(across) : 0) > 8) {
           drag = null;
           return;
         } else {
@@ -1672,7 +2486,7 @@
         }
       }
       drag.dy = Math.max(0, dy);
-      sheet.style.transform = `translateY(${drag.dy}px)`;
+      sheet.style.transform = drag.side ? `translateX(${drag.dy}px)` : `translateY(${drag.dy}px)`;
       ev.preventDefault();
     }, { passive: false });
     sheet.addEventListener("touchend", () => {
@@ -1691,11 +2505,20 @@
   function applySettings() {
     $("set-autopause").checked = settings.autoPause;
     $("set-lookup-pause").checked = settings.pauseOnLookup;
+    $(`set-resume-${settings.lookupResume}`).checked = true;
     $("set-furigana").checked = settings.furigana;
     $("set-listening").checked = settings.listening;
     $("set-sweep").checked = settings.sweep;
     $("set-colours").checked = settings.wordColours;
     for (const b of $("set-speed").children) b.classList.toggle("on", Number(b.dataset.speed) === settings.speed);
+    for (const [id, key] of CAPTION_CONTROLS) {
+      for (const b of $(id).children) {
+        const on = b.dataset.value === String(settings[key]);
+        b.classList.toggle("on", on);
+        b.setAttribute("aria-checked", String(on));
+      }
+    }
+    applyCaptionStyle();
     // Furigana and the word colours change every cue's markup; redraw the list once when one flips.
     const drawn = `${settings.furigana} ${settings.wordColours}`;
     if (state.drawnWith !== undefined && state.drawnWith !== drawn) redrawRows();
@@ -1704,7 +2527,56 @@
     updateVeil();
   }
 
+  // Settings > Subtitle style: each control, the setting it sets, and its choices' labels.
+  const CAPTION_CONTROLS = [["set-caption-bg", "captionBg"], ["set-caption-size", "captionSize"], ["set-caption-position", "captionPosition"]];
+  const CAPTION_LABELS = {
+    captionBg: (v) => (v === 0 ? S.captionNone : `${Math.round(v * 100)}%`),
+    captionSize: (v) => S[`caption${v[0].toUpperCase()}${v.slice(1)}`],
+    captionPosition: (v) => S[`caption${v[0].toUpperCase()}${v.slice(1)}`],
+  };
+
+  // The landscape caption box's look, through custom properties holding numbers only (lib.js
+  // captionVars() clamps them): app.css's html.landscape .cue and the sample box read them.
+  function applyCaptionStyle() {
+    const root = document.documentElement;
+    for (const [name, value] of Object.entries(L.captionVars(settings))) root.style.setProperty(name, value);
+  }
+
+  // The Subtitle style page, pushed over the main list inside the same sheet.
+  function showSettingsPage(sub, animate = true) {
+    const sheet = $("settings");
+    const pages = sheet.querySelector(".sheet-pages");
+    pages.classList.toggle("instant", !animate);
+    sheet.classList.toggle("sub", sub);
+    $("settings-title").textContent = sub ? S.subtitleStyle : S.settings;
+    $("settings-back").hidden = !sub;
+    for (const [id, shown] of [["settings-main", !sub], ["settings-style", sub]]) {
+      $(id).inert = !shown;
+      $(id).setAttribute("aria-hidden", String(!shown));
+    }
+    if (sub) $("settings-style").scrollTop = 0;
+    void pages.offsetWidth;
+    pages.classList.remove("instant");
+  }
+
   function bindSettings() {
+    for (const [id, key] of CAPTION_CONTROLS) {
+      for (const value of L.CAPTION_CHOICES[key].values) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.dataset.value = String(value);
+        b.setAttribute("role", "radio");
+        b.textContent = CAPTION_LABELS[key](value);
+        b.addEventListener("click", () => {
+          settings[key] = value;
+          saveSettings();
+          applySettings();
+        });
+        $(id).append(b);
+      }
+    }
+    $("set-style").addEventListener("click", () => showSettingsPage(true));
+    $("settings-back").addEventListener("click", () => showSettingsPage(false));
     const seg = $("set-speed");
     for (const speed of SPEEDS) {
       const b = document.createElement("button");
@@ -1727,14 +2599,20 @@
     });
     bindSwitch("set-autopause", "autoPause");
     bindSwitch("set-lookup-pause", "pauseOnLookup");
+    for (const id of ["set-resume-tap", "set-resume-line"]) $(id).addEventListener("change", (ev) => {
+      settings.lookupResume = ev.target.value;
+      saveSettings();
+      applySettings();
+    });
     bindSwitch("set-furigana", "furigana");
     bindSwitch("set-listening", "listening");
     bindSwitch("set-sweep", "sweep");
     bindSwitch("set-colours", "wordColours");
     $("settings-backdrop").addEventListener("click", closeSettings);
+    $("settings").querySelector(".sheet-close").addEventListener("click", closeSettings);
     $("set-anki").addEventListener("click", openAnkiSetup);
     bindAnkiSetup();
-    makeDraggable($("settings"), $("settings").querySelector(".sheet-scroll"), closeSettings);
+    makeDraggable($("settings"), () => $($("settings").classList.contains("sub") ? "settings-style" : "settings-main"), closeSettings);
     applySettings();
   }
 
@@ -1742,8 +2620,10 @@
     renderDevices();
     renderAnkiRow();
     renderAnkiSync();
+    renderWatchHistory();
     closeSheet();
     renderServerStatus();
+    showSettingsPage(false, false); // always opens on the main list
     $("settings").classList.add("open");
     $("settings").setAttribute("aria-hidden", "false");
     $("settings-backdrop").classList.add("open");
@@ -1765,7 +2645,7 @@
   }
 
   function measureScrubber() {
-    const rect = $("scrub-track").getBoundingClientRect();
+    const rect = viewRect($("scrub-track"));
     scrub.width = rect.width;
     scrub.left = rect.left;
     scrub.f = -1; // place the thumb again at the new width
@@ -1813,10 +2693,11 @@
     $("scrub-buffer").style.transform = `scaleX(${Math.max(0, Math.min(1, end / d)).toFixed(4)})`;
   }
 
-  function scrubTo(clientX) {
+  function scrubTo(ev) {
     const d = scrubDuration();
     if (!d || !scrub.width) return;
-    scrub.target = Math.max(0, Math.min(d, ((clientX - scrub.left) / scrub.width) * d));
+    const x = viewPoint(ev.clientX, ev.clientY).x;
+    scrub.target = Math.max(0, Math.min(d, ((x - scrub.left) / scrub.width) * d));
     state.previewT = scrub.target; // the subtitle list shows the cue at the target meanwhile
   }
 
@@ -1832,9 +2713,9 @@
       measureScrubber();
       scrub.dragging = true;
       $("scrubber").classList.add("dragging");
-      scrubTo(ev.clientX);
+      scrubTo(ev);
     });
-    track.addEventListener("pointermove", (ev) => { if (scrub.dragging) scrubTo(ev.clientX); });
+    track.addEventListener("pointermove", (ev) => { if (scrub.dragging) scrubTo(ev); });
     const end = (commit) => {
       if (!scrub.dragging) return;
       scrub.dragging = false;
@@ -1842,6 +2723,7 @@
       state.previewT = null;
       if (commit) seek(scrub.target, false); // one seek, one saved position, on release
       scrub.shownSec = -1;
+      if (state.landscape.on) showControls(); // the bar stays a moment after the drag
     };
     track.addEventListener("pointerup", () => end(true));
     track.addEventListener("pointercancel", () => end(false));
@@ -1876,6 +2758,9 @@
   function applyStrings() {
     for (const el of document.querySelectorAll("[data-s]")) {
       if (typeof S[el.dataset.s] === "string") el.textContent = S[el.dataset.s];
+    }
+    for (const el of document.querySelectorAll("[data-s-label]")) {
+      if (typeof S[el.dataset.sLabel] === "string") el.setAttribute("aria-label", S[el.dataset.sLabel]);
     }
   }
 
@@ -1932,6 +2817,7 @@
     if (ankiBound) return;
     ankiBound = true;
     $("anki-backdrop").addEventListener("click", closeAnkiSetup);
+    $("anki-sheet").querySelector(".sheet-close").addEventListener("click", closeAnkiSetup);
     makeDraggable($("anki-sheet"), $("anki-sheet").querySelector(".sheet-scroll"), closeAnkiSetup);
     $("anki-model").addEventListener("change", () => renderFieldRows($("anki-model").value, null));
     $("anki-save").addEventListener("click", saveAnkiSetup);
@@ -2083,6 +2969,14 @@
     const text = L.ankiSyncText(sync);
     $("set-anki-sync-status").textContent = text;
     $("set-anki-sync-status").hidden = !text;
+  }
+
+  // ---- Settings > Server: the portal's --watch-history
+
+  function renderWatchHistory() {
+    const text = L.watchHistoryText(state.info && state.info.watch_history);
+    $("set-watch-history").textContent = text;
+    $("set-watch-history").hidden = !text;
   }
 
   // ---- Settings > Paired devices (lan mode, or a device paired in tailscale mode)
