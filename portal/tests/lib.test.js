@@ -688,6 +688,33 @@ test("tapZone: thirds in portrait, the middle fifth in landscape", () => {
   assert.equal(L.tapZone(285, box, 0.2), "right");
 });
 
+test("stepTarget: mid-line back is the line before; the ends move nothing", () => {
+  // Five lines; the run began on line 2 (the playhead anywhere inside it).
+  assert.deepEqual(L.stepTarget(5, 2, -1), { idx: 1, moved: 1 });
+  assert.deepEqual(L.stepTarget(5, 2, 1), { idx: 3, moved: 1 });
+  assert.deepEqual(L.stepTarget(5, 2, -3), { idx: 0, moved: 2 }); // clamped: the badge says 2, not 3
+  assert.deepEqual(L.stepTarget(5, 2, 4), { idx: 4, moved: 2 });
+  // No line that way: no seek, no badge.
+  assert.deepEqual(L.stepTarget(5, 0, -1), { idx: -1, moved: 0 });
+  assert.deepEqual(L.stepTarget(5, 4, 1), { idx: -1, moved: 0 });
+  assert.deepEqual(L.stepTarget(0, 0, 1), { idx: -1, moved: 0 });
+  // Before the first line (-1): back has nowhere to go; forward reaches the first line.
+  assert.deepEqual(L.stepTarget(5, -1, -1), { idx: -1, moved: 0 });
+  assert.deepEqual(L.stepTarget(5, -1, 1), { idx: 0, moved: 1 });
+  // Paired with activeCueIndex(): mid-line and at the line's very start both step to the line before.
+  const cues = [0, 4, 8, 12].map((start, id) => ({ id, start, end: start + 3.5 }));
+  for (const t of [9.9, 8.0, 11.9]) assert.equal(L.stepTarget(cues.length, L.activeCueIndex(cues, t), -1).idx, 1, String(t));
+});
+
+test("framePlayhead: a frame report refines the element's time, never overrides it", () => {
+  assert.equal(L.framePlayhead(20.04, 20.0), 20.04); // the frame on screen, a little ahead of the coarse time
+  // Right after a seek back to 16 s, a frame from before it still says 22.4 s: the element wins.
+  assert.equal(L.framePlayhead(22.4, 16.0), 16.0);
+  assert.equal(L.framePlayhead(16.1, 16.0, { seeking: true }), 16.0);
+  assert.equal(L.framePlayhead(NaN, 16.0), 16.0);
+  assert.equal(L.framePlayhead(0, 0.2), 0);
+});
+
 test("the double tap's badge counts lines", () => {
   assert.equal(L.STRINGS.linesBack(1), "« 1 line");
   assert.equal(L.STRINGS.linesForward(3), "3 lines »");

@@ -111,6 +111,7 @@
     shieldTimer: null,
     controlsHidden: false, // a side tap hid the controls (landscape); renderBack()
     stepBase: -1, // a double tap's run steps from the line it began on
+    stepIdx: null, // and the line it last put the playhead on
     inDeck: new Map(), // term -> boolean, from /api/canadd
     // The word colours: the deck's rows as the server sent them (L.applyDeck), and the words.js
     // index built from them; wordsKey is its entries as JSON, so an unchanged deck draws nothing.
@@ -892,8 +893,22 @@
     // The time of the frame on screen, from requestVideoFrameCallback where there is one.
     let shown = null;
     const onFrame = (now, meta) => {
-      shown = { mediaTime: meta.mediaTime, at: now };
+      if (!video.seeking) shown = { mediaTime: meta.mediaTime, at: now }; // a frame from before the seek
       video.requestVideoFrameCallback(onFrame);
+    };
+    // A seek is checked once it should have landed: one the browser dropped (the playhead still
+    // far from it, nothing seeking) is made again, once.
+    let seekCheck = null;
+    const checkSeek = (t, retried) => {
+      clearTimeout(seekCheck);
+      seekCheck = setTimeout(() => {
+        if (video.seeking || Math.abs(video.currentTime - t) <= 1) return;
+        console.log(`seek: at ${video.currentTime.toFixed(1)} s instead of ${t.toFixed(1)} s${retried ? "" : ", seeking again"}`);
+        if (retried) return;
+        shown = null;
+        video.currentTime = t;
+        checkSeek(t, true);
+      }, 1000);
     };
     if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(onFrame);
     const emit = (s) => {
@@ -955,15 +970,20 @@
       pauseVideo() { video.pause(); },
       seekTo(t) {
         shown = null;
-        if (video.readyState >= 1) video.currentTime = t;
-        else pendingSeek = t;
+        if (video.readyState >= 1) {
+          video.currentTime = t;
+          checkSeek(t, false);
+        } else {
+          pendingSeek = t;
+        }
       },
       getCurrentTime() {
         if (pendingSeek !== null) return pendingSeek;
         // Before the resume lands the element may still say 0: the page shows where it will be.
         if (!state.resumeLanded && state.resumeTarget !== null && video.currentTime < 0.5) return state.resumeTarget;
-        if (shown && !video.paused) return shown.mediaTime + ((performance.now() - shown.at) / 1000) * video.playbackRate;
-        return video.currentTime;
+        if (!shown || video.paused) return video.currentTime;
+        const frame = shown.mediaTime + ((performance.now() - shown.at) / 1000) * video.playbackRate;
+        return L.framePlayhead(frame, video.currentTime, { seeking: video.seeking });
       },
       getDuration() { return Number.isFinite(video.duration) ? video.duration : state.mediaDuration || 0; },
       setPlaybackRate(r) { video.playbackRate = r; },
@@ -1098,7 +1118,9 @@
     state.clock.t = state.t; // steadyTime then takes the new, earlier time as it is
     state.clock.raw = null;
     state.sweep.count = -1;
-    if (andPlay) play();
+    // A playing video plays on from its new place; play() again right after the seek would only
+    // be one more request racing it.
+    if (andPlay && !state.playing) play();
     sync();
     savePosition();
   }
@@ -1757,15 +1779,16 @@
 
   // ------------------------------------------------------------ line navigation
 
-  function stepLine(delta) {
-    // Back always means the line before, wherever the playhead sits in this one (as in the extension).
-    stepTo(state.activeIdx + delta);
+  // The line being said, from the player's own playhead rather than the frame clock.
+  function lineNow() {
+    return L.activeCueIndex(state.cues, state.playerReady ? state.player.getCurrentTime() : state.t);
   }
 
-  function stepTo(idx) {
-    if (!state.cues.length) return;
-    const target = state.cues[Math.min(state.cues.length - 1, Math.max(0, idx))];
-    if (target) seek(target.start, true);
+  // Back always means the line before, wherever the playhead sits in this one (as in the
+  // extension). Nothing happens at either end.
+  function stepLine(delta) {
+    const { idx, moved } = L.stepTarget(state.cues.length, lineNow(), delta);
+    if (moved) seek(state.cues[idx].start, true);
   }
 
   // The controls (back, exit, scrubber) for 3 s, as after any tap on the video.
@@ -1840,9 +1863,15 @@
       state.lastShieldTap = tap.next;
       clearTimeout(state.shieldTimer);
       if (tap.action === "step") {
-        if (tap.steps === 1) state.stepBase = state.activeIdx; // the run counts from here
-        stepTo(state.stepBase + tap.delta);
-        showStepBadge(zone, tap.steps);
+        if (tap.steps === 1) {
+          state.stepBase = lineNow(); // the run counts from here
+          state.stepIdx = null;
+        }
+        const { idx, moved } = L.stepTarget(state.cues.length, state.stepBase, tap.delta);
+        if (!moved) return; // no line that way: nothing seeks, no badge claims a step
+        if (idx !== state.stepIdx) seek(state.cues[idx].start, true); // past the end, taps repeat nothing
+        state.stepIdx = idx;
+        showStepBadge(zone, moved);
         return;
       }
       if (tap.action === "controls-later") {

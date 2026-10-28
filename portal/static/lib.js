@@ -949,6 +949,27 @@
     return Math.abs(f - 0.5) <= middle / 2 ? "middle" : f < 0.5 ? "left" : "right";
   }
 
+  // Where a double tap's run lands: `delta` lines from `base`, the line being said when the run
+  // began (activeCueIndex(), so mid-line back means the line before, as in the extension; -1
+  // before the first line), clamped to the list. `moved` is how many lines that really is, and 0
+  // when there is no line that way (back on the first line, forward on the last): then nothing
+  // seeks and no badge claims a step.
+  function stepTarget(count, base, delta) {
+    if (!count || !delta) return { idx: -1, moved: 0 };
+    const idx = Math.min(count - 1, Math.max(0, base + delta));
+    const moved = (idx - base) * Math.sign(delta);
+    return moved > 0 ? { idx, moved } : { idx: -1, moved: 0 };
+  }
+
+  // The playhead from a frame report, when it is trustworthy. requestVideoFrameCallback's
+  // mediaTime is exact to the frame on screen, but right after a seek a browser can still report
+  // frames from before it (Safari does), so it only refines the element's own currentTime, the
+  // authority: never while seeking, never more than `slack` seconds away from it.
+  function framePlayhead(frame, current, { seeking = false, slack = 0.5 } = {}) {
+    if (seeking || !Number.isFinite(frame) || Math.abs(frame - current) > slack) return current;
+    return frame;
+  }
+
   function hasKanji(text) {
     return /[㐀-鿿豈-﫿々]/.test(String(text || ""));
   }
@@ -963,7 +984,7 @@
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
     ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs, nearestBox, entrySpan, candidateTabs, lookupResume, LOOKUP_LEAD_S,
     watchHistoryText, newWatchLog, watchAt, watchClose, watchDrain, watchNextMs, clientInfo, viewPoint, viewDelta, viewRect, shouldTurn,
-    shieldTap, tapZone, DOUBLE_TAP_MS,
+    shieldTap, tapZone, stepTarget, framePlayhead, DOUBLE_TAP_MS,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.PortalLib = api;
