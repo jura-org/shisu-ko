@@ -2160,11 +2160,12 @@
     });
   }
 
-  // The row scrolls sideways only: scrollIntoView() would scroll the sheet too.
+  // The row scrolls sideways only: scrollIntoView() would scroll the sheet too. Sideways is the
+  // view's, which the turned mode puts along the screen's height (viewRect()).
   function revealTab(tab) {
     const box = tab.parentElement;
-    const r = tab.getBoundingClientRect();
-    const b = box.getBoundingClientRect();
+    const r = viewRect(tab);
+    const b = viewRect(box);
     if (r.left < b.left) box.scrollLeft -= b.left - r.left;
     else if (r.right > b.right) box.scrollLeft += r.right - b.right;
   }
