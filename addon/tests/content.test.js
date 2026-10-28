@@ -43,8 +43,10 @@ test("shouldSync skips the request when a paused video needs nothing", () => {
 
 test("shouldSync keeps asking while the server still has work around the playhead", () => {
   const { api } = loadContent();
-  // Covered only to 200 s of a 1200 s video, and the server transcribes 900 s ahead of 100 s.
+  // Covered only to 200 s of a 1200 s video, and the server transcribes 180 s ahead of 100 s.
   assert.equal(api.shouldSync(idle({ covered: [[0, 200]] }), NOW), true);
+  // Covered 180 s past the playhead: the server's lookahead is reached, the heartbeat is enough.
+  assert.equal(api.shouldSync(idle({ covered: [[0, 280]] }), NOW), false);
   // The playhead is not inside any covered range at all.
   assert.equal(api.shouldSync(idle({ t: 900, covered: [[0, 200]] }), NOW), true);
 });
@@ -79,7 +81,7 @@ test("shouldSync asks while the duration is still unknown", () => {
 
 test("shouldSync stops once the covered range reaches the end of a short video", () => {
   const { api } = loadContent();
-  // Shorter than the server's lookahead: the end of the video is the target, not playhead + 900 s.
+  // Shorter than the server's lookahead: the end of the video is the target, not playhead + 180 s.
   assert.equal(api.shouldSync(idle({ t: 30, duration: 60, covered: [[0, 60]] }), NOW), false);
   assert.equal(api.shouldSync(idle({ t: 30, duration: 60, covered: [[0, 45]] }), NOW), true);
 });

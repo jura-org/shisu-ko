@@ -34,7 +34,7 @@
   const SYNC_IDLE_INTERVAL_MS = 5000;
   // The server's own --lookahead default: it transcribes no further ahead than this, so once the
   // covered range reaches it there is nothing left to ask for until the playhead moves.
-  const SYNC_LOOKAHEAD_S = 900;
+  const SYNC_LOOKAHEAD_S = 180;
   const RESUME_DELAY_MS = 350;
   const TOAST_MS = 3500;
   const TOAST_MAX_CHARS = 240;
