@@ -69,6 +69,23 @@ def test_build_cloze_escapes_and_splits():
         portal.build_cloze("", 0, 1)
 
 
+def test_spans_count_utf16_units_as_the_page_does():
+    # 𠮟 (U+20B9F) is one Python character and two JavaScript ones. The page's span [3, 6) in
+    # 先生に𠮟られた is 𠮟ら: counted in code points, the cloze would bold 𠮟られ.
+    text = "先生に𠮟られた"
+    assert portal.utf16_length(text) == 8 and len(text) == 7
+    assert portal.build_cloze(text, 3, 6) == ("先生に", "𠮟ら", "れた")
+    assert portal.build_cloze(text, 3, 5) == ("先生に", "𠮟", "られた")
+    assert portal.build_cloze(text, 0, 8)[1] == text
+    for start, end in ((3, 4), (4, 6), (0, 9)):  # half of 𠮟, or past the end
+        with pytest.raises(ValueError):
+            portal.build_cloze(text, start, end)
+    # The entry's match is reported in the same units, so the page's span ends after 𠮟る.
+    entries = portal.compact_entries({"dictionaryEntries": [_entry("𠮟る", "しかる", "𠮟られた"), _entry("𠮟る", "しかる", "𠮟ら")]})
+    assert entries[0]["matched"] == 5
+    assert portal.match_length(_entry("𠮟", "しつ", "𠮟")) == 2
+
+
 def test_render_template_and_markers():
     values = {"cloze-prefix": "a", "cloze-body": "b", "cloze-suffix": "c"}
     assert portal.render_template("{cloze-prefix}<b>{cloze-body}</b>{cloze-suffix}", values) == "a<b>b</b>c"

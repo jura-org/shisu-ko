@@ -260,13 +260,25 @@ def host_allowed(host_header, allowed: set[str]) -> bool:
     return host in allowed
 
 
+def utf16_length(text: str) -> int:
+    """The length JavaScript gives a string: UTF-16 code units, two for a character beyond the BMP
+    (𠮟). The page counts every offset this way."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
 def build_cloze(text: str, start: int, end: int) -> tuple[str, str, str]:
-    """The sentence split around the tapped span, each part HTML-escaped for an Anki field."""
+    """The sentence split around the tapped span, each part HTML-escaped for an Anki field. The
+    span is the page's, in UTF-16 code units; one that cuts a character in half is refused."""
     if not isinstance(text, str) or not text:
         raise ValueError("empty sentence")
-    if not (isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= len(text)):
+    units = text.encode("utf-16-le", "surrogatepass")
+    if not (isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= len(units) // 2):
         raise ValueError("span outside the sentence")
-    return html.escape(text[:start], quote=False), html.escape(text[start:end], quote=False), html.escape(text[end:], quote=False)
+    try:
+        parts = [units[a * 2:b * 2].decode("utf-16-le") for a, b in ((0, start), (start, end), (end, len(units) // 2))]
+    except UnicodeDecodeError:
+        raise ValueError("span splits a character") from None
+    return tuple(html.escape(part, quote=False) for part in parts)
 
 
 def render_template(template: str, values: dict) -> str:
@@ -397,8 +409,9 @@ def compact_tokens(content) -> list[dict]:
 
 
 def match_length(entry: dict) -> int:
-    """How much of the looked-up text this entry matched (its longest source)."""
-    return max((len(src.get("originalText") or "") for head in entry.get("headwords") or []
+    """How much of the looked-up text this entry matched (its longest source), in UTF-16 code
+    units, as the page adds it to its own offsets."""
+    return max((utf16_length(str(src.get("originalText") or "")) for head in entry.get("headwords") or []
                 for src in head.get("sources") or []), default=0)
 
 

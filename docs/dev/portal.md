@@ -265,7 +265,9 @@ becomes the span, which the list lights and the card's cloze bolds.
 Every match is a choice. `compact_entries()` answers the entries that matched the most of the text
 first, in Yomitan's order, then the shorter ones (降っています: the readings of 降る, then 降って,
 then 降), one per headword and reading, up to `LOOKUP_ENTRIES` (12), each with its own `matched`
-length. The sheet opens on the first; with two or more, a row of tabs above the definition offers
+length. Every offset between page and server counts UTF-16 code units, JavaScript's own: `matched`
+(`utf16_length()`), the mine's span (`build_cloze()`, which refuses half a character), and the
+scan, which never ends inside one (`scanText()`), so a kanji beyond the BMP (𠮟) moves nothing. The sheet opens on the first; with two or more, a row of tabs above the definition offers
 the rest (`renderCandidates()`, `candidateTabs()`): a divider where the shorter matches start, the
 reading only where a term repeats, the picked tab scrolled into view. Picking one shows its
 definition, its in-deck state on the Mine button, and narrows or widens the lit span to its match

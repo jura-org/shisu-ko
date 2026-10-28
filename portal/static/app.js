@@ -2127,7 +2127,7 @@
     sheet.setAttribute("aria-hidden", "false");
     // A scan looks up the text from the tapped character on, like Yomitan's; the picked entry's
     // match then becomes the span (the longest, until another is picked).
-    const surface = scan ? cue.text.slice(span[0], span[0] + 12) : cue.text.slice(span[0], span[1]);
+    const surface = scan ? L.scanText(cue.text, span[0], 12) : cue.text.slice(span[0], span[1]);
     $("sheet-headword").textContent = cue.text.slice(span[0], span[1]);
     $("sheet-reading").replaceChildren();
     $("sheet-freq").textContent = "";

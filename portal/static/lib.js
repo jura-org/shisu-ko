@@ -888,11 +888,20 @@
 
   // ---- the dictionary sheet's choices
 
+  // What a scan looks up: up to `n` UTF-16 units of the line from `start`, never ending inside a
+  // character beyond the BMP (𠮟 is two units), whose lone half Yomitan cannot match.
+  function scanText(text, start, n) {
+    let end = Math.min(text.length, start + n);
+    if (end > start && end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1])) end--;
+    return text.slice(start, end);
+  }
+
   // The line's span an entry stands for. A lookup starts at the tapped span's start, and each
   // entry says how many characters of it matched. A scan (Japanese, from the tapped character on)
   // takes every entry's own length; a token looked up whole keeps the token for its longest
   // matches and narrows only for a shorter one.
   //   span: the tapped [start, end]; length: the line's length; longest: entries[0].matched.
+  // Offsets and `matched` are UTF-16 code units, JavaScript's own (the server counts them so too).
   function entrySpan({ span, matched, longest, scan, length }) {
     if (!(matched > 0) || (!scan && matched >= longest)) return [span[0], span[1]];
     return [span[0], Math.min(length, span[0] + matched)];
@@ -1044,7 +1053,7 @@
     SCHEDULES, backoffDelay, isTransient, withRetry, retryLeft,
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
-    ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs, nearestBox, entrySpan, candidateTabs, lookupResume, LOOKUP_LEAD_S,
+    ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs, nearestBox, entrySpan, scanText, candidateTabs, lookupResume, LOOKUP_LEAD_S,
     watchHistoryText, newWatchLog, watchAt, watchClose, watchDrain, watchNextMs, clientInfo, viewPoint, viewDelta, viewRect, shouldTurn,
     shieldTap, tapZone, TAP_MIDDLE, sideShare, stepTarget, framePlayhead, DOUBLE_TAP_MS,
     CAPTION_CHOICES, captionStyle, captionVars,

@@ -699,6 +699,20 @@ test("the badge covers exactly the side zone a tap lands in", () => {
   assert.equal(L.sideShare(L.TAP_MIDDLE.landscape), 0.4);
 });
 
+test("entrySpan and scanText count UTF-16 units, as the server's matched does", () => {
+  // 先生に𠮟られた: 𠮟 (U+20B9F) is two units, so 𠮟られ runs from 3 to 7; the server reports
+  // 𠮟られ's match as 4 units, and the span ends where it does.
+  const text = "先生に𠮟られた";
+  assert.equal(text.length, 8);
+  const span = L.entrySpan({ span: [3, 5], matched: 4, longest: 4, scan: true, length: text.length });
+  assert.equal(text.slice(span[0], span[1]), "𠮟られ");
+  // A scan never ends on half of 𠮟.
+  assert.equal(L.scanText(text, 0, 4), "先生に");
+  assert.equal(L.scanText(text, 0, 5), "先生に𠮟");
+  assert.equal(L.scanText(text, 3, 12), "𠮟られた");
+  assert.equal(L.scanText("天気", 0, 12), "天気");
+});
+
 test("stepTarget: mid-line back is the line before; back on the first line replays it", () => {
   // Five lines; the run began on line 2 (the playhead anywhere inside it).
   assert.deepEqual(L.stepTarget(5, 2, -1), { idx: 1, moved: 1 });
