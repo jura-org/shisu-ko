@@ -795,7 +795,13 @@ def test_resolve_without_cookies_or_with_both_failing_raises(tmp_path, monkeypat
     with pytest.raises(portal.UpstreamError, match="no HLS"):
         portal.HlsProxy().resolve(portal.HlsVideo("dQw4w9WgXcQ"))
     assert len(made) == 1  # no browser chosen: no second try
+    # Both tries failing in their own ways: the signed-in error, unless the anonymous try's clean
+    # "no HLS" came first, which sends the page to YouTube's player (422) rather than a 502.
     fake_resolver(monkeypatch, tmp_path, {False: NO_HLS_INFO, True: RuntimeError("members only")})
+    with pytest.raises(portal.UpstreamError, match="no HLS") as caught:
+        portal.HlsProxy().resolve(portal.HlsVideo("dQw4w9WgXcQ"))
+    assert caught.value.status == 422
+    fake_resolver(monkeypatch, tmp_path, {False: RuntimeError("bot check"), True: RuntimeError("members only")})
     with pytest.raises(RuntimeError, match="members only"):
         portal.HlsProxy().resolve(portal.HlsVideo("dQw4w9WgXcQ"))
 

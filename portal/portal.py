@@ -1414,7 +1414,10 @@ class HlsProxy:
                         capture_tracking(ydl, tracking)
                     info = ydl.extract_info(url, download=False)
             except Exception as exc:  # noqa: BLE001 - yt-dlp raises its own types; the cookies may still get through
-                problem = exc
+                # "No HLS anonymously" is the answer that sends the page to YouTube's player: a
+                # signed-in try that fails some other way must not replace it with a 502.
+                if not isinstance(problem, UpstreamError):
+                    problem = exc
                 continue
             if info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming", "post_live"):
                 raise UpstreamError("live stream: YouTube's player plays these", 422)
