@@ -2127,11 +2127,14 @@ class PortalState:
             items = [{"id": k, **v} for k, v in self.load()["positions"].items()]
         return sorted(items, key=lambda x: x.get("updated", 0), reverse=True)
 
-    def put(self, video_id: str, t: float, duration=None, title=None, updated=None, keep_order=False) -> dict:
-        """keep_order: an entry that exists keeps its `updated`, so the home list's order and which
-        entries the cap drops stay as they were (Mark as watched / unwatched is not a watch)."""
+    def put(self, video_id: str, t: float, duration=None, title=None, updated=None, keep_order=False) -> dict | None:
+        """keep_order: a mark (Mark as watched / unwatched), not a watch. The entry keeps its
+        `updated`, so the home list's order and which entries the cap drops stay as they were; an
+        entry that is gone (deleted on another device) stays gone: None, nothing written."""
         with self.lock:
             positions = self.load()["positions"]
+            if keep_order and video_id not in positions:
+                return None
             entry = dict(positions.get(video_id) or {})
             if keep_order and "updated" in entry:
                 updated = entry["updated"]
@@ -2544,6 +2547,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json(400, {"ok": False, "error": "keep_order: true or false"})
                 entry = self.services.positions.put(video_id, t, body.get("duration"), body.get("title"),
                                                     keep_order=keep_order)
+                if entry is None:  # a mark on a video deleted meanwhile: the page drops its row
+                    return self.json(404, {"ok": False, "error": "no such video"})
                 return self.json(200, {"ok": True, "position": entry})
             if path == "/api/position/delete":
                 video_id = body.get("video_id")

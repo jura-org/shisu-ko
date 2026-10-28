@@ -440,7 +440,10 @@ def test_keep_order_keeps_the_entry_s_place(tmp_path):
     assert (entry["t"], entry["updated"]) == (1033.0, 1000)
     assert [v["id"] for v in store.all()] == ["BBBBBBBBBBB", "AAAAAAAAAAA"]
     assert store.put("AAAAAAAAAAA", 0)["updated"] > 2000  # a plain save is a watch: to the top
-    assert store.put("CCCCCCCCCCC", 0, keep_order=True)["updated"] > 2000  # nothing to keep: now
+    # A mark on a video deleted meanwhile (on another device) does not bring it back.
+    store.delete("BBBBBBBBBBB")
+    assert store.put("BBBBBBBBBBB", 600, 600, keep_order=True) is None
+    assert store.get("BBBBBBBBBBB") is None and [v["id"] for v in store.all()] == ["AAAAAAAAAAA"]
 
 
 def test_api_position_keep_order_is_a_bool(tmp_path, monkeypatch):
@@ -466,6 +469,10 @@ def test_api_position_keep_order_is_a_bool(tmp_path, monkeypatch):
         status, answer = post({"video_id": "AAAAAAAAAAA", "t": 1033, "duration": 1033, "keep_order": True})
         assert status == 200 and answer["position"]["updated"] == 1000
         assert post({"video_id": "AAAAAAAAAAA", "t": 0})[1]["position"]["updated"] > 1000
+        # A mark on a video that is gone: 404, nothing created.
+        assert post({"video_id": "CCCCCCCCCCC", "t": 600, "duration": 600, "keep_order": True}) == (
+            404, {"ok": False, "error": "no such video"})
+        assert services.state.get("CCCCCCCCCCC") is None
     finally:
         httpd.shutdown()
         httpd.server_close()

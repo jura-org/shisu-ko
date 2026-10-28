@@ -477,8 +477,14 @@
     fillAction(swipe.rows.get(li).buttons[0], markAction(r), r.title || r.id);
     localStorage.setItem(RECENT_KEY, JSON.stringify(recentList().map((x) => (x.id === r.id ? { ...x, t } : x))));
     try {
-      // keep_order: a mark is not a watch, so the row keeps its place here and on the PC.
-      await api("/api/position", { video_id: r.id, t, duration: r.duration, keep_order: true });
+      // keep_order: a mark is not a watch, so the row keeps its place here and on the PC. A video
+      // deleted on another device is not brought back by a mark: its row goes here too.
+      const res = await api("/api/position", { video_id: r.id, t, duration: r.duration, keep_order: true });
+      if (res.status === 404 && li.isConnected) {
+        if (swipe.open === li) swipe.open = null;
+        collapse(li);
+        forget(r.id);
+      }
     } catch {
       // offline: the PC keeps the old position until the video is played again
     }
