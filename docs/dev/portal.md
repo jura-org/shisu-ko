@@ -268,9 +268,10 @@ the cloze follows the pick. A token looked up whole (other languages) keeps the 
 for its longest matches.
 
 No sheet draws a grabber: a bar that reads as a handle promised a drag the sheets do not need. The
-drag down (or right, for the landscape side panel) from content scrolled to the top still closes
+drag down (or right, for the landscape mode's side panels) from content scrolled to the top still closes
 one, unmarked (`makeDraggable()`). The visible ways out: a tap anywhere outside the word sheet,
-and the backdrop or the round close button in the title row of Settings and the Anki setup. The character is the glyph
+and the backdrop or the round close button in the title row of Settings and the Anki setup, a
+row above the sheet's scroller, so it never scrolls away. The character is the glyph
 whose box (`Range.getBoundingClientRect()`) holds the point, or the nearest (`nearestBox()`); a
 tap on furigana picks among its ruby base. Not `caretPositionFromPoint()`: a caret is the nearest
 boundary, so the right half of a glyph answered the next one. A span that starts or ends inside a
@@ -299,7 +300,10 @@ line is the subtitle list itself, so word taps, the sweep, furigana, word colour
 highlight and mining work as in the portrait view. It holds the line being said alone; a vertical
 drag on it still browses its neighbours, and a horizontal swipe on it steps a line. The dictionary
 is a side panel on the right (dragged right to close), and the line moves left out of its way. The
-toolbar is hidden. Settings is out of reach until the mode is left.
+toolbar is hidden; Settings opens from a corner button at the top right (`#btn-corner-settings`,
+shown with the controls), as a side panel too, so the caption box stays in sight beside it. A swipe
+or browse drag that starts anywhere on the strip the line lies in works, beside the box or in a gap
+when no box shows (`bindListGestures()` on the list and, through `onStrip()`, on the video).
 
 **Taps on the video** (`shieldTap()` and `tapZone()` in `lib.js`). These follow YouTube's app, in
 both layouts:
@@ -311,13 +315,31 @@ both layouts:
 | A side, twice within 300 ms | steps a line that way | steps a line that way |
 | Each further tap in time | one more line | one more line |
 
-A run counts from the line it began on, and a badge on that side reads "1 line »" or "« 3 lines".
+A run counts from the line being said when it began, read from the player's own playhead
+(`lineNow()`), and each tap lands at `stepTarget()`: back is the line before wherever the playhead
+sits in the line (the extension's rule), and the run clamps at the list's ends. The badge on that
+side reads the lines really moved, "1 line »" or "« 3 lines", and covers exactly the side zone
+(`TAP_MIDDLE`, `sideShare()`). A step with no line that way (back on the first, forward on the
+last) seeks nothing and shows no badge.
+
+**Why the step is checked.** On an iPhone (26, home-screen app) a double tap showed the badge
+while the line stayed put. WebKitGTK and Chromium seek correctly, so the iPhone's cause is not
+reproduced; two weaknesses explain the symptom, and both are closed. First, the playhead was the
+last `requestVideoFrameCallback` report plus the time since, trusted over `currentTime`. Safari can
+report frames from before a seek right after it; one such report put the clock, the line and the
+next step's base back on the old line. Injected into WebKit, that fault reproduces the symptom
+exactly: badge shown, line unchanged 1.5 s later, and the next run counted from the wrong line. A
+frame report now only refines `currentTime` (`framePlayhead()`: never while seeking, never more
+than 0.5 s away). Second, a seek the browser drops is now made again once, a second later, if the
+playhead is still more than a second from it (`checkSeek()`), and a playing video is no longer
+asked to `play()` again right after the seek.
 Play must run inside the tap, because iOS starts sound only within a gesture's own call stack. So a
 lone tap that plays does so at once; only a pause, which needs no gesture, waits for the window. A
 hidden state holds until the next tap, pause or end. While playing, the controls hide 3 s after the
 last tap, and a scrub keeps them up 3 s more. The shield is `touch-action: manipulation`, so a
 double tap never zooms. In the landscape mode only the subtitle's box takes taps (`#lyrics` is
-`pointer-events: none`, its cues `auto`), so a tap beside the box reaches the video.
+`pointer-events: none`, its cues `auto`), so a tap beside the box reaches the video; the video
+ignores the click that ends a swipe on the strip.
 
 **The subtitle's look** follows the iPhone's own captions (Settings > Accessibility > Subtitles &
 Captioning) and the broadcast guidelines:
@@ -331,7 +353,7 @@ Captioning) and the broadcast guidelines:
   view wide (the BBC's figure for 16:9 online), so a cue stays within two lines. Netflix allows
   Japanese 13 characters a line, which these cues outgrow.
 - The list is bottom-anchored (`focusY()` and `placeTrack()`): a second row and furigana grow
-  upward, and the box rests `max(14px, safe bottom)` above the bottom edge. While the controls show
+  upward, and the box rests `max(14px + lift, safe bottom)` above the bottom edge. While the controls show
   it glides up above them, `transform` only, 200 ms (none with reduced motion).
 - No darkening of the picture beyond the box. A soft shade sits under the controls row only while
   it shows, for the times over a bright frame.
@@ -339,6 +361,25 @@ Captioning) and the broadcast guidelines:
   redraw it every frame on the phone.
 - On the box, the sweep's unspoken text is `rgba(235, 235, 245, 0.6)` and the picked word's light
   is 0.28, twice the portrait view's. The sweep's glow is off, since it only greys the box.
+
+**Settings > Subtitle style** is a sub-page pushed sideways inside the Settings sheet, with a back
+chevron in its title row (`showSettingsPage()`), as iOS Settings does. It sets the landscape box
+only; the portrait list keeps its look.
+
+| Setting | Choices (default bold) | Applied as |
+|---|---|---|
+| Background | None, 30%, 45%, **60%**, 80% | `--cap-bg`, the box's black alpha; below 45% the text gets its own shadow (`--cap-shadow`) |
+| Text size | Small, **Medium**, Large | `--cap-scale`: 0.85, 1, 1.2 times each bound of the size clamp |
+| Position | Lower, **Default**, Higher | `--cap-lift`: -8, 0, +24 px on the resting height, never below the safe area |
+
+The defaults are today's look. They live with the other settings (`DEFAULTS`, localStorage);
+`captionStyle()` turns any stored value that is not a listed choice into the default, and
+`captionVars()` hands CSS bare numbers only, clamped, so nothing from storage reaches the
+stylesheet as text. Changes apply at once. In the landscape mode the sheet is a side panel and,
+while it is open, the line rests over the bare picture (no controls, no pause scrim), so the real
+box is the preview. In portrait the page shows a sample box over a stand-in picture. Where the
+safe area already holds the box above 14 px (an iPhone with a home indicator, held sideways with
+the page unturned), Lower changes nothing.
 
 **The corner buttons** keep 20 px from every physical screen edge and stay inside the safe area
 (`--edge-*`, from the turned or plain `--safe-*`). iOS keeps the edges for itself: the status bar,
@@ -362,8 +403,10 @@ the portal never uses it. Nor can a page lock the orientation on iOS (`lock()` r
 the mode is on and the viewport is taller than wide (`shouldTurn()`), the page turns itself
 (`html.turned`): `body` is sized to the screen the other way round (`100dvh` x `100dvw`) and
 rotated a quarter clockwise. The viewer turns the phone, with the rotation lock on or off; a phone
-that does rotate the page gets a landscape viewport, and the turn goes away (`resize` and
-`orientationchange` call `viewChanged()`). The turned body is the containing block of every fixed
+that does rotate the page gets a landscape viewport, and the turn goes away (the window's
+`resize`, `orientationchange` and the visual viewport's `resize` meet in one animation frame,
+which calls `viewChanged()` only when the window's size changed; a pinch or the keyboard re-lays
+nothing). The turned body is the containing block of every fixed
 bar, sheet and toast, so they turn with it; percentages in the mode's CSS are of the view, never
 `vw`/`vh`, and the safe-area insets are remapped (the notch is the turned view's left).
 
@@ -373,7 +416,7 @@ screen coordinates. Only code that reads coordinates as directions needs the vie
 `viewPoint()`, `viewDelta()` and `viewRect()` in `lib.js` (screen x is the view's y, measured from
 the view's bottom). They map the video's tap zones, the subtitle's swipe and browse drag, the
 scrubber's tap and drag, the sheets' drag to close, and `focusY()` / `capSheet()`'s room
-measurements.
+measurements, and the match tabs' sideways scroll (`revealTab()`).
 
 **Leaving.** The exit button, the browser's own fullscreen exit (`fullscreenchange`: Android's
 back gesture, Escape) and leaving the video by any way (`teardownWatch()`: the back button, the
