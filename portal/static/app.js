@@ -1859,6 +1859,7 @@
     // pauses; a double tap on a side steps a line, each further tap one more. A lone side tap
     // pauses in portrait, and shows or hides the controls in the landscape mode.
     $("shield").addEventListener("click", (ev) => {
+      if (Date.now() - state.gestureAt < 400) return; // the end of a swipe or drag on the strip, not a tap
       const landscape = state.landscape.on;
       const zone = L.tapZone(viewPoint(ev.clientX, ev.clientY).x, viewRect(ev.currentTarget), landscape ? L.TAP_MIDDLE.landscape : L.TAP_MIDDLE.portrait);
       const now = Date.now();
@@ -1919,55 +1920,8 @@
       }
     });
 
-    // A vertical drag browses the list; a horizontal swipe steps a line.
-    let touch = null;
-    lyrics.addEventListener("touchstart", (ev) => {
-      if (state.sheet.open || Date.now() - state.sheetClosedAt < L.GHOST_CLICK_MS) {
-        touch = null; // the sheet's own dismissal, not a swipe or a browse
-        return;
-      }
-      const p = ev.touches[0];
-      touch = { x: p.clientX, y: p.clientY, axis: null, offset: state.browse.offset };
-    }, { passive: true });
-    lyrics.addEventListener("touchmove", (ev) => {
-      if (!touch) return;
-      const p = ev.touches[0];
-      const { dx, dy } = viewDelta(p.clientX - touch.x, p.clientY - touch.y);
-      if (!touch.axis && Math.max(Math.abs(dx), Math.abs(dy)) > 8) touch.axis = Math.abs(dy) > Math.abs(dx) ? "y" : "x";
-      if (touch.axis === "y" && !state.sheet.open) {
-        if (!state.browse.active) {
-          enterBrowse();
-          touch.offset = 0;
-        }
-        lyrics.classList.add("dragging");
-        state.browse.offset = touch.offset + dy;
-        setTrack();
-        clearTimeout(state.browse.timer);
-      }
-      if (touch.axis) ev.preventDefault();
-    }, { passive: false });
-    lyrics.addEventListener("touchend", (ev) => {
-      if (!touch) return;
-      const p = ev.changedTouches[0];
-      const { dx } = viewDelta(p.clientX - touch.x, p.clientY - touch.y);
-      const { axis } = touch;
-      touch = null;
-      lyrics.classList.remove("dragging");
-      if (axis) state.gestureAt = Date.now();
-      if (axis === "y" && state.browse.active) browseIdle();
-      if (axis === "x" && Math.abs(dx) > 60 && !state.sheet.open) stepLine(dx < 0 ? 1 : -1);
-    }, { passive: true });
-    lyrics.addEventListener("wheel", (ev) => {
-      if (state.sheet.open) return;
-      ev.preventDefault();
-      enterBrowse();
-      lyrics.classList.add("dragging");
-      state.browse.offset -= ev.deltaY;
-      setTrack();
-      clearTimeout(state.wheelTimer);
-      state.wheelTimer = setTimeout(() => lyrics.classList.remove("dragging"), 120);
-      browseIdle();
-    }, { passive: false });
+    bindListGestures(lyrics, () => true);
+    bindListGestures($("shield"), onStrip);
 
     // iOS reports a browser bar coming or going on the visual viewport, not always as a window
     // resize. Both land in one frame's single check, and only a new window size re-lays the view:
@@ -1986,6 +1940,70 @@
     };
     for (const name of ["resize", "orientationchange"]) window.addEventListener(name, resized);
     if (window.visualViewport) window.visualViewport.addEventListener("resize", resized);
+  }
+
+  // A vertical drag browses the list; a horizontal swipe steps a line. On the subtitle list, and in
+  // the landscape mode on the video too wherever the strip lies: there only the caption box takes
+  // pointer events (a tap beside it must reach the video), so a gesture that starts beside the box,
+  // or in a gap between lines when no box shows, arrives at the shield instead.
+  function bindListGestures(el, accepts) {
+    const lyrics = $("lyrics");
+    let touch = null;
+    el.addEventListener("touchstart", (ev) => {
+      if (state.sheet.open || Date.now() - state.sheetClosedAt < L.GHOST_CLICK_MS || !accepts(ev.touches[0])) {
+        touch = null; // the sheet's own dismissal, or not on the strip: not a swipe or a browse
+        return;
+      }
+      const p = ev.touches[0];
+      touch = { x: p.clientX, y: p.clientY, axis: null, offset: state.browse.offset };
+    }, { passive: true });
+    el.addEventListener("touchmove", (ev) => {
+      if (!touch) return;
+      const p = ev.touches[0];
+      const { dx, dy } = viewDelta(p.clientX - touch.x, p.clientY - touch.y);
+      if (!touch.axis && Math.max(Math.abs(dx), Math.abs(dy)) > 8) touch.axis = Math.abs(dy) > Math.abs(dx) ? "y" : "x";
+      if (touch.axis === "y" && !state.sheet.open) {
+        if (!state.browse.active) {
+          enterBrowse();
+          touch.offset = 0;
+        }
+        lyrics.classList.add("dragging");
+        state.browse.offset = touch.offset + dy;
+        setTrack();
+        clearTimeout(state.browse.timer);
+      }
+      if (touch.axis) ev.preventDefault();
+    }, { passive: false });
+    el.addEventListener("touchend", (ev) => {
+      if (!touch) return;
+      const p = ev.changedTouches[0];
+      const { dx } = viewDelta(p.clientX - touch.x, p.clientY - touch.y);
+      const { axis } = touch;
+      touch = null;
+      lyrics.classList.remove("dragging");
+      if (axis) state.gestureAt = Date.now();
+      if (axis === "y" && state.browse.active) browseIdle();
+      if (axis === "x" && Math.abs(dx) > 60 && !state.sheet.open) stepLine(dx < 0 ? 1 : -1);
+    }, { passive: true });
+    el.addEventListener("wheel", (ev) => {
+      if (state.sheet.open || !accepts(ev)) return;
+      ev.preventDefault();
+      enterBrowse();
+      lyrics.classList.add("dragging");
+      state.browse.offset -= ev.deltaY;
+      setTrack();
+      clearTimeout(state.wheelTimer);
+      state.wheelTimer = setTimeout(() => lyrics.classList.remove("dragging"), 120);
+      browseIdle();
+    }, { passive: false });
+  }
+
+  // In the landscape mode, a point on the strip the subtitle lies in (#lyrics' box). A quarter
+  // turn maps a box to a box, so the screen rectangle answers for the turned view too.
+  function onStrip(p) {
+    if (!state.landscape.on) return false;
+    const r = $("lyrics").getBoundingClientRect();
+    return p.clientX >= r.left && p.clientX <= r.right && p.clientY >= r.top && p.clientY <= r.bottom;
   }
 
   // ------------------------------------------------------------ the word sheet
