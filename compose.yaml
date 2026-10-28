@@ -20,7 +20,7 @@ services:
       - ${DATA_DIR:-./data}:/data
     environment:
       - SHISUKO_HOME=/data
-    command: ["--model", "${WHISPER_MODEL:-large-v3}", "--lookahead", "${LOOKAHEAD:-900}", "--log-level", "INFO"]
+    command: ["--model", "${WHISPER_MODEL:-large-v3}", "--lookahead", "${LOOKAHEAD:-180}", "--log-level", "INFO"]
     deploy:
       resources:
         reservations:

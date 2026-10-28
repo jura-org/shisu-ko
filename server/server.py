@@ -9018,7 +9018,7 @@ def parse_args(argv=None):
                         "in --language, see DEFAULT_PROMPTS; pass an empty string for none)")
     p.add_argument("--window", type=float, default=30.0, help="seconds of audio transcribed per step (shorter reacts faster to seeking; 30 is faster-whisper's own chunk, and the initial prompt reaches only the first chunk of a window)")
     p.add_argument("--first-window", type=float, default=20.0, help="shorter first step after a seek so subtitles appear quickly")
-    p.add_argument("--lookahead", type=float, default=900.0, help="stop transcribing this many seconds ahead of the playhead (0 = whole video)")
+    p.add_argument("--lookahead", type=float, default=180.0, help="stop transcribing this many seconds ahead of the playhead (0 = whole video)")
     p.add_argument("--max-cue-chars", type=int, default=30, help="26 is the Netflix Japanese limit (13 x 2 lines); 30 keeps more mined sentences whole")
     p.add_argument("--max-cue-seconds", type=float, default=7.0)
     p.add_argument("--min-cue-seconds", type=float, default=0.8, help="cues shorter than this are extended or merged")

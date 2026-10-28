@@ -7,6 +7,10 @@ How `server/server.py` plans windows, decodes them and turns Whisper output into
 `plan_window()` in `server/server.py` decides what to transcribe next: if the playhead is not
 inside a covered range, a short `--first-window` (20 s) starts at the playhead; otherwise the next
 `--window` (30 s) continues from the end of the covered range, up to `--lookahead` seconds ahead.
+`--lookahead` is 180 s (it was 900): the buffer only absorbs variance in how fast it refills, and the
+GPU refills it at 4-13x realtime (large-v3 on an RTX 3090, a week of logs), so 180 s survives long GPU
+contention while an abandoned video costs at most 3 minutes of decode past where the viewer left, plus
+the one window that starts at the limit (`plan_window()` stops only once the covered end is past it).
 30 s is faster-whisper's own chunk, and that is why the window is no longer 40: with
 `condition_on_previous_text` false the library drops the initial prompt after the first chunk of a
 call (checked in 1.2.1), so a 40 s window decoded its last ten seconds unprompted.

@@ -205,6 +205,24 @@ def test_plan_window_stops_at_lookahead_limit():
     assert server.plan_window(s, make_args(lookahead=10.0)) is None
 
 
+def test_default_lookahead_stops_planning_three_minutes_ahead():
+    args = server.parse_args([])
+    assert args.lookahead == 180.0
+
+    def session(covered_end):
+        return server.Session(
+            video_id="abcdefabcdef", url="u", status="ready", audio=object(),
+            duration=1500.0, want_t=100.0, covered=[[0.0, covered_end]],
+        )
+
+    # Below the limit the planner keeps filling: the next window starts at the covered end.
+    assert server.plan_window(session(279.0), args) == (279.0, 309.0)
+    # At exactly the limit it plans one more window; past it, nothing.
+    assert server.plan_window(session(280.0), args) == (280.0, 310.0)
+    assert server.plan_window(session(280.5), args) is None
+    assert server.plan_window(session(310.0), args) is None
+
+
 def test_plan_window_ignores_lookahead_when_disabled():
     s = server.Session(
         video_id="abcdefabcdef", url="u", status="ready", audio=object(),

@@ -702,7 +702,7 @@ would leave Whisper on the CPU.
 **Scheduling.** When you open a video the server fetches the audio track with
 [yt-dlp](https://github.com/yt-dlp/yt-dlp), decodes a minute around the playhead while the
 download is still running, and transcribes a short 20-second window there so the first subtitles
-appear quickly. It then continues in 30-second windows up to 15 minutes ahead of you. A sentence
+appear quickly. It then continues in 30-second windows up to 3 minutes ahead of you. A sentence
 cut at a window edge is dropped and re-transcribed at the start of the next window, so lines are
 never chopped. Seeking to an untranscribed part starts a new short window there. Only the tab you
 are looking at is served: the extension elects one, and the others are answered without the server
@@ -795,7 +795,7 @@ sends the YouTube cookies of the browser chosen there (see [YouTube sign-in](#yo
 | `--cookies-from-browser firefox` | Send that browser's YouTube cookies for this start: when YouTube asks for a sign-in, and for age-restricted or members-only videos. `none` sends no browser's, whatever setup chose |
 | `--save-cookies-from-browser firefox` | Make that browser's YouTube cookies the default of every later start, the popup's **Start server** button included, after checking that they can be read; `none` forgets it. Exits instead of starting the server (see [YouTube sign-in](#youtube-sign-in)) |
 | `--cookies /path/cookies.txt` | Same as `--cookies-from-browser`, with an exported cookies file (use this inside Docker) |
-| `--lookahead 0` | Transcribe to the end of the video instead of stopping 15 minutes ahead |
+| `--lookahead 0` | Transcribe to the end of the video instead of stopping 3 minutes ahead (default 180 s) |
 | `--window 60` | Longer windows are slightly more efficient, shorter ones react faster to seeking (default 30, faster-whisper's own chunk: a longer window decodes its tail without the initial prompt) |
 | `--max-cue-chars 26` | Characters per cue before it is split (default 30; 26 is the Netflix Japanese limit) |
 | `--max-cue-seconds 7` / `--min-cue-seconds 0.8` | Longest and shortest cue (defaults 7, Netflix's own maximum, and 0.8); shorter ones are extended or merged |
