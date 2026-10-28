@@ -87,7 +87,6 @@
   </div>
 
   <section id="sheet" class="sheet word-sheet" role="dialog" aria-label="Dictionary" aria-hidden="true">
-    <div class="grabber" aria-hidden="true"></div>
     <div id="sheet-scroll" class="sheet-scroll">
       <div id="sheet-headword" class="headword"></div>
       <div class="reading-row">
@@ -107,9 +106,11 @@
 
   <div id="settings-backdrop" class="backdrop"></div>
   <section id="settings" class="sheet settings-sheet" role="dialog" aria-label="Settings" aria-hidden="true">
-    <div class="grabber" aria-hidden="true"></div>
     <div class="sheet-scroll">
-      <h2 class="sheet-title">Settings</h2>
+      <div class="sheet-head">
+        <h2 class="sheet-title">Settings</h2>
+        <button class="sheet-close" type="button" data-s-label="close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 7.5l9 9M16.5 7.5l-9 9"/></svg></button>
+      </div>
       <h3 class="group-label">Playback</h3>
       <div class="group">
         <label class="row-item">Auto-pause after each line<input id="set-autopause" type="checkbox" role="switch" class="switch"></label>
@@ -151,9 +152,11 @@
 
   <div id="anki-backdrop" class="backdrop"></div>
   <section id="anki-sheet" class="sheet settings-sheet" role="dialog" aria-labelledby="anki-title" aria-hidden="true">
-    <div class="grabber" aria-hidden="true"></div>
     <div class="sheet-scroll">
-      <h2 id="anki-title" class="sheet-title">Anki</h2>
+      <div class="sheet-head">
+        <h2 id="anki-title" class="sheet-title">Anki</h2>
+        <button class="sheet-close" type="button" data-s-label="close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 7.5l9 9M16.5 7.5l-9 9"/></svg></button>
+      </div>
       <p id="anki-message" class="group-note" role="status" hidden></p>
       <h3 class="group-label">Cards go to</h3>
       <div class="group">

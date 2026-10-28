@@ -2358,16 +2358,16 @@
     return copy.textContent.replace(/\s+/g, " ").trim().slice(0, 500);
   }
 
-  // Drag a sheet down to dismiss: from the grabber anywhere, from the content once it is scrolled
-  // to the top. The word sheet in the landscape mode is a side panel and is dragged right instead.
+  // Drag a sheet down to dismiss, from its content once that is scrolled to the top. No handle is
+  // drawn: the drag is a shortcut, and a tap outside or the close button is the visible way out.
+  // The word sheet in the landscape mode is a side panel and is dragged right instead.
   // The dismissal runs in touchend, so a resume inside it is still a gesture.
   function makeDraggable(sheet, scroller, onDismiss) {
     let drag = null;
     sheet.addEventListener("touchstart", (ev) => {
       if (!sheet.classList.contains("open") || ev.target.closest("button, input, summary")) return;
-      const fromGrabber = !!ev.target.closest(".grabber");
       const side = state.landscape.on && sheet.classList.contains("word-sheet");
-      drag = { x: ev.touches[0].clientX, y: ev.touches[0].clientY, dy: 0, active: false, fromGrabber, side };
+      drag = { x: ev.touches[0].clientX, y: ev.touches[0].clientY, dy: 0, active: false, side };
     }, { passive: true });
     sheet.addEventListener("touchmove", (ev) => {
       if (!drag) return;
@@ -2375,7 +2375,7 @@
       // Along the way out (down, or right for the side panel), and across it.
       const [dy, across] = drag.side ? [d.dx, d.dy] : [d.dy, d.dx];
       if (!drag.active) {
-        if (dy > 8 && (drag.side ? Math.abs(across) < dy : drag.fromGrabber || scroller.scrollTop <= 0)) {
+        if (dy > 8 && (drag.side ? Math.abs(across) < dy : scroller.scrollTop <= 0)) {
           drag.active = true;
           sheet.classList.add("dragging");
         } else if (Math.max(Math.abs(dy), drag.side ? Math.abs(across) : 0) > 8) {
@@ -2452,6 +2452,7 @@
     bindSwitch("set-sweep", "sweep");
     bindSwitch("set-colours", "wordColours");
     $("settings-backdrop").addEventListener("click", closeSettings);
+    $("settings").querySelector(".sheet-close").addEventListener("click", closeSettings);
     $("set-anki").addEventListener("click", openAnkiSetup);
     bindAnkiSetup();
     makeDraggable($("settings"), $("settings").querySelector(".sheet-scroll"), closeSettings);
@@ -2600,6 +2601,7 @@
     for (const el of document.querySelectorAll("[data-s]")) {
       if (typeof S[el.dataset.s] === "string") el.textContent = S[el.dataset.s];
     }
+    for (const el of document.querySelectorAll("[data-s-label]")) el.setAttribute("aria-label", S[el.dataset.sLabel]);
   }
 
   // What still stands between this setup and a first card, from /api/health.
@@ -2655,6 +2657,7 @@
     if (ankiBound) return;
     ankiBound = true;
     $("anki-backdrop").addEventListener("click", closeAnkiSetup);
+    $("anki-sheet").querySelector(".sheet-close").addEventListener("click", closeAnkiSetup);
     makeDraggable($("anki-sheet"), $("anki-sheet").querySelector(".sheet-scroll"), closeAnkiSetup);
     $("anki-model").addEventListener("change", () => renderFieldRows($("anki-model").value, null));
     $("anki-save").addEventListener("click", saveAnkiSetup);

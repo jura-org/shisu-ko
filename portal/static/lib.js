@@ -150,6 +150,7 @@
     markUnwatched: "Unwatched",
     edit: "Edit",
     done: "Done",
+    close: "Close",
     play: "Play",
     pause: "Pause",
     lookingUp: "Looking up…",

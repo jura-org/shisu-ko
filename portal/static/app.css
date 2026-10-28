@@ -367,11 +367,11 @@ rt { font-size: 0.45em; color: var(--label-2); font-weight: 400; }
   border-radius: 14px 14px 0 0;
   transform: translateY(calc(100% + 24px));
   transition: transform 0.35s var(--spring);
+  padding-top: 20px;
   pointer-events: none;
 }
 .sheet.open { transform: translateY(0); pointer-events: auto; }
 .sheet.dragging { transition: none; }
-.grabber { flex: none; width: 36px; height: 5px; border-radius: 3px; background: var(--label-3); margin: 8px auto 8px; }
 .sheet-scroll { flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 calc(20px + var(--safe-right)) 8px calc(20px + var(--safe-left)); }
 
 .headword { font-size: 34px; font-weight: 600; line-height: 1.25; letter-spacing: 0.02em; }
@@ -448,6 +448,13 @@ rt { font-size: 0.45em; color: var(--label-2); font-weight: 400; }
 .settings-sheet { max-height: 88vh; background: #000; }
 .settings-sheet .sheet-scroll { padding-bottom: calc(24px + var(--safe-bottom)); }
 .sheet-title { font-size: 17px; font-weight: 600; text-align: center; margin: 0 0 8px; }
+/* The title row of a tall sheet: the title centred, its close button at the right edge. */
+.sheet-head { position: relative; }
+.sheet-head .sheet-title { padding: 0 44px; line-height: 30px; }
+.sheet-close { position: absolute; top: -7px; right: -7px; width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; color: var(--label-2); }
+.sheet-close::before { content: ""; position: absolute; width: 30px; height: 30px; border-radius: 50%; background: var(--fill); }
+.sheet-close svg { position: relative; width: 16px; height: 16px; stroke-width: 2.4; }
+.sheet-close:active { opacity: 0.45; }
 .group-label { font-size: 13px; font-weight: 400; text-transform: uppercase; color: var(--label-2); margin: 24px 16px 8px; letter-spacing: 0.02em; }
 .group { background: var(--grouped); border-radius: 10px; overflow: hidden; }
 .group-note { font-size: 13px; color: var(--label-2); margin: 8px 16px 0; }
@@ -820,7 +827,6 @@ html.landscape .word-sheet {
   transform: translateX(calc(100% + 24px));
 }
 html.landscape .word-sheet.open { transform: translateX(0); }
-html.landscape .word-sheet .grabber { display: none; }
 html.landscape .word-sheet .sheet-scroll { flex: 1 1 auto; padding: 0 calc(20px + var(--safe-right)) 8px 20px; }
 html.landscape .word-sheet .sheet-foot { padding: 8px calc(16px + var(--safe-right)) calc(8px + var(--safe-bottom)) 16px; }
 html.landscape .settings-sheet { max-height: 88%; }
