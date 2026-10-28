@@ -276,14 +276,61 @@ stream shows "LIVE" instead. The list centres its line in the space above it.
 The button in the player's bottom-right corner (`#btn-full`, the back button's twin, shown when it
 shows: paused, ended, or for 3 s after a tap on the video) switches the watch view to a landscape
 layout (`enterLandscape()` / `exitLandscape()` in `app.js`, `html.landscape` in `app.css`): the
-video fills the view, the line being said is a strip along its bottom, and the scrubber and the
-exit button (the same corner button, a collapse icon) sit just above the strip while the controls
-show. The strip is the subtitle list itself, so word taps, the sweep, furigana, word colours, the
-picked-word highlight and mining work as in the portrait view. It holds the line being said alone;
-a vertical drag still browses its neighbours. The dictionary is a side panel on the right
-(dragged right to close), and the line moves left out of its way. The toolbar is hidden: a tap on
-the video plays and pauses, a double tap on its left or right third steps a line, and so does a
-horizontal swipe on the strip. Settings is out of reach until the mode is left.
+video fills the view and the line being said sits low on it in a box of its own. While the controls
+show, they form one row along the bottom: elapsed time, a thin bar, the time left, then the exit
+button (the same corner button, a collapse icon). The line rises above that row while it shows. The
+line is the subtitle list itself, so word taps, the sweep, furigana, word colours, the picked-word
+highlight and mining work as in the portrait view. It holds the line being said alone; a vertical
+drag on it still browses its neighbours, and a horizontal swipe on it steps a line. The dictionary
+is a side panel on the right (dragged right to close), and the line moves left out of its way. The
+toolbar is hidden. Settings is out of reach until the mode is left.
+
+**Taps on the video** (`shieldTap()` and `tapZone()` in `lib.js`). These follow YouTube's app, in
+both layouts:
+
+| Where | Portrait | Landscape |
+|---|---|---|
+| Middle (a third in portrait, a fifth in landscape) | plays or pauses at once | plays or pauses at once |
+| A side, once | paused: plays at once; playing: pauses 300 ms later, if no second tap came | shows or hides the controls 300 ms later; never pauses |
+| A side, twice within 300 ms | steps a line that way | steps a line that way |
+| Each further tap in time | one more line | one more line |
+
+A run counts from the line it began on, and a badge on that side reads "1 line »" or "« 3 lines".
+Play must run inside the tap, because iOS starts sound only within a gesture's own call stack. So a
+lone tap that plays does so at once; only a pause, which needs no gesture, waits for the window. A
+hidden state holds until the next tap, pause or end. While playing, the controls hide 3 s after the
+last tap, and a scrub keeps them up 3 s more. The shield is `touch-action: manipulation`, so a
+double tap never zooms. In the landscape mode only the subtitle's box takes taps (`#lyrics` is
+`pointer-events: none`, its cues `auto`), so a tap beside the box reaches the video.
+
+**The subtitle's look** follows the iPhone's own captions (Settings > Accessibility > Subtitles &
+Captioning) and the broadcast guidelines:
+
+- White text on `rgba(0, 0, 0, 0.6)` with rounded corners (0.3em), one box per cue that hugs the
+  text. Over a white frame that is 5.7:1, above WCAG AA's 4.5:1. WebKit's `::cue` default is 80%
+  black (`text-tracks.css`). One box per cue rather than one per line: an inline box per line
+  overlaps its neighbour in darker stripes and leaves furigana outside.
+- The size follows the view's height: `clamp(18px, 6.2cqh, 40px)`, with `.watch` as the size
+  container. That is the BBC's line height of 7-9% of a 16:9 picture. A line is at most 68% of the
+  view wide (the BBC's figure for 16:9 online), so a cue stays within two lines. Netflix allows
+  Japanese 13 characters a line, which these cues outgrow.
+- The list is bottom-anchored (`focusY()` and `placeTrack()`): a second row and furigana grow
+  upward, and the box rests `max(14px, safe bottom)` above the bottom edge. While the controls show
+  it glides up above them, `transform` only, 200 ms (none with reduced motion).
+- No darkening of the picture beyond the box. A soft shade sits under the controls row only while
+  it shows, for the times over a bright frame.
+- No `backdrop-filter`: the iPhone's captions are flat, and blurring the video under the box would
+  redraw it every frame on the phone.
+- On the box, the sweep's unspoken text is `rgba(235, 235, 245, 0.6)` and the picked word's light
+  is 0.28, twice the portrait view's. The sweep's glow is off, since it only greys the box.
+
+**The corner buttons** keep 20 px from every physical screen edge and stay inside the safe area
+(`--edge-*`, from the turned or plain `--safe-*`). iOS keeps the edges for itself: the status bar,
+Control Center's corner, Notification Center's top edge and the home indicator. At 4 px from the
+edge, as in 0.26.0, an iPhone's home-screen app took neither button. Real coordinate taps in WebKit
+and Chromium, and `elementFromPoint()`, found no page element over them, so the cause lies outside
+the page. Both buttons are 44 x 44 px targets, placed absolutely in the player box, not as fixed
+elements.
 
 How it gets the whole screen depends on what the browser allows, found by feature detection:
 
@@ -308,7 +355,7 @@ bar, sheet and toast, so they turn with it; percentages in the mode's CSS are of
 word drawn under the finger, and `tappedIndex()` compares glyph boxes and the tap in the same
 screen coordinates. Only code that reads coordinates as directions needs the view's frame:
 `viewPoint()`, `viewDelta()` and `viewRect()` in `lib.js` (screen x is the view's y, measured from
-the view's bottom). They map the video's tap thirds, the strip's swipe and browse drag, the
+the view's bottom). They map the video's tap zones, the subtitle's swipe and browse drag, the
 scrubber's tap and drag, the sheets' drag to close, and `focusY()` / `capSheet()`'s room
 measurements.
 
