@@ -1189,6 +1189,7 @@
     if (!state.landscape.on) return;
     state.landscape.on = false;
     state.landscape.fullscreen = false;
+    state.controlsHidden = false; // a side tap's hide belongs to the mode: portrait's back button shows again
     document.documentElement.classList.add("switching");
     document.documentElement.classList.remove("landscape", "turned");
     if (screen.orientation && screen.orientation.unlock) {
@@ -1227,6 +1228,7 @@
     b.setAttribute("aria-label", state.landscape.on ? S.exitFullscreen : S.fullscreen);
     exitBrowse(); // a browse offset is in the old layout's pixels
     viewChanged();
+    renderBack();
   }
 
   // After the mode or the viewport changed: turned or not, the list re-centred without motion (the
