@@ -235,6 +235,60 @@ def test_a_failed_look_up_leaves_no_tracking_and_is_logged_once(home, fake_ytdlp
     assert len([r for r in caplog.records if "signed-in look-up failed" in r.getMessage()]) == 1
 
 
+def test_a_failed_look_up_is_tried_again_on_reports_with_backoff_and_its_stretches_go(home, fake_ytdlp, caplog):
+    with_cookies(home)
+    now = [0.0]
+    services = portal.Services(SimpleNamespace(mode="local", config=home / "portal.json", watch_history="on"))
+    services.watch.background = False
+    services.hls.clock = lambda: now[0]
+    FakeYoutubeDL.signed_in_error = RuntimeError("bot check")
+
+    def look_ups():
+        return sum("cookiesfrombrowser" in y.options for y in FakeYoutubeDL.made)
+
+    def watched(at, ranges):
+        now[0] = at
+        held = services.watched(report(ranges))
+        wait_for(lambda: not video.tracking_busy)
+        return held
+
+    with caplog.at_level("WARNING", logger="portal"):
+        video = services.hls.get(VIDEO)  # resolves anonymously; the look-up fails on its thread
+        wait_for(lambda: not video.tracking_busy)
+        assert video.tracking is None and video.tracking_retry_at == 30.0 and look_ups() == 1
+        # Within the backoff: no look-up, and the stretches are held rather than lost.
+        assert watched(10.0, [[0, 12]]) is True and look_ups() == 1
+        assert watched(31.0, [[12, 20]]) is True and look_ups() == 2  # due: tried again, failed again
+        assert video.tracking_retry_at == 31.0 + 120.0
+        assert watched(100.0, [[20, 25]]) is True and look_ups() == 2
+        assert services.watch.due(time.monotonic()) == []  # nothing goes without the URLs
+        FakeYoutubeDL.signed_in_error = None  # YouTube answers now
+        assert watched(151.0, [[25, 30]]) is True and look_ups() == 3
+    assert video.tracking == CAPTURED and video.tracking_retry_at is None
+    playback, watchtime = services.watch.due(time.monotonic())
+    assert query(playback[1])["cmt"] == "0.000"
+    assert (query(watchtime[1])["st"], query(watchtime[1])["et"]) == ("0.000", "30.000")
+    assert len([r for r in caplog.records if "signed-in look-up failed" in r.getMessage()]) == 1
+    # Found: no more look-ups.
+    watched(2000.0, [[30, 40]])
+    assert look_ups() == 3
+
+
+def test_the_backoff_grows_to_ten_minutes(home, fake_ytdlp):
+    with_cookies(home)
+    now = [0.0]
+    hls = portal.HlsProxy(capture_tracking=True, clock=lambda: now[0])
+    video = portal.HlsVideo(VIDEO)
+    FakeYoutubeDL.signed_in_error = RuntimeError("bot check")
+    waits = []
+    for _ in range(5):
+        video.tracking_busy = True
+        hls.fetch_tracking(video)
+        waits.append(video.tracking_retry_at - now[0])
+        now[0] = video.tracking_retry_at
+    assert waits == [30.0, 120.0, 600.0, 600.0, 600.0] and not video.tracking_busy
+
+
 def test_reports_wait_for_the_tracking_urls_and_go_when_they_come():
     reporter = portal.WatchReporter("on", send=None, clock=lambda: 0.0)
     reporter.background = False

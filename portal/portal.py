@@ -1074,7 +1074,8 @@ class Services:
 
     def watched(self, report: dict) -> bool:
         """A checked /api/watched report: held for YouTube when the video streamed through the
-        portal with its tracking URLs (or while they are looked up), else dropped.
+        portal with its tracking URLs (or while they are looked up, or a failed look-up waits for
+        its retry), else dropped.
 
         hls.lock is held to the end: fetch_tracking() hands its URLs over under it, so a report
         sees either the look-up still running (its session then waits for set_tracking()) or the
@@ -1088,7 +1089,7 @@ class Services:
                 itag = itag_of(video.upstream.get(key, "")) if key else None
                 if itag:
                     report[param] = itag
-            return self.watch.report(report, video.tracking, waiting=video.tracking_busy)
+            return self.watch.report(report, video.tracking, waiting=self.hls.tracking_pending(video))
 
     def card_info(self) -> dict:
         return {"ok": True, "card": self.card(), "saved": self.state.card(),
@@ -1186,6 +1187,7 @@ HLS_TOKEN_TTL = 8 * 3600  # googlevideo URLs live about 6 h; a 403 before that r
 HLS_IDLE_DROP = 2 * 3600
 HLS_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,40}$")
 HLS_KEY_RE = re.compile(r"^[av][0-9]{1,4}$")
+TRACKING_RETRY = (30.0, 120.0, 600.0)  # seconds before the next signed-in look-up after a failed one; the last repeats
 SEGMENT_CACHE_BYTES = 64 * 1024 * 1024
 ATTR_RE = re.compile(r'([A-Z0-9-]+)=("[^"]*"|[^,]*)')
 
@@ -1379,13 +1381,16 @@ class HlsVideo:
         self.tracking = None  # YouTube's own watch-tracking URLs, kept only with --watch-history on
         self.tracking_busy = False  # the signed-in extraction that finds them is running
         self.played: dict[str, str] = {}  # "v" / "a": the playlist key the player last took a segment from
-        self.tracking_failed = False
+        self.tracking_failed = False  # logged once per video
+        self.tracking_fails = 0  # look-ups failed in a row
+        self.tracking_retry_at = None  # the clock time a failed look-up may run again; None: no retry waits
 
 
 class HlsProxy:
-    def __init__(self, capture_tracking: bool = False, on_tracking=None):
+    def __init__(self, capture_tracking: bool = False, on_tracking=None, clock=time.monotonic):
         self.capture_tracking = capture_tracking
         self.on_tracking = on_tracking  # called with (video id, tracking URLs) once they are found
+        self.clock = clock  # the retry's backoff
         self.lock = threading.Lock()
         self.videos: dict[str, HlsVideo] = {}
         self.by_token: dict[str, HlsVideo] = {}
@@ -1454,11 +1459,25 @@ class HlsProxy:
         if not cookies_browser():
             return
         with self.lock:
-            if video.tracking or video.tracking_busy:
-                return
-            video.tracking_busy = True
+            self.claim_tracking(video)
+
+    def claim_tracking(self, video: HlsVideo) -> None:
+        """Start the look-up unless the URLs are known or one runs. Call with self.lock held."""
+        if video.tracking or video.tracking_busy:
+            return
+        video.tracking_busy = True
         threading.Thread(target=self.fetch_tracking, args=(video,), daemon=True,
                          name=f"tracking-{video.video_id}").start()
+
+    def tracking_pending(self, video: HlsVideo) -> bool:
+        """True while the tracking URLs may still come: a look-up runs, or a failed one waits for
+        its retry. A retry whose backoff has passed starts here, so only a video someone reports
+        on is looked up again. Call with self.lock held."""
+        if not self.capture_tracking or video.tracking:
+            return False
+        if not video.tracking_busy and video.tracking_retry_at is not None and self.clock() >= video.tracking_retry_at:
+            self.claim_tracking(video)
+        return video.tracking_busy or video.tracking_retry_at is not None
 
     def fetch_tracking(self, video: HlsVideo) -> None:
         # The signed-in response's URLs tie the pings to the account, as yt-dlp's own mark_watched
@@ -1475,12 +1494,18 @@ class HlsProxy:
             # between sees the URLs; it never sees neither the URLs nor the look-up.
             with self.lock:
                 video.tracking = tracking
+                video.tracking_retry_at = None
                 if self.on_tracking:
                     self.on_tracking(video.video_id, tracking)
-        except Exception as exc:  # noqa: BLE001 - the history misses this video; playback goes on
+        except Exception as exc:  # noqa: BLE001 - the video waits for a retry; playback goes on
+            # Set before `finally` ends the look-up: a report never sees no look-up and no retry.
+            with self.lock:
+                video.tracking_fails += 1
+                video.tracking_retry_at = self.clock() + TRACKING_RETRY[min(video.tracking_fails, len(TRACKING_RETRY)) - 1]
             if not video.tracking_failed:
                 video.tracking_failed = True
-                log.warning("[%s] watch history: the signed-in look-up failed (%s)", video.video_id, exc)
+                log.warning("[%s] watch history: the signed-in look-up failed (%s); trying again while it plays",
+                            video.video_id, exc)
         finally:
             with self.lock:
                 video.tracking_busy = False

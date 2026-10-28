@@ -175,8 +175,10 @@ Server says it in one line (`watchHistoryText()`).
   the URLs go the web player's flush schedule (`flush_cadence()`):
   `videostatsScheduledFlushWalltimeSeconds` (a WEB response says 10, 20, 30) and
   `videostatsDefaultFlushIntervalSeconds` (40). A schedule of 1-10 rising steps at least 2 s apart
-  and within 600 s is kept; anything else, or a response without one, gets those WEB values. Playback never waits for it; a failure is logged once and leaves the video
-  without tracking URLs.
+  and within 600 s is kept; anything else, or a response without one, gets those WEB values. Playback never waits for it. A failed look-up is logged once per video
+  and tried again on a later report, once its backoff has passed (`TRACKING_RETRY`: 30 s, 2 min,
+  then every 10 min; `tracking_pending()`, called from `Services.watched()`), so only a video that
+  is being watched is looked up again.
 - **What the page sends.** Our own `<video>` keeps the stretches it played (`newWatchLog()`,
   `watchAt()`, `watchClose()`, `watchDrain()` in `lib.js`): a seek, pause, rate change, the end or
   a jump of over 3 s closes one. `POST /api/watched` carries `{video_id, ranges: [[st, et], ...],
@@ -216,8 +218,9 @@ Server says it in one line (`watchHistoryText()`).
   header `X-Goog-AuthUser: 0`, the account the cookies sign in first, as Grayjay sends it (a brand
   account's `X-Goog-PageId` is left out: the response does not say it); a failure is
   logged once per video and never touches playback. Stretches reported while the signed-in look-up
-  runs wait in the session and go with the first ping after it (`set_tracking()`). A video with
-  no tracking URLs (resolved before the switch, a failed look-up) reports nothing.
+  runs, or while a failed one waits for its retry, wait in the session and go with the first ping
+  after the URLs arrive (`set_tracking()`). A video with no tracking URLs and no look-up to come
+  (resolved before the switch, a signed-in resolve whose answer carried none) reports nothing.
 - **What YouTube makes of it.** Every ping answers 204 and puts the video in the history. On the
   owner's account a 23-minute video's history bar showed the position of a watch-time ping (34%,
   `cmt` 481 of 1397) before `www` and `final=1` were sent; it did not follow the later pings.
