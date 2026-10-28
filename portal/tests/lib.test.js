@@ -688,6 +688,17 @@ test("tapZone: thirds in portrait, the middle fifth in landscape", () => {
   assert.equal(L.tapZone(285, box, 0.2), "right");
 });
 
+test("the badge covers exactly the side zone a tap lands in", () => {
+  const box = { left: 0, width: 1000 };
+  for (const middle of [L.TAP_MIDDLE.portrait, L.TAP_MIDDLE.landscape]) {
+    const side = L.sideShare(middle) * box.width;
+    assert.equal(L.tapZone(side - 1, box, middle), "left");
+    assert.equal(L.tapZone(side + 1, box, middle), "middle");
+    assert.equal(L.tapZone(box.width - side + 1, box, middle), "right");
+  }
+  assert.equal(L.sideShare(L.TAP_MIDDLE.landscape), 0.4);
+});
+
 test("stepTarget: mid-line back is the line before; the ends move nothing", () => {
   // Five lines; the run began on line 2 (the playhead anywhere inside it).
   assert.deepEqual(L.stepTarget(5, 2, -1), { idx: 1, moved: 1 });

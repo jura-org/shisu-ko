@@ -181,14 +181,15 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 .shield.paused { background: rgba(0, 0, 0, 0.8); }
 .shield.ended { background: linear-gradient(rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0.45)), var(--poster, none) center / cover, #000; }
 .shield.passthrough { pointer-events: none; }
-/* The double tap's badge: a soft light over the tapped side third, the line count in its middle,
-   fading out as YouTube's "10 seconds" does. It never takes a tap. */
+/* The double tap's badge: a soft light over the tapped side zone, the line count in its middle,
+   fading out as YouTube's "10 seconds" does. It never takes a tap. Its width is the zone's own
+   (app.js showStepBadge(), from lib.js tapZone()'s geometry); this is the portrait third. */
 .step-badge {
   position: absolute;
   z-index: 2;
   top: 0;
   bottom: 0;
-  width: 34%;
+  width: 33.333%;
   display: flex;
   align-items: center;
   justify-content: center;

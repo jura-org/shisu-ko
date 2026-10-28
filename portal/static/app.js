@@ -1807,8 +1807,10 @@
   }
 
   // The double tap's badge on the tapped side: how many lines the run has stepped.
-  function showStepBadge(zone, steps) {
+  function showStepBadge(zone, steps, landscape) {
     const badge = $("step-badge");
+    // Exactly the side zone the taps landed in (L.tapZone()).
+    badge.style.width = `${L.sideShare(landscape ? L.TAP_MIDDLE.landscape : L.TAP_MIDDLE.portrait) * 100}%`;
     badge.textContent = zone === "left" ? S.linesBack(steps) : S.linesForward(steps);
     badge.dataset.side = zone;
     badge.classList.remove("show");
@@ -1857,7 +1859,7 @@
     // pauses in portrait, and shows or hides the controls in the landscape mode.
     $("shield").addEventListener("click", (ev) => {
       const landscape = state.landscape.on;
-      const zone = L.tapZone(viewPoint(ev.clientX, ev.clientY).x, viewRect(ev.currentTarget), landscape ? 0.2 : 1 / 3);
+      const zone = L.tapZone(viewPoint(ev.clientX, ev.clientY).x, viewRect(ev.currentTarget), landscape ? L.TAP_MIDDLE.landscape : L.TAP_MIDDLE.portrait);
       const now = Date.now();
       const tap = L.shieldTap(state.lastShieldTap, { at: now, zone, playing: state.playing }, { landscape });
       state.lastShieldTap = tap.next;
@@ -1871,7 +1873,7 @@
         if (!moved) return; // no line that way: nothing seeks, no badge claims a step
         if (idx !== state.stepIdx) seek(state.cues[idx].start, true); // past the end, taps repeat nothing
         state.stepIdx = idx;
-        showStepBadge(zone, moved);
+        showStepBadge(zone, moved, landscape);
         return;
       }
       if (tap.action === "controls-later") {

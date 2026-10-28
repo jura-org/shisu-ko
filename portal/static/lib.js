@@ -942,9 +942,16 @@
     return { action, next: { at: tap.at, zone: tap.zone, steps: 0 } };
   }
 
+  // The middle zone's share of the video's width: a third in portrait, a fifth in landscape. Each
+  // side zone is what is left of it, halved; the double tap's badge covers exactly that.
+  const TAP_MIDDLE = { portrait: 1 / 3, landscape: 0.2 };
+  function sideShare(middle) {
+    return (1 - middle) / 2;
+  }
+
   // Where a tap fell across a box, both in the view's frame: "middle" within the central
-  // `middle` share of its width (a third in portrait, a fifth in landscape), else its side.
-  function tapZone(x, box, middle = 1 / 3) {
+  // `middle` share of its width, else its side.
+  function tapZone(x, box, middle = TAP_MIDDLE.portrait) {
     const f = (x - box.left) / box.width;
     return Math.abs(f - 0.5) <= middle / 2 ? "middle" : f < 0.5 ? "left" : "right";
   }
@@ -984,7 +991,7 @@
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
     ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs, nearestBox, entrySpan, candidateTabs, lookupResume, LOOKUP_LEAD_S,
     watchHistoryText, newWatchLog, watchAt, watchClose, watchDrain, watchNextMs, clientInfo, viewPoint, viewDelta, viewRect, shouldTurn,
-    shieldTap, tapZone, stepTarget, framePlayhead, DOUBLE_TAP_MS,
+    shieldTap, tapZone, TAP_MIDDLE, sideShare, stepTarget, framePlayhead, DOUBLE_TAP_MS,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.PortalLib = api;
