@@ -1467,13 +1467,13 @@ class HlsProxy:
                 ydl.extract_info(f"https://www.youtube.com/watch?v={video.video_id}", download=False, process=False)
             if not tracking:
                 raise UpstreamError("no tracking URLs in YouTube's answer")
-            # One step under the lock Services.watched() reads under: the URLs, the waiting
-            # session's flush and the end of the look-up land together.
+            # One step under the lock Services.watched() reads under: the URLs and the waiting
+            # session's flush land together, before `finally` ends the look-up. A report in
+            # between sees the URLs; it never sees neither the URLs nor the look-up.
             with self.lock:
                 video.tracking = tracking
                 if self.on_tracking:
                     self.on_tracking(video.video_id, tracking)
-                video.tracking_busy = False
         except Exception as exc:  # noqa: BLE001 - the history misses this video; playback goes on
             if not video.tracking_failed:
                 video.tracking_failed = True
