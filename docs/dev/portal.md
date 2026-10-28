@@ -254,7 +254,23 @@ character.
 A tap on a Japanese word looks up the text from the character under the finger on (12 characters),
 as Yomitan's own scan does, so a token the parser started early (a particle or an expression glued
 on: 雨が降っています is one token) costs nothing: a tap on 降 looks up 降る. The longest match
-becomes the span, which the list lights and the card's cloze bolds. The character is the glyph
+becomes the span, which the list lights and the card's cloze bolds.
+
+Every match is a choice. `compact_entries()` answers the entries that matched the most of the text
+first, in Yomitan's order, then the shorter ones (降っています: the readings of 降る, then 降って,
+then 降), one per headword and reading, up to `LOOKUP_ENTRIES` (12), each with its own `matched`
+length. The sheet opens on the first; with two or more, a row of tabs above the definition offers
+the rest (`renderCandidates()`, `candidateTabs()`): a divider where the shorter matches start, the
+reading only where a term repeats, the picked tab scrolled into view. Picking one shows its
+definition, its in-deck state on the Mine button, and narrows or widens the lit span to its match
+(`entrySpan()`: the span starts where the tap did), and a mine takes that entry and that span, so
+the cloze follows the pick. A token looked up whole (other languages) keeps the token as the span
+for its longest matches.
+
+No sheet draws a grabber: a bar that reads as a handle promised a drag the sheets do not need. The
+drag down (or right, for the landscape side panel) from content scrolled to the top still closes
+one, unmarked (`makeDraggable()`). The visible ways out: a tap anywhere outside the word sheet,
+and the backdrop or the round close button in the title row of Settings and the Anki setup. The character is the glyph
 whose box (`Range.getBoundingClientRect()`) holds the point, or the nearest (`nearestBox()`); a
 tap on furigana picks among its ruby base. Not `caretPositionFromPoint()`: a caret is the nearest
 boundary, so the right half of a glyph answered the next one. A span that starts or ends inside a
