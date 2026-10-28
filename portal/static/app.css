@@ -384,11 +384,27 @@ rt { font-size: 0.45em; color: var(--label-2); font-weight: 400; }
 .speaker svg { width: 20px; height: 20px; }
 .freq { font-size: 15px; color: var(--label-2); font-variant-numeric: tabular-nums; }
 
-.tabs { display: flex; gap: 24px; overflow-x: auto; scrollbar-width: none; margin: 0 0 8px; }
+/* One row of every match, scrolled sideways. Each tab's padding is its tap target; the row's
+   negative margin lines the first tab's text up with the headword, and its edges fade where a
+   scrolled tab is cut (the padding's width, so an unscrolled row shows every glyph whole). */
+.tabs {
+  display: flex;
+  overflow-x: auto;
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+  margin: 0 -12px 8px;
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 12px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 12px), transparent);
+}
 .tabs::-webkit-scrollbar { display: none; }
-.tab { flex: none; min-height: 44px; font-size: 17px; color: var(--label-2); border-bottom: 2px solid transparent; }
+.tab { position: relative; flex: none; min-width: 44px; min-height: 44px; padding: 0 12px; font-size: 17px; color: var(--label-2); white-space: nowrap; }
+.tab::after { content: ""; position: absolute; left: 12px; right: 12px; bottom: 0; height: 2px; border-radius: 1px; }
 .tab .tab-reading { font-size: 13px; color: var(--label-2); margin-left: 4px; }
-.tab.on { color: var(--label); border-bottom-color: var(--label); }
+.tab.on { color: var(--label); }
+.tab.on::after { background: var(--label); }
+/* Past this line, the matches that took less of the line than the default one. */
+.tab.shorter { margin-left: 8px; }
+.tab.shorter::before { content: ""; position: absolute; left: 0; top: 12px; bottom: 12px; width: 1px; background: var(--separator); }
 
 .defs { padding-bottom: 8px; }
 .gloss { font-size: 17px; line-height: 1.5; overflow-wrap: anywhere; }

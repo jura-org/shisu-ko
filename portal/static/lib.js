@@ -870,6 +870,32 @@
     return best;
   }
 
+  // ---- the dictionary sheet's choices
+
+  // The line's span an entry stands for. A lookup starts at the tapped span's start, and each
+  // entry says how many characters of it matched. A scan (Japanese, from the tapped character on)
+  // takes every entry's own length; a token looked up whole keeps the token for its longest
+  // matches and narrows only for a shorter one.
+  //   span: the tapped [start, end]; length: the line's length; longest: entries[0].matched.
+  function entrySpan({ span, matched, longest, scan, length }) {
+    if (!(matched > 0) || (!scan && matched >= longest)) return [span[0], span[1]];
+    return [span[0], Math.min(length, span[0] + matched)];
+  }
+
+  // The sheet's tabs: [{term, reading, shorter}]. The reading shows only where the term alone
+  // would be ambiguous (the same term twice); `shorter` marks the first of the entries that
+  // matched less of the line than the default one, where the row draws a divider.
+  function candidateTabs(entries) {
+    const count = new Map();
+    for (const e of entries) count.set(e.term, (count.get(e.term) || 0) + 1);
+    const first = entries.findIndex((e) => e.matched < entries[0].matched);
+    return entries.map((e, i) => ({
+      term: e.term,
+      reading: count.get(e.term) > 1 && e.reading && e.reading !== e.term ? e.reading : null,
+      shorter: i === first,
+    }));
+  }
+
   // The landscape mode on a phone held upright turns the page a quarter clockwise (app.css
   // html.turned): the view's top lies along the screen's right edge, and `turn.height` is the view's
   // own height, which is the screen's width. Pointer events and getBoundingClientRect() speak in
@@ -935,7 +961,7 @@
     SCHEDULES, backoffDelay, isTransient, withRetry, retryLeft,
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,
-    ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs, nearestBox, lookupResume, LOOKUP_LEAD_S,
+    ankiSyncText, applyDeck, deckEntries, statusAt, markedSegs, nearestBox, entrySpan, candidateTabs, lookupResume, LOOKUP_LEAD_S,
     watchHistoryText, newWatchLog, watchAt, watchClose, watchDrain, watchNextMs, clientInfo, viewPoint, viewDelta, viewRect, shouldTurn,
     shieldTap, tapZone, DOUBLE_TAP_MS,
   };

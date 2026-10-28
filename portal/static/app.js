@@ -2031,6 +2031,8 @@
     }
     s.open = true;
     s.cue = cue;
+    s.tapped = span; // each entry's span starts here (entrySpan())
+    s.scan = scan;
     s.span = span;
     s.entries = [];
     s.pick = 0;
@@ -2044,8 +2046,8 @@
     sheet.style.transform = "";
     sheet.classList.add("open");
     sheet.setAttribute("aria-hidden", "false");
-    // A scan looks up the text from the tapped character on, like Yomitan's; the longest match
-    // then becomes the span.
+    // A scan looks up the text from the tapped character on, like Yomitan's; the picked entry's
+    // match then becomes the span (the longest, until another is picked).
     const surface = scan ? cue.text.slice(span[0], span[0] + 12) : cue.text.slice(span[0], span[1]);
     $("sheet-headword").textContent = cue.text.slice(span[0], span[1]);
     $("sheet-reading").replaceChildren();
@@ -2067,10 +2069,6 @@
     if (!s.entries.length) {
       setSheetMessage(S.noEntry);
       return;
-    }
-    if (scan && s.entries[0].matched > 0) {
-      s.span = [span[0], Math.min(cue.text.length, span[0] + s.entries[0].matched)];
-      markPicked(cue, s.span);
     }
     renderCandidates();
     showEntry(0);
@@ -2106,26 +2104,36 @@
     if (res.status === 200 && res.data && res.data.ok) state.inDeck.set(term, !!res.data.in_deck);
   }
 
+  // Every match is a choice: the longest first (the default), then the shorter ones past a divider.
   function renderCandidates() {
     const box = $("sheet-candidates");
     box.replaceChildren();
     const entries = state.sheet.entries;
     if (entries.length < 2) return;
-    const repeated = new Set(entries.map((e) => e.term).filter((t, i, all) => all.indexOf(t) !== i));
-    entries.forEach((entry, i) => {
+    L.candidateTabs(entries).forEach((tab, i) => {
       const b = document.createElement("button");
-      b.className = "tab";
+      b.className = tab.shorter ? "tab shorter" : "tab";
       b.setAttribute("role", "tab");
-      b.append(entry.term);
-      if (repeated.has(entry.term) && entry.reading && entry.reading !== entry.term) {
+      b.setAttribute("aria-controls", "sheet-body");
+      b.append(tab.term);
+      if (tab.reading) {
         const r = document.createElement("span");
         r.className = "tab-reading";
-        r.textContent = entry.reading;
+        r.textContent = tab.reading;
         b.append(r);
       }
       b.addEventListener("click", () => showEntry(i));
       box.append(b);
     });
+  }
+
+  // The row scrolls sideways only: scrollIntoView() would scroll the sheet too.
+  function revealTab(tab) {
+    const box = tab.parentElement;
+    const r = tab.getBoundingClientRect();
+    const b = box.getBoundingClientRect();
+    if (r.left < b.left) box.scrollLeft -= b.left - r.left;
+    else if (r.right > b.right) box.scrollLeft += r.right - b.right;
   }
 
   function showEntry(i) {
@@ -2136,7 +2144,12 @@
     [...$("sheet-candidates").children].forEach((b, j) => {
       b.classList.toggle("on", j === i);
       b.setAttribute("aria-selected", String(j === i));
+      if (j === i) revealTab(b);
     });
+    // The line lights what this entry matched, and a mine clozes that.
+    s.span = L.entrySpan({ span: s.tapped, matched: entry.matched, longest: s.entries[0].matched,
+                           scan: s.scan, length: s.cue.text.length });
+    markPicked(s.cue, s.span);
     $("sheet-headword").textContent = entry.term;
 
     // One reading line; the pitch accent is drawn on it as an overline with a drop mark.

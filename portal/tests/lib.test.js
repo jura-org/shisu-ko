@@ -692,3 +692,36 @@ test("the double tap's badge counts lines", () => {
   assert.equal(L.STRINGS.linesBack(1), "« 1 line");
   assert.equal(L.STRINGS.linesForward(3), "3 lines »");
 });
+
+test("entrySpan: a scan takes each entry's own length, a whole token narrows only for a shorter match", () => {
+  const span = [2, 4]; // 降っ, tapped at 降 in 雨が降っています。
+  const length = 9;
+  // Scan: the default entry 降る matched 6 characters, 降 one.
+  assert.deepEqual(L.entrySpan({ span, matched: 6, longest: 6, scan: true, length }), [2, 8]);
+  assert.deepEqual(L.entrySpan({ span, matched: 1, longest: 6, scan: true, length }), [2, 3]);
+  assert.deepEqual(L.entrySpan({ span, matched: 30, longest: 30, scan: true, length }), [2, 9]); // never past the line
+  // No match length (an old portal, or no sources): the tapped span.
+  assert.deepEqual(L.entrySpan({ span, matched: 0, longest: 0, scan: true, length }), [2, 4]);
+  assert.deepEqual(L.entrySpan({ span, matched: undefined, longest: 6, scan: true, length }), [2, 4]);
+  // A token looked up whole keeps the token for its longest matches, as before.
+  assert.deepEqual(L.entrySpan({ span: [0, 5], matched: 3, longest: 3, scan: false, length: 5 }), [0, 5]);
+  assert.deepEqual(L.entrySpan({ span: [0, 5], matched: 2, longest: 3, scan: false, length: 5 }), [0, 2]);
+  // A fresh array, never the tapped one: the mine job copies it and the next pick replaces it.
+  assert.notEqual(L.entrySpan({ span, matched: 0, longest: 0, scan: true, length }), span);
+});
+
+test("candidateTabs shows a reading only for a repeated term and marks where the shorter matches start", () => {
+  const e = (term, reading, matched) => ({ term, reading, matched });
+  const tabs = L.candidateTabs([
+    e("降る", "ふる", 6), e("降る", "くだる", 6), e("降つ", "くたつ", 6),
+    e("降って", "くだって", 3), e("降", "こう", 1), e("降", "ふり", 1),
+  ]);
+  assert.deepEqual(tabs.map((t) => [t.term, t.reading, t.shorter]), [
+    ["降る", "ふる", false], ["降る", "くだる", false], ["降つ", null, false],
+    ["降って", null, true], ["降", "こう", false], ["降", "ふり", false],
+  ]);
+  // One length only: no divider. A kana term whose reading is itself shows no reading.
+  assert.deepEqual(L.candidateTabs([e("する", "する", 2), e("する", "する", 2)]).map((t) => [t.reading, t.shorter]),
+    [[null, false], [null, false]]);
+  assert.deepEqual(L.candidateTabs([]), []);
+});
