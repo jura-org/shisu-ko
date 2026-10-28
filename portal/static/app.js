@@ -784,7 +784,8 @@
 
   // A touch or key in the beat keeps the viewer here, and that is all it does: the tap on the
   // video that stops the way home must not also restart the ended video from 0 and save that over
-  // the end. play() swallows it; the viewer's next tap plays. Decided anew by every touch and key.
+  // the end. togglePlay() swallows it; the viewer's next tap plays. An explicit seek-and-play (a
+  // line, a double tap, back or forward) is no such tap: it plays. Decided anew by every touch and key.
   function holdEnd() {
     state.endHeld = state.endTimer !== null || state.endWaiting;
     cancelEndHome();
@@ -1096,10 +1097,7 @@
   // come between the tap and this call.
   function play() {
     if (!state.playerReady) return;
-    if (state.endHeld) {
-      state.endHeld = false; // this tap only kept the viewer here (holdEnd())
-      return;
-    }
+    state.endHeld = false;
     state.player.playVideo();
     setTimeout(() => {
       const ytState = state.player.getPlayerState();
@@ -1839,6 +1837,8 @@
   function togglePlay() {
     if (state.playing) {
       pause("user");
+    } else if (state.endHeld) {
+      state.endHeld = false; // this tap only kept the viewer here (holdEnd())
     } else {
       state.autoPausedFor = state.cues[state.activeIdx] ? state.cues[state.activeIdx].id : null;
       play();
