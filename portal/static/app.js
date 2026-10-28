@@ -2661,7 +2661,9 @@
     for (const el of document.querySelectorAll("[data-s]")) {
       if (typeof S[el.dataset.s] === "string") el.textContent = S[el.dataset.s];
     }
-    for (const el of document.querySelectorAll("[data-s-label]")) el.setAttribute("aria-label", S[el.dataset.sLabel]);
+    for (const el of document.querySelectorAll("[data-s-label]")) {
+      if (typeof S[el.dataset.sLabel] === "string") el.setAttribute("aria-label", S[el.dataset.sLabel]);
+    }
   }
 
   // What still stands between this setup and a first card, from /api/health.

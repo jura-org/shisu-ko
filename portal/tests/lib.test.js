@@ -763,3 +763,10 @@ test("candidateTabs shows a reading only for a repeated term and marks where the
     [[null, false], [null, false]]);
   assert.deepEqual(L.candidateTabs([]), []);
 });
+
+test("every string the page names (data-s, data-s-label) is a string in STRINGS", () => {
+  const html = require("node:fs").readFileSync(require("node:path").join(__dirname, "../static/index.html"), "utf8");
+  const names = [...html.matchAll(/data-s(?:-label)?="([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(names.length > 0);
+  for (const name of names) assert.equal(typeof L.STRINGS[name], "string", name);
+});
