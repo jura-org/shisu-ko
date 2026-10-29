@@ -19,6 +19,8 @@
   const BROWSE_IDLE_MS = 3000;
   const TOKENIZE_BATCH = 10;
   const FROM_HOME = "portal.fromHome"; // sessionStorage: this video was opened from the home page
+  const HOME_TAB = "portal.homeTab"; // sessionStorage: the home tab shown, kept across a video and back
+  const RECENT_LOCAL = 30; // rows of each home tab kept locally, the offline fallback
   const LINE_HOLD_S = 2.5; // a line stays up this long after it ends, then the space is empty
   const GLIDE_MS = 400; // the list's transition (app.css .lyrics-track)
   const TOAST_MS = 2000;
@@ -243,6 +245,7 @@
     }
     $("edit-btn").textContent = S.edit;
     $("edit-btn").addEventListener("click", () => setEditing(!$("home").classList.contains("editing")));
+    bindTabs();
     bindSwipe();
     bindAnkiSetup();
     renderRecent(recentList()); // the local copy at once; the server's list replaces it
@@ -287,7 +290,7 @@
       const data = await res.json();
       if (!data.ok) return;
       // Kept locally as the offline fallback.
-      localStorage.setItem(RECENT_KEY, JSON.stringify(data.videos.slice(0, 30).map((v) => ({ id: v.id, title: v.title || "", t: v.t, duration: v.duration, at: v.updated }))));
+      storeRecent(data.videos.map((v) => ({ id: v.id, title: v.title || "", t: v.t, duration: v.duration, at: v.updated, watched: v.watched })));
       renderRecent(data.videos);
     } catch {
       // offline: the local list stays
@@ -299,16 +302,29 @@
     return Array.isArray(list) ? list.filter((r) => r && L.VIDEO_ID_RE.test(r.id)) : [];
   }
 
+  // The local copy as the computer will have it: a finished position is watched now, any other
+  // keeps what it had (a rewatch stays in Watched).
   function remember() {
+    const old = recentList().find((r) => r.id === state.videoId);
     const list = recentList().filter((r) => r.id !== state.videoId);
-    list.unshift({ id: state.videoId, title: state.title || "", t: Math.floor(state.t), duration: playerDuration(), at: Date.now() });
-    localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, 30)));
+    const t = Math.floor(state.t);
+    const duration = playerDuration();
+    const watched = L.finished(t, duration) ? Date.now() : old && old.watched;
+    list.unshift({ id: state.videoId, title: state.title || "", t, duration, at: Date.now(), watched });
+    storeRecent(list);
+  }
+
+  // Each tab keeps its newest rows, so an offline Watched is not crowded out by Up next.
+  function storeRecent(list) {
+    const { queue, watched } = L.splitVideos(list);
+    localStorage.setItem(RECENT_KEY, JSON.stringify([...queue.slice(0, RECENT_LOCAL), ...watched.slice(0, RECENT_LOCAL)]));
   }
 
   // Thumbnails come through the portal (cached on the PC); i.ytimg.com is the fallback chain.
   function thumbImage(id) {
     const img = document.createElement("img");
     img.alt = "";
+    img.loading = "lazy"; // the watch history runs long
     const chain = [`/api/thumb/${id}`, `https://i.ytimg.com/vi/${id}/mqdefault.jpg`, `https://i.ytimg.com/vi/${id}/hqdefault.jpg`, `https://i.ytimg.com/vi/${id}/default.jpg`];
     let at = 0;
     img.addEventListener("error", () => { if (++at < chain.length) img.src = chain[at]; });
@@ -316,15 +332,49 @@
     return img;
   }
 
+  // The home list: every position, the shown tab's share of it drawn (splitVideos()). A mark or a
+  // delete edits these rows in place, so the other tab draws them as they now are.
+  const home = { videos: [], tab: sessionStorage.getItem(HOME_TAB) === "watched" ? "watched" : "queue" };
+
   // Each row: the actions behind it (actionsFor()), and in front the row itself, which a swipe to
   // the left slides off them. Edit mode's red minus opens the same actions.
   function renderRecent(list) {
+    home.videos = list;
     const ul = $("recent");
     swipe.open = null;
     swipe.drag = null;
     ul.replaceChildren();
-    for (const r of list) ul.append(recentRow(r));
+    for (const r of L.splitVideos(list)[home.tab]) ul.append(recentRow(r));
+    $("recent-empty").textContent = home.tab === "watched" ? S.emptyWatched : S.emptyRecent;
     listChanged();
+  }
+
+  // Up next and Watched: a tab list, its arrow keys moving between the tabs.
+  function bindTabs() {
+    const tabs = [...$("home-tabs").querySelectorAll("[role=tab]")];
+    const show = (tab) => {
+      for (const b of tabs) {
+        const on = b.dataset.tab === tab;
+        b.setAttribute("aria-selected", String(on));
+        b.tabIndex = on ? 0 : -1;
+        if (on) $("home-panel").setAttribute("aria-labelledby", b.id);
+      }
+      if (tab === home.tab) return;
+      home.tab = tab;
+      sessionStorage.setItem(HOME_TAB, tab);
+      closeRow();
+      renderRecent(home.videos);
+    };
+    for (const b of tabs) b.addEventListener("click", () => show(b.dataset.tab));
+    $("home-tabs").addEventListener("keydown", (ev) => {
+      const at = tabs.indexOf(document.activeElement);
+      if (at < 0 || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(ev.key)) return;
+      ev.preventDefault();
+      const next = ev.key === "Home" ? 0 : ev.key === "End" ? tabs.length - 1 : (at + (ev.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+      tabs[next].focus();
+      show(tabs[next].dataset.tab);
+    });
+    show(home.tab);
   }
 
   function recentRow(r) {
@@ -414,7 +464,7 @@
   }
 
   function markAction(r) {
-    return L.watchedToggle(r) === 0
+    return r.watched || L.watchedToggle(r) === 0
       ? { className: "mark", icon: "eyeOff", label: S.markUnwatched, aria: S.markUnwatchedVideo, run: markWatched }
       : { className: "mark", icon: "eyeCheck", label: S.markWatched, aria: S.markWatchedVideo, run: markWatched };
   }
@@ -451,6 +501,7 @@
   }
 
   function forget(id) {
+    home.videos = home.videos.filter((x) => x.id !== id);
     localStorage.setItem(RECENT_KEY, JSON.stringify(recentList().filter((x) => x.id !== id)));
   }
 
@@ -466,23 +517,33 @@
   }
 
   // Mark as watched sets the position to the end, here and on the PC, so the bar reads full and the
-  // next open starts at 0 (resumeTime() starts a finished() video over); on a finished video it marks it
-  // unwatched: 0, the bar gone. The button then offers the other.
+  // next open starts at 0 (resumeTime() starts a finished() video over); Mark as unwatched sets 0, or
+  // where a rewatch stands (watchedToggle()). The row then belongs to the other tab and leaves this
+  // one; the computer decides `watched` by the same finished() rule, guessed here meanwhile.
   async function markWatched(li, r) {
     const t = L.watchedToggle(r);
     if (t === null) return;
-    closeRow();
     r.t = t;
-    drawBar(li, r);
-    fillAction(swipe.rows.get(li).buttons[0], markAction(r), r.title || r.id);
-    localStorage.setItem(RECENT_KEY, JSON.stringify(recentList().map((x) => (x.id === r.id ? { ...x, t } : x))));
+    if (L.finished(t, Number(r.duration))) r.watched = Date.now();
+    else delete r.watched;
+    if (Boolean(r.watched) !== (home.tab === "watched")) {
+      if (swipe.open === li) swipe.open = null;
+      collapse(li);
+    } else {
+      closeRow();
+      drawBar(li, r);
+      fillAction(swipe.rows.get(li).buttons[0], markAction(r), r.title || r.id);
+    }
+    localStorage.setItem(RECENT_KEY, JSON.stringify(recentList().map((x) => (x.id === r.id ? { ...x, t, watched: r.watched } : x))));
     try {
       // keep_order: a mark is not a watch, so the row keeps its place here and on the PC. A video
       // deleted on another device is not brought back by a mark: its row goes here too.
       const res = await api("/api/position", { video_id: r.id, t, duration: r.duration, keep_order: true });
-      if (res.status === 404 && li.isConnected) {
-        if (swipe.open === li) swipe.open = null;
-        collapse(li);
+      if (res.status === 404) {
+        if (li.isConnected) {
+          if (swipe.open === li) swipe.open = null;
+          collapse(li);
+        }
         forget(r.id);
       }
     } catch {

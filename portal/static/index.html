@@ -31,8 +31,20 @@
       <h2 id="setup-title" data-s="setupTitle">Before you start</h2>
       <ul id="setup-list"></ul>
     </section>
-    <ul id="recent" class="recent" aria-label="Recent videos"></ul>
-    <p id="recent-empty" class="muted empty" data-s="emptyRecent" hidden>Videos you watch show up here, with how far you got.</p>
+    <div id="home-panel" role="tabpanel" aria-labelledby="tab-queue">
+      <ul id="recent" class="recent" aria-label="Recent videos"></ul>
+      <p id="recent-empty" class="muted empty" hidden>Videos you watch show up here, with how far you got.</p>
+    </div>
+    <nav id="home-tabs" class="tab-bar" role="tablist" aria-label="Videos" data-s-label="homeTabs">
+      <button id="tab-queue" class="tab" type="button" role="tab" aria-selected="true" aria-controls="home-panel" data-tab="queue">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5h16M4 11.5h16M4 16.5h8M15.5 14v6l5-3z"/></svg>
+        <span data-s="upNext">Up next</span>
+      </button>
+      <button id="tab-watched" class="tab" type="button" role="tab" aria-selected="false" aria-controls="home-panel" data-tab="watched" tabindex="-1">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.6 13.5A7.5 7.5 0 1 0 6.7 6.7M3.5 4.5v3.7h3.7M12 8v4.3l2.8 2.2"/></svg>
+        <span data-s="watched">Watched</span>
+      </button>
+    </nav>
   </main>
 
   <div id="watch" class="watch" hidden>

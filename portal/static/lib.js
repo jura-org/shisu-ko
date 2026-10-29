@@ -184,6 +184,10 @@
     noAudio: (w) => `No audio for ${w}`,
     retry: "Retry",
     emptyRecent: "Videos you watch show up here, with how far you got.",
+    emptyWatched: "Videos you finish move here.",
+    upNext: "Up next",
+    watched: "Watched",
+    homeTabs: "Videos",
     setupTitle: "Before you start",
     setupAnki: "Choose the deck and note type for your cards",
     setupAnkiButton: "Set up Anki",
@@ -539,11 +543,25 @@
   }
 
   // Mark as watched / unwatched: the position it sets. A finished video goes back to 0, any other
-  // to its end, so the bar reads full; null without a duration (no end to set).
+  // to its end, so the bar reads full; null without a duration (no end to set). A watched one being
+  // watched again keeps its spot: any unfinished position is unwatched on the computer.
   function watchedToggle(entry) {
     const d = Number(entry && entry.duration) || 0;
+    const t = Number(entry && entry.t) || 0;
+    if (entry && entry.watched) return finished(t, d) ? 0 : t;
     if (!(d > 0)) return null;
-    return finished(Number(entry.t) || 0, d) ? 0 : d;
+    return finished(t, d) ? 0 : d;
+  }
+
+  // The home screen's two tabs, from one list of positions: Up next (not watched, the latest
+  // played first) and Watched (the latest finished first). The local copy names `updated` `at`.
+  function splitVideos(videos) {
+    const played = (v) => Number(v.updated ?? v.at) || 0;
+    const list = Array.isArray(videos) ? videos.filter((v) => v && typeof v === "object") : [];
+    return {
+      queue: list.filter((v) => !v.watched).sort((a, b) => played(b) - played(a)),
+      watched: list.filter((v) => v.watched).sort((a, b) => (Number(b.watched) || 0) - (Number(a.watched) || 0)),
+    };
   }
 
   // ---- swiping a home row (iOS Mail's swipe to the left)
@@ -1063,7 +1081,7 @@
     parseVideoInput, parseStart, activeCueIndex, formatTime, coveredUntil, statusText, tokenOffsets,
     morae, pitchPattern, splitFurigana, hasKanji, VIDEO_ID_RE, watchStatus, freqLabel,
     STRINGS, resumeTime, saveAllowed, firstPlaySeek, RESUME_SLACK_S, repeatsSave, SAVE_REPEAT_MS, dismissAction, GHOST_CLICK_MS, watchedFraction, finished, FINISHED_S, atEnd, END_SLOP_S,
-    watchedToggle, SWIPE, swipeAxis, swipeSettle, swipeShift, swipeVelocity, actionOffsets, formatClock, spokenTime,
+    watchedToggle, splitVideos, SWIPE, swipeAxis, swipeSettle, swipeShift, swipeVelocity, actionOffsets, formatClock, spokenTime,
     SCHEDULES, backoffDelay, isTransient, withRetry, retryLeft,
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,
     moraCount, unitWeight, estimateUnitTimes, unitTimesFromWords, cueUnits, unitTimes, spokenCount,

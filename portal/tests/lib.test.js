@@ -269,6 +269,11 @@ test("finished: the last tenth, at least 2 s and at most 30 s", () => {
   assert.equal(L.finished(Infinity, Infinity), false); // a live stream never finishes
 });
 
+test("finished: the cases portal.py's finished() is held to as well", () => {
+  const { cases } = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "finished-cases.json"), "utf8"));
+  for (const [t, duration, expected] of cases) assert.equal(L.finished(t, duration), expected, `${t}/${duration}`);
+});
+
 test("finished is one rule: the bar's full state, the toggle and the resume agree", () => {
   for (const duration of [15, 45, 120, 600, 3600]) {
     for (let t = 10; t <= duration; t += 0.5) {
@@ -653,6 +658,25 @@ test("actionOffsets: the buttons share the uncovered width; full gives Delete al
   assert.deepEqual(L.actionOffsets(250, 2, true), [250, 250]);
   assert.deepEqual(L.actionOffsets(100, 1, false), [100]);
   assert.deepEqual(L.actionOffsets(-20, 2, false), [0, 0]); // the rubber band shows nothing
+});
+
+test("watchedToggle: a watched video is unwatched where it stands, a finished one at 0", () => {
+  assert.equal(L.watchedToggle({ t: 600, duration: 600, watched: 5 }), 0);
+  assert.equal(L.watchedToggle({ t: 120, duration: 600, watched: 5 }), 120); // a rewatch keeps its spot
+  assert.equal(L.watchedToggle({ t: 0, duration: 600, watched: 5 }), 0);
+});
+
+test("splitVideos: Up next by the latest play, Watched by the latest finish", () => {
+  const { queue, watched } = L.splitVideos([
+    { id: "a", updated: 3 },
+    { id: "b", updated: 5, watched: 6 },
+    { id: "c", at: 4 }, // the local copy's name for updated
+    { id: "d", updated: 9, watched: 2 },
+    null,
+  ]);
+  assert.deepEqual(queue.map((v) => v.id), ["c", "a"]);
+  assert.deepEqual(watched.map((v) => v.id), ["b", "d"]);
+  assert.deepEqual(L.splitVideos(undefined), { queue: [], watched: [] });
 });
 
 test("watchedToggle: an unfinished video goes to its end, a finished one back to 0", () => {
