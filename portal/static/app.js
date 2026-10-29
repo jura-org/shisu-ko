@@ -902,7 +902,13 @@
     if ("disableRemotePlayback" in video) video.disableRemotePlayback = true;
     video.preload = "auto";
     video.poster = `/api/thumb/${state.videoId}`;
+    // iOS's native HLS never completes a seek made before the first play: `seeking` stays true and
+    // currentTime stays pinned at the target while playback runs from elsewhere, and the page,
+    // reading that pinned time, freezes. So the page never seeks before the first "playing": a
+    // wanted time waits in pendingSeek (which getCurrentTime() answers meanwhile) and the first
+    // "playing" applies it. The resume itself rides on the playlist's EXT-X-START.
     let pendingSeek = state.startAt > 0 ? state.startAt : null;
+    let played = false;
     let lastState = -1;
     // The time of the frame on screen, from requestVideoFrameCallback where there is one.
     let shown = null;
@@ -929,23 +935,20 @@
       lastState = s;
       onPlayerState(s);
     };
-    video.addEventListener("loadedmetadata", () => {
-      if (pendingSeek !== null) video.currentTime = pendingSeek;
-      pendingSeek = null;
-    });
-    // iOS's native HLS may drop a seek made before the first play (and the playlist's EXT-X-START
-    // may be ignored too): once playing, put the video where the resume meant it to be, once.
-    let firstPlaying = true;
+    // The first "playing" makes the one seek wanted before it: the viewer's latest, else the
+    // resume's, and only when EXT-X-START did not already put the video there.
     video.addEventListener("playing", () => {
-      if (firstPlaying) {
-        firstPlaying = false;
-        const target = state.resumeLanded ? null : state.resumeTarget;
-        if (target !== null && Math.abs(video.currentTime - target) > 1.5) {
-          console.log(`resume: at ${video.currentTime.toFixed(1)} s instead of ${target.toFixed(1)} s, seeking`);
+      if (!played) {
+        played = true;
+        const t = L.firstPlaySeek({ current: video.currentTime, pending: pendingSeek, target: state.resumeTarget, landed: state.resumeLanded });
+        pendingSeek = null;
+        if (t !== null) {
+          console.log(`first play: at ${video.currentTime.toFixed(1)} s instead of ${t.toFixed(1)} s, seeking`);
           shown = null;
-          video.currentTime = target;
+          video.currentTime = t;
+          checkSeek(t, false);
         } else {
-          state.resumeLanded = true;
+          state.resumeLanded = true; // EXT-X-START landed it, or nothing was wanted
         }
       }
       // A start or a resume (not the end of a stall): the schedule goes on from the server's last
@@ -988,11 +991,11 @@
       pauseVideo() { video.pause(); },
       seekTo(t) {
         shown = null;
-        if (video.readyState >= 1) {
+        if (played) {
           video.currentTime = t;
           checkSeek(t, false);
         } else {
-          pendingSeek = t;
+          pendingSeek = t; // made on the first "playing"
         }
       },
       getCurrentTime() {

@@ -364,6 +364,34 @@ test("the position saver waits for a resume to land", () => {
   assert.equal(L.saveAllowed(5.4, null, false), true); // no resume at all
 });
 
+test("firstPlaySeek: nothing seeks before the first play, then the latest wanted time wins", () => {
+  // The playlist's EXT-X-START landed the resume (to a segment boundary): no seek, which on iOS
+  // would never complete if made too early and is pointless here.
+  assert.equal(L.firstPlaySeek({ current: 199.2, pending: 200, target: 200, landed: false }), null);
+  // EXT-X-START ignored: playing from 0, the resume target is sought now that playback runs.
+  assert.equal(L.firstPlaySeek({ current: 0, pending: 200, target: 200, landed: false }), 200);
+  assert.equal(L.firstPlaySeek({ current: 0, pending: null, target: 200, landed: false }), 200);
+  // The viewer stepped back before the first play: their time wins over the resume.
+  assert.equal(L.firstPlaySeek({ current: 200, pending: 190, target: 200, landed: true }), 190);
+  assert.equal(L.firstPlaySeek({ current: 0, pending: 190, target: 200, landed: true }), 190);
+  // A landed resume, or none, and nothing pending: no seek.
+  assert.equal(L.firstPlaySeek({ current: 3, pending: null, target: 200, landed: true }), null);
+  assert.equal(L.firstPlaySeek({ current: 0, pending: null, target: null, landed: true }), null);
+  assert.equal(L.firstPlaySeek({ current: 0.4, pending: 0.5, target: null, landed: true }), null);
+  assert.equal(L.RESUME_SLACK_S, 1.5);
+});
+
+test("the native player sets no currentTime before its first playing event", () => {
+  // On iOS such a seek never completes and freezes the page at the resume time (see firstPlaySeek).
+  const app = require("node:fs").readFileSync(require("node:path").join(__dirname, "../static/app.js"), "utf8");
+  const native = app.slice(app.indexOf("function createNativePlayer("), app.indexOf("function useYouTube("));
+  assert.ok(native.length > 0);
+  assert.doesNotMatch(native, /loadedmetadata/);
+  // The viewer's seek waits for the first play; the first play applies what waited.
+  assert.match(native, /seekTo\(t\) \{[^}]*if \(played\) \{\s*video\.currentTime = t;/);
+  assert.match(native, /addEventListener\("playing"[\s\S]*?if \(!played\) \{\s*played = true;[\s\S]*?L\.firstPlaySeek\(/);
+});
+
 test("repeatsSave skips only the same position posted a moment ago", () => {
   const last = { videoId: "AbCdEfGhIjK", t: 227.594, at: 10000 };
   assert.equal(L.repeatsSave(last, "AbCdEfGhIjK", 227.594, 10010), true); // the end's pause, then ended

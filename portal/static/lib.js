@@ -482,6 +482,20 @@
     return Math.abs(t - resumeTarget) <= 2;
   }
 
+  // Where the native player seeks on its first "playing", or null for nowhere. iOS's native HLS
+  // never completes a seek made before the first play: `seeking` stays true and currentTime stays
+  // pinned at the target while playback runs from elsewhere. So every seek wanted before then waits
+  // for that event: the viewer's latest (pending) wins over the resume target, which counts only
+  // until it has landed. The playlist's EXT-X-START has usually put the video there already, so a
+  // time within RESUME_SLACK_S of the wanted one is left alone.
+  const RESUME_SLACK_S = 1.5;
+  function firstPlaySeek({ current, pending, target, landed }) {
+    const wanted = pending !== null && pending !== undefined ? pending
+      : !landed && target !== null && target !== undefined ? target : null;
+    if (wanted === null || Math.abs(current - wanted) <= RESUME_SLACK_S) return null;
+    return wanted;
+  }
+
   // Whether a position save would post what the last one posted a moment ago: the same video, the
   // same time within SAVE_SAME_S, sent less than SAVE_REPEAT_MS before. A video's end fires pause,
   // then ended, then the way home saves: one post is enough. last is null after a failed post, so a
@@ -1048,7 +1062,7 @@
   const api = {
     parseVideoInput, parseStart, activeCueIndex, formatTime, coveredUntil, statusText, tokenOffsets,
     morae, pitchPattern, splitFurigana, hasKanji, VIDEO_ID_RE, watchStatus, freqLabel,
-    STRINGS, resumeTime, saveAllowed, repeatsSave, SAVE_REPEAT_MS, dismissAction, GHOST_CLICK_MS, watchedFraction, finished, FINISHED_S, atEnd, END_SLOP_S,
+    STRINGS, resumeTime, saveAllowed, firstPlaySeek, RESUME_SLACK_S, repeatsSave, SAVE_REPEAT_MS, dismissAction, GHOST_CLICK_MS, watchedFraction, finished, FINISHED_S, atEnd, END_SLOP_S,
     watchedToggle, SWIPE, swipeAxis, swipeSettle, swipeShift, swipeVelocity, actionOffsets, formatClock, spokenTime,
     SCHEDULES, backoffDelay, isTransient, withRetry, retryLeft,
     evenUnitTimes, isJapanese, segmentWords, tokensUseful, steadyTime, focusIdentity, focusMotion,

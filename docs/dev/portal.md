@@ -486,6 +486,16 @@ saved every 5 s while playing, on pause, seek, hide and leaving (never by a torn
 reads 0). Reopening resumes 2 s before it;
 under 10 s, or finished, starts from 0; a `?t=` in the link wins (`resumeTime()`).
 
+The resume rides on the playlist: `/api/media` hands out `master.m3u8?start=<t>`, and the playlists
+then carry `EXT-X-START:TIME-OFFSET=<t>,PRECISE=YES` (`with_start()`). The page's own player never
+seeks before the element's first `playing`: on iOS's native HLS such a seek never completes
+(`seeking` stays true, `currentTime` stays pinned at the target while playback runs from
+elsewhere), and the subtitles, word sweep and timeline froze at the resume time. A seek wanted
+before then (the resume, or the viewer's step or scrub) waits and the page shows its time; the
+first `playing` makes it, the viewer's over the resume's, and only when the video is more than
+1.5 s away (`firstPlaySeek()`). Until the resume has landed, the position saver writes nothing far
+from it (`saveAllowed()`). YouTube's player, the fallback, checks the same on its first `PLAYING`.
+
 **Finished** has one rule, `finished()` in `lib.js`, read by the bar, Mark as watched / unwatched and
 the resume: the last tenth of the video, never less than 2 s and never more than 30 s. A long video
 is finished in its last 30 s (credits, an outro), a 2-minute one in its last 12 s, a 15-second clip
