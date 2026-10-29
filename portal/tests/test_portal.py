@@ -446,6 +446,59 @@ def test_keep_order_keeps_the_entry_s_place(tmp_path):
     assert store.get("BBBBBBBBBBB") is None and [v["id"] for v in store.all()] == ["AAAAAAAAAAA"]
 
 
+def test_finished_matches_lib_js():
+    cases = json.loads((Path(__file__).parent / "finished-cases.json").read_text(encoding="utf-8"))["cases"]
+    for t, duration, expected in cases:
+        assert portal.finished(t, duration) is expected, (t, duration)
+
+
+def test_a_finished_save_is_watched_and_a_rewatch_keeps_it(tmp_path):
+    store = portal.PositionStore(tmp_path / "s.json")
+    store.put("AAAAAAAAAAA", 500, 1000, "first", updated=1000)
+    assert "watched" not in store.get("AAAAAAAAAAA")
+    assert store.put("AAAAAAAAAAA", 990, 1000, updated=2000)["watched"] == 2000  # the end
+    assert store.put("AAAAAAAAAAA", 20, updated=3000)["watched"] == 2000  # a rewatch from the start
+    assert store.put("AAAAAAAAAAA", 1000, updated=4000)["watched"] == 4000  # finished again: the newer time
+    assert portal.PositionStore(tmp_path / "s.json").get("AAAAAAAAAAA")["watched"] == 4000
+
+
+def test_marks_set_and_clear_watched(tmp_path):
+    store = portal.PositionStore(tmp_path / "s.json")
+    store.put("AAAAAAAAAAA", 500, 1000, "first", updated=1000)
+    before = int(time.time() * 1000)
+    entry = store.put("AAAAAAAAAAA", 1000, 1000, keep_order=True)  # Mark as watched: now, not `updated`
+    assert entry["updated"] == 1000 and entry["watched"] >= before
+    entry = store.put("AAAAAAAAAAA", 500, keep_order=True)  # Mark as unwatched, the rewatch's spot kept
+    assert "watched" not in entry and entry["t"] == 500.0 and entry["updated"] == 1000
+
+
+def test_old_finished_entries_are_watched_on_load(tmp_path):
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"positions": {
+        "AAAAAAAAAAA": {"t": 995, "duration": 1000, "title": "old, done", "updated": 1234},
+        "BBBBBBBBBBB": {"t": 100, "duration": 1000, "title": "old, half", "updated": 5678},
+        "CCCCCCCCCCC": {"t": 30, "title": "no duration", "updated": 9},
+    }}), encoding="utf-8")
+    store = portal.PositionStore(path)
+    assert store.get("AAAAAAAAAAA")["watched"] == 1234
+    assert "watched" not in store.get("BBBBBBBBBBB") and "watched" not in store.get("CCCCCCCCCCC")
+
+
+def test_the_queue_and_the_history_have_caps_of_their_own(tmp_path, monkeypatch):
+    monkeypatch.setattr(portal, "POSITIONS_MAX", 3)
+    monkeypatch.setattr(portal, "WATCHED_MAX", 2)
+    store = portal.PositionStore(tmp_path / "s.json")
+    store.put("WWWWWWWWWW1", 600, 600, updated=1)
+    store.put("WWWWWWWWWW2", 600, 600, updated=2)
+    for i in range(5):  # queue traffic never evicts the history
+        store.put(f"QQQQQQQQQQ{i}", 10, 600, updated=10 + i)
+    ids = {v["id"] for v in store.all()}
+    assert ids == {"WWWWWWWWWW1", "WWWWWWWWWW2", "QQQQQQQQQQ2", "QQQQQQQQQQ3", "QQQQQQQQQQ4"}
+    store.put("QQQQQQQQQQ4", 600, updated=100)  # finished: into the history, its oldest goes
+    ids = {v["id"]: v for v in store.all()}
+    assert set(ids) == {"WWWWWWWWWW2", "QQQQQQQQQQ4", "QQQQQQQQQQ2", "QQQQQQQQQQ3"}
+
+
 def test_api_position_keep_order_is_a_bool(tmp_path, monkeypatch):
     services = make_services(tmp_path, "local")
     services.positions = services.state

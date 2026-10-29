@@ -269,6 +269,11 @@ test("finished: the last tenth, at least 2 s and at most 30 s", () => {
   assert.equal(L.finished(Infinity, Infinity), false); // a live stream never finishes
 });
 
+test("finished: the cases portal.py's finished() is held to as well", () => {
+  const { cases } = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "finished-cases.json"), "utf8"));
+  for (const [t, duration, expected] of cases) assert.equal(L.finished(t, duration), expected, `${t}/${duration}`);
+});
+
 test("finished is one rule: the bar's full state, the toggle and the resume agree", () => {
   for (const duration of [15, 45, 120, 600, 3600]) {
     for (let t = 10; t <= duration; t += 0.5) {
@@ -362,6 +367,34 @@ test("the position saver waits for a resume to land", () => {
   assert.equal(L.saveAllowed(599, 600, false), true); // there: saving is fine
   assert.equal(L.saveAllowed(5.4, 600, true), true); // landed (or the viewer seeked): anything goes
   assert.equal(L.saveAllowed(5.4, null, false), true); // no resume at all
+});
+
+test("firstPlaySeek: nothing seeks before the first play, then the latest wanted time wins", () => {
+  // The playlist's EXT-X-START landed the resume (to a segment boundary): no seek, which on iOS
+  // would never complete if made too early and is pointless here.
+  assert.equal(L.firstPlaySeek({ current: 199.2, pending: 200, target: 200, landed: false }), null);
+  // EXT-X-START ignored: playing from 0, the resume target is sought now that playback runs.
+  assert.equal(L.firstPlaySeek({ current: 0, pending: 200, target: 200, landed: false }), 200);
+  assert.equal(L.firstPlaySeek({ current: 0, pending: null, target: 200, landed: false }), 200);
+  // The viewer stepped back before the first play: their time wins over the resume.
+  assert.equal(L.firstPlaySeek({ current: 200, pending: 190, target: 200, landed: true }), 190);
+  assert.equal(L.firstPlaySeek({ current: 0, pending: 190, target: 200, landed: true }), 190);
+  // A landed resume, or none, and nothing pending: no seek.
+  assert.equal(L.firstPlaySeek({ current: 3, pending: null, target: 200, landed: true }), null);
+  assert.equal(L.firstPlaySeek({ current: 0, pending: null, target: null, landed: true }), null);
+  assert.equal(L.firstPlaySeek({ current: 0.4, pending: 0.5, target: null, landed: true }), null);
+  assert.equal(L.RESUME_SLACK_S, 1.5);
+});
+
+test("the native player sets no currentTime before its first playing event", () => {
+  // On iOS such a seek never completes and freezes the page at the resume time (see firstPlaySeek).
+  const app = require("node:fs").readFileSync(require("node:path").join(__dirname, "../static/app.js"), "utf8");
+  const native = app.slice(app.indexOf("function createNativePlayer("), app.indexOf("function useYouTube("));
+  assert.ok(native.length > 0);
+  assert.doesNotMatch(native, /loadedmetadata/);
+  // The viewer's seek waits for the first play; the first play applies what waited.
+  assert.match(native, /seekTo\(t\) \{[^}]*if \(played\) \{\s*video\.currentTime = t;/);
+  assert.match(native, /addEventListener\("playing"[\s\S]*?if \(!played\) \{\s*played = true;[\s\S]*?L\.firstPlaySeek\(/);
 });
 
 test("repeatsSave skips only the same position posted a moment ago", () => {
@@ -625,6 +658,25 @@ test("actionOffsets: the buttons share the uncovered width; full gives Delete al
   assert.deepEqual(L.actionOffsets(250, 2, true), [250, 250]);
   assert.deepEqual(L.actionOffsets(100, 1, false), [100]);
   assert.deepEqual(L.actionOffsets(-20, 2, false), [0, 0]); // the rubber band shows nothing
+});
+
+test("watchedToggle: a watched video is unwatched where it stands, a finished one at 0", () => {
+  assert.equal(L.watchedToggle({ t: 600, duration: 600, watched: 5 }), 0);
+  assert.equal(L.watchedToggle({ t: 120, duration: 600, watched: 5 }), 120); // a rewatch keeps its spot
+  assert.equal(L.watchedToggle({ t: 0, duration: 600, watched: 5 }), 0);
+});
+
+test("splitVideos: Up next by the latest play, Watched by the latest finish", () => {
+  const { queue, watched } = L.splitVideos([
+    { id: "a", updated: 3 },
+    { id: "b", updated: 5, watched: 6 },
+    { id: "c", at: 4 }, // the local copy's name for updated
+    { id: "d", updated: 9, watched: 2 },
+    null,
+  ]);
+  assert.deepEqual(queue.map((v) => v.id), ["c", "a"]);
+  assert.deepEqual(watched.map((v) => v.id), ["b", "d"]);
+  assert.deepEqual(L.splitVideos(undefined), { queue: [], watched: [] });
 });
 
 test("watchedToggle: an unfinished video goes to its end, a finished one back to 0", () => {

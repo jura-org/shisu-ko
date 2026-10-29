@@ -561,7 +561,8 @@ type to use, and guesses what each field gets from its name; Settings > Anki cha
 server syncs Anki with AnkiWeb a minute after the card appears (see
 [Sentence mining](#sentence-mining)), and Settings > Anki shows when it last did, or why it could
 not. The list of videos remembers how far you got, on every device; swipe a video left to mark it
-watched or delete it, and a video watched to its end returns to the list. How it works, and its security model:
+watched or delete it. A video watched to its end returns you to the list and moves from Up next to
+the Watched tab at the bottom, the computer's history of what you finished. How it works, and its security model:
 [docs/dev/portal.md](docs/dev/portal.md).
 
 `--watch-history on` (off by default) makes a video you watch in the portal count on your YouTube
