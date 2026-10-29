@@ -499,10 +499,25 @@ from it (`saveAllowed()`). YouTube's player, the fallback, checks the same on it
 **Finished** has one rule, `finished()` in `lib.js`, read by the bar, Mark as watched / unwatched and
 the resume: the last tenth of the video, never less than 2 s and never more than 30 s. A long video
 is finished in its last 30 s (credits, an outro), a 2-minute one in its last 12 s, a 15-second clip
-in its last 2 s rather than a third of it.
-The home screen lists them with thumbnails (`/api/thumb/<id>`, cached on the computer) and shows
-what is still missing (`/api/health`: the server, Yomitan API, AnkiConnect, yt-dlp, PyAV, and the
-card setup), each with what to do.
+in its last 2 s rather than a third of it. `portal.py` holds the same rule as `finished()`;
+`portal/tests/finished-cases.json` holds the two equal.
+
+**The watch history** is the computer's: a position gains `watched` (ms) from every save that is
+finished, a mark included, and a video finished again takes the newer time. A rewatch from the
+start keeps it, so the video stays out of the queue; only a mark to an unfinished position (Mark as
+unwatched) removes it. An entry from before `watched` existed is read as watched at its `updated`
+when finished (`PortalState.load()`; no format change). The two lists are bounded apart: the queue
+keeps 200 by the oldest `updated` (`POSITIONS_MAX`), the history 2000 by the oldest `watched`
+(`WATCHED_MAX`), so no amount of new videos evicts what was watched. `/api/positions` answers both
+in one list, newest `updated` first, as before.
+
+The home screen lists them with thumbnails (`/api/thumb/<id>`, cached on the computer, loaded
+lazily) under two tabs, an iOS tab bar fixed at the bottom of home only: **Up next** (no `watched`,
+the latest played first) and **Watched** (the latest finished first), split by `splitVideos()`. The
+tab outlives a video and the way back (`sessionStorage`); the arrow keys move between the tabs. The
+offline copy in `localStorage` keeps 30 rows of each tab with their `watched`. Above the list it
+shows what is still missing (`/api/health`: the server, Yomitan API, AnkiConnect, yt-dlp, PyAV, and
+the card setup), each with what to do.
 
 - **The watch bar** is YouTube's: a translucent grey track flush with the thumbnail's bottom edge,
   3 px here, and the watched part in YouTube's brand red, `#ff0033`, at least 3 px wide. Its length
@@ -523,7 +538,8 @@ card setup), each with what to do.
   `cubic-bezier(0.25, 1, 0.5, 1)`; reduced motion moves it at once. One row is open at a time; a tap
   elsewhere, a scroll of over 10 px or Escape closes it, and that tap opens nothing; a swipe never
   opens the video. Mark as watched sets the position to the end (`/api/position`), so the bar reads
-  full; on a finished video it reads Mark as unwatched and sets 0 (`watchedToggle()`). A mark is
+  full; on a watched or finished video it reads Mark as unwatched and sets 0, or where a rewatch
+  stands (`watchedToggle()`). The row then belongs to the other tab and collapses out of this one. A mark is
   not a watch: it posts `keep_order: true`, so the entry keeps its `updated`, its place in the list
   and its standing against the cap of saved positions. A mark never creates an entry: on a video
   deleted on another device it answers 404, and the page drops the row. A row without
@@ -531,7 +547,7 @@ card setup), each with what to do.
   (`/api/position/delete`). Edit's red minus opens the same actions, for the keyboard, a screen
   reader and the mouse.
 - **The end returns home.** A video played to its end (`ended`, or YouTube's player's ended state)
-  goes home after 1.5 s, its end saved first so the bar there is full. The end is posted once:
+  goes home after 1.5 s, its end saved first, so it has left Up next and heads Watched. The end is posted once:
   `pause`, `ended` and the way home all save it, and a save of the position posted less than 5 s
   before is skipped (`repeatsSave()`), unless that post failed. A touch, a key, a hidden
   page or an open sheet in that beat keeps the viewer on the video, and a touch or key in it does
