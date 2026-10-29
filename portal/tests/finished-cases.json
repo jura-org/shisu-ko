@@ -1,0 +1,23 @@
+{
+  "about": "finished(t, duration): [t, duration, expected]. Read by lib.test.js and test_portal.py, so lib.js and portal.py keep one rule.",
+  "cases": [
+    [970, 1000, true],
+    [969.9, 1000, false],
+    [108, 120, true],
+    [107.9, 120, false],
+    [13, 15, true],
+    [12.9, 15, false],
+    [3570, 3600, true],
+    [3569.9, 3600, false],
+    [18, 20, true],
+    [17.9, 20, false],
+    [1, 3, true],
+    [0, 600, false],
+    [600, 600, true],
+    [150, 100, true],
+    [98, 0, false],
+    [98, -5, false],
+    [98, null, false],
+    [null, 100, false]
+  ]
+}

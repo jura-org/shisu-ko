@@ -22,6 +22,7 @@ import io
 import ipaddress
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -2075,7 +2076,20 @@ class WatchReporter:
 STATE_PATH = SHISUKO_HOME / "portal-state.json"
 THUMB_DIR = SHISUKO_HOME / "portal-thumbs"
 THUMB_MAX_FILES = 500
-POSITIONS_MAX = 200
+POSITIONS_MAX = 200  # the queue: entries not yet watched, by oldest `updated`
+WATCHED_MAX = 2000  # the watch history, by oldest `watched`; queue traffic never evicts it
+# finished(): lib.js's rule, the same constants (portal/tests/finished-cases.json holds them equal).
+FINISHED_S = 30
+FINISHED_SHARE = 0.1
+END_SLOP_S = 2
+
+
+def finished(t, duration) -> bool:
+    """Whether a position counts as watched: the last tenth of the video, never less than
+    END_SLOP_S and never more than FINISHED_S."""
+    if not all(isinstance(x, (int, float)) and math.isfinite(x) for x in (t, duration)) or duration <= 0:
+        return False
+    return t >= duration - min(FINISHED_S, max(END_SLOP_S, duration * FINISHED_SHARE))
 
 
 def atomic_write_json(path: Path, data) -> None:
@@ -2108,6 +2122,10 @@ class PortalState:
             data = data if isinstance(data, dict) else {}
             if not isinstance(data.get("positions"), dict):
                 data["positions"] = {}
+            # Entries from before `watched` existed: a finished one was watched when it was last saved.
+            for entry in data["positions"].values():
+                if isinstance(entry, dict) and "watched" not in entry and finished(entry.get("t"), entry.get("duration")):
+                    entry["watched"] = entry.get("updated", 0)
             if not isinstance(data.get("devices"), list):
                 data["devices"] = []
             self.data = data
@@ -2116,7 +2134,9 @@ class PortalState:
     def save(self) -> None:
         atomic_write_json(self.path, self.data)
 
-    # ---- watch positions: {t, duration, title, updated} per video
+    # ---- watch positions: {t, duration, title, updated, watched?} per video. `watched` (ms) marks
+    # the watch history: set by every save that is finished(), the newest one winning; removed only
+    # by a mark to an unfinished position (Mark as unwatched). A rewatch from the start keeps it.
 
     def get(self, video_id: str):
         with self.lock:
@@ -2135,18 +2155,26 @@ class PortalState:
             positions = self.load()["positions"]
             if keep_order and video_id not in positions:
                 return None
+            now = int(updated or time.time() * 1000)
             entry = dict(positions.get(video_id) or {})
-            if keep_order and "updated" in entry:
-                updated = entry["updated"]
             entry["t"] = round(max(0.0, float(t)), 1)
             if isinstance(duration, (int, float)) and duration > 0:
                 entry["duration"] = round(float(duration), 1)
             if isinstance(title, str) and title.strip():
                 entry["title"] = title.strip()[:200]
-            entry["updated"] = int(updated or time.time() * 1000)
+            entry["updated"] = entry["updated"] if keep_order and "updated" in entry else now
+            if finished(entry["t"], entry.get("duration")):
+                entry["watched"] = now
+            elif keep_order:
+                entry.pop("watched", None)
             positions[video_id] = entry
-            # Bounded: the least recently watched go first.
-            for old in sorted(positions, key=lambda k: positions[k].get("updated", 0))[:-POSITIONS_MAX]:
+            # Bounded, each list on its own: the queue by the least recently watched, the history
+            # by the oldest finish.
+            queue = [k for k, v in positions.items() if "watched" not in v]
+            history = [k for k, v in positions.items() if "watched" in v]
+            for old in sorted(queue, key=lambda k: positions[k].get("updated", 0))[:-POSITIONS_MAX]:
+                positions.pop(old, None)
+            for old in sorted(history, key=lambda k: positions[k]["watched"])[:-WATCHED_MAX]:
                 positions.pop(old, None)
             self.save()
             return entry
