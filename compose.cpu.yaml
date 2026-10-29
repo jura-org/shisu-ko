@@ -15,4 +15,4 @@ services:
       - ${DATA_DIR:-./data}:/data
     environment:
       - SHISUKO_HOME=/data
-    command: ["--model", "${WHISPER_MODEL:-small}", "--device", "cpu", "--compute-type", "int8", "--cpu-threads", "${CPU_THREADS:-8}", "--log-level", "INFO"]
+    command: ["--model", "${WHISPER_MODEL:-small}", "--device", "cpu", "--compute-type", "int8", "--cpu-threads", "${CPU_THREADS:-8}", "--lookahead", "${LOOKAHEAD:-900}", "--log-level", "INFO"]
