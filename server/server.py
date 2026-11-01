@@ -2513,6 +2513,8 @@ class Session:
     title: str = ""
     duration: float = 0.0
     duration_hint: float = 0.0  # length reported by yt-dlp, used before the container is opened
+    # The whole track at 16 kHz: int16 from the fetch (decode_track(), 115 MB an hour), float32 from
+    # the tools' own decodes; audio_slice() hands out float32 either way.
     audio: Optional[np.ndarray] = None
     # (offset_seconds, samples): a short decode around the playhead that lets transcription start
     # before the whole track has been decoded. Dropped once `audio` holds everything.
@@ -2631,11 +2633,14 @@ class LiveAudio:
 
 
 def audio_slice(s: Session, start: float, end: float) -> Optional[np.ndarray]:
-    """Samples for [start, end): from the full decode, or from the preview while that is all there is."""
+    """Samples for [start, end), float32: from the full decode, or from the preview while that is all
+    there is. The fetch keeps the full decode as int16 (decode_track()), half the memory; its window
+    comes out as the float32 faster-whisper's decode_audio() would have given."""
     if s.live_audio is not None:
         return s.live_audio.slice(start, end)
     if s.audio is not None:
-        return s.audio[int(start * SAMPLE_RATE): int(end * SAMPLE_RATE)]
+        samples = s.audio[int(start * SAMPLE_RATE): int(end * SAMPLE_RATE)]
+        return samples.astype(np.float32) / np.float32(32768.0) if samples.dtype == np.int16 else samples
     if s.preview is None:
         return None
     offset, samples = s.preview
@@ -3151,10 +3156,7 @@ class Fetcher:
             # milliseconds, so the first subtitles appear before the full decode finishes.
             if not have_preview:
                 self.make_preview(s, path)
-            from faster_whisper.audio import decode_audio
-
-            audio = decode_audio(str(path), sampling_rate=SAMPLE_RATE)
-            audio = np.ascontiguousarray(audio, dtype=np.float32)
+            audio = decode_track(path)  # int16, half the memory of float32; audio_slice() converts a window
             with s.lock:
                 s.audio = audio
                 s.duration = float(len(audio)) / SAMPLE_RATE
@@ -3638,6 +3640,39 @@ def _decode_range(src: Path, start: float, end: float, rate: int = CLIP_RATE) ->
     return np.concatenate(chunks)
 
 
+def decode_track(path: Path) -> np.ndarray:
+    """The whole audio track as faster-whisper's decode_audio() decodes it (16 kHz mono, through its
+    own resampler and frame grouping), kept as the int16 it is decoded to.
+
+    decode_audio() returns float32, twice the memory, and holds the int16 and two float32 copies
+    at once while it converts: a 4.1-hour stream measured 906 MB kept and 2.2 GB more at the peak,
+    against 453 MB and 1.1 GB this way. audio_slice() turns a window into float32 with the very
+    numbers decode_audio() gives (an int16 over 32768 is exact in float32). A faster-whisper
+    without those steps under these names gets decode_audio()'s float32 turned back into int16,
+    which is exact too.
+    """
+    import importlib
+
+    # The submodule by its full name, as `from faster_whisper.audio import ...` takes it: from
+    # sys.modules when it is there, without the package (the tests stand in for the submodule alone).
+    fw_audio = importlib.import_module("faster_whisper.audio")
+    steps = [getattr(fw_audio, name, None) for name in ("_ignore_invalid_frames", "_group_frames", "_resample_frames")]
+    if not all(callable(step) for step in steps):
+        return np.round(fw_audio.decode_audio(str(path), sampling_rate=SAMPLE_RATE) * 32768.0).astype(np.int16)
+    import av
+
+    ignore, group, resample = steps
+    resampler = av.audio.resampler.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
+    chunks = []
+    with av.open(str(path), mode="r", metadata_errors="ignore") as container:
+        for frame in resample(group(ignore(container.decode(audio=0)), 500000), resampler):
+            chunks.append(frame.to_ndarray().reshape(-1))
+    # decode_audio() does this too: the resampler's objects outlive it otherwise (faster-whisper #390).
+    del resampler
+    gc.collect()
+    return np.concatenate(chunks).astype(np.int16, copy=False) if chunks else np.zeros(0, dtype=np.int16)
+
+
 def make_clip(video_id: str, start: float, end: float, fmt: str, fallback_audio: Optional[np.ndarray]):
     """Return (bytes, mime, extension) for the [start, end) audio clip of a video."""
     samples = None
@@ -3652,7 +3687,10 @@ def make_clip(video_id: str, start: float, end: float, fmt: str, fallback_audio:
             log.warning("[%s] clip decode from the source file failed (%s); using the 16 kHz copy", video_id, exc)
     if samples is None and fallback_audio is not None:
         a, b = int(start * SAMPLE_RATE), int(end * SAMPLE_RATE)
-        return encode_clip(fallback_audio[a:b], fmt)
+        part = fallback_audio[a:b]
+        if part.dtype == np.int16 and len(part):
+            return _encode_clip(part, SAMPLE_RATE, fmt)  # the fetch's decode (decode_track()) is int16 already
+        return encode_clip(part, fmt)
     if samples is None or len(samples) == 0:
         raise RuntimeError("no audio available for this range")
     return _encode_clip(samples, rate, fmt)
