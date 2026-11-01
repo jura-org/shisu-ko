@@ -127,8 +127,57 @@ def test_decode_track_runs_faster_whisper_s_own_steps_and_keeps_their_int16(monk
     assert seen["resample"] == (["frame"], "Resampler")
 
 
-def test_decode_track_gives_decode_audio_s_numbers_on_a_real_file(tmp_path):
-    pytest.importorskip("av")
+def test_decode_track_opens_without_metadata_errors_where_pyav_no_longer_takes_it(monkeypatch, tmp_path):
+    # PyAV 19 dropped av.open()'s metadata_errors, which faster-whisper 1.2.1's decode_audio() still
+    # passes: there decode_audio() raises, and the server's own decode must not.
+    calls = []
+
+    class Container:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def decode(self, audio):
+            return []
+
+    def opened(path, mode="r", **options):
+        calls.append(options)
+        if options:
+            raise TypeError("open() got an unexpected keyword argument 'metadata_errors'")
+        return Container()
+
+    av = types.ModuleType("av")
+    av.open = opened
+    av.audio = SimpleNamespace(resampler=SimpleNamespace(AudioResampler=lambda **kwargs: object()))
+    monkeypatch.setitem(sys.modules, "av", av)
+    module = types.ModuleType("faster_whisper.audio")
+    module._ignore_invalid_frames = lambda frames: frames
+    module._group_frames = lambda frames, num_samples: frames
+    chunk = pcm(0.5, seed=5)
+    module._resample_frames = lambda frames, resampler: iter([SimpleNamespace(to_ndarray=lambda: chunk.reshape(1, -1))])
+    monkeypatch.setitem(sys.modules, "faster_whisper.audio", module)
+    track = server.decode_track(tmp_path / "a.webm")
+    assert calls == [{"metadata_errors": "ignore"}, {}]  # decode_audio()'s options first, then none
+    assert np.array_equal(track, chunk)
+    # The tools take decode_audio()'s float32 (as_float): from the same int16, exactly.
+    assert np.array_equal(server.decode_track(tmp_path / "a.webm", as_float=True), as_decode_audio_gives(chunk))
+
+
+def test_decode_track_as_float_is_decode_audio_itself_without_the_steps(monkeypatch, tmp_path):
+    # A faster-whisper that names its steps otherwise (and the tests' stand-ins for dump_words.py):
+    # decode_audio()'s own float32, untouched.
+    audio = np.linspace(-0.3, 0.3, RATE, dtype=np.float32)
+    module = types.ModuleType("faster_whisper.audio")
+    module.decode_audio = lambda path, sampling_rate=RATE: audio
+    monkeypatch.setitem(sys.modules, "faster_whisper.audio", module)
+    assert server.decode_track(tmp_path / "a.webm", as_float=True) is audio
+    assert server.decode_track(tmp_path / "a.webm").dtype == np.int16
+
+
+def test_decode_track_gives_decode_audio_s_numbers_on_a_real_file(tmp_path, monkeypatch):
+    av = pytest.importorskip("av")
     fw_audio = pytest.importorskip("faster_whisper.audio")
     if not all(hasattr(fw_audio, n) for n in ("_ignore_invalid_frames", "_group_frames", "_resample_frames")):
         pytest.skip("this faster-whisper names its decoding steps otherwise")
@@ -141,7 +190,20 @@ def test_decode_track_gives_decode_audio_s_numbers_on_a_real_file(tmp_path):
         w.setsampwidth(2)
         w.setframerate(rate)
         w.writeframes(np.clip(signal * 32767, -32768, 32767).astype("<i2").tobytes())
-    expected = fw_audio.decode_audio(str(path), sampling_rate=RATE)
+    with monkeypatch.context() as patch:
+        # decode_audio() passes av.open() a metadata_errors that PyAV 19 refuses: for the reference
+        # only, the option goes where it is refused (it changes nothing about the samples).
+        real_open = av.open
+
+        def open_(*args, **kwargs):
+            try:
+                return real_open(*args, **kwargs)
+            except TypeError:
+                kwargs.pop("metadata_errors", None)
+                return real_open(*args, **kwargs)
+
+        patch.setattr(av, "open", open_)
+        expected = fw_audio.decode_audio(str(path), sampling_rate=RATE)
     track = server.decode_track(path)
     assert track.dtype == np.int16 and len(track) == len(expected)
     assert np.array_equal(as_decode_audio_gives(track), expected)

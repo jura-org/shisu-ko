@@ -3640,16 +3640,18 @@ def _decode_range(src: Path, start: float, end: float, rate: int = CLIP_RATE) ->
     return np.concatenate(chunks)
 
 
-def decode_track(path: Path) -> np.ndarray:
+def decode_track(path: Path, as_float: bool = False) -> np.ndarray:
     """The whole audio track as faster-whisper's decode_audio() decodes it (16 kHz mono, through its
-    own resampler and frame grouping), kept as the int16 it is decoded to.
+    own resampler and frame grouping), kept as the int16 it is decoded to; `as_float` gives the
+    float32 decode_audio() returns instead (the tools, retranscribe.py and dump_words.py).
 
     decode_audio() returns float32, twice the memory, and holds the int16 and two float32 copies
     at once while it converts: a 4.1-hour stream measured 906 MB kept and 2.2 GB more at the peak,
     against 453 MB and 1.1 GB this way. audio_slice() turns a window into float32 with the very
     numbers decode_audio() gives (an int16 over 32768 is exact in float32). A faster-whisper
-    without those steps under these names gets decode_audio()'s float32 turned back into int16,
-    which is exact too.
+    without those steps under these names gets decode_audio() itself, its float32 turned into int16
+    exactly. And decode_audio() opens the file with `metadata_errors`, which PyAV 19 no longer
+    takes (faster-whisper 1.2.1 still passes it): this opens it without where PyAV refuses it.
     """
     import importlib
 
@@ -3658,19 +3660,25 @@ def decode_track(path: Path) -> np.ndarray:
     fw_audio = importlib.import_module("faster_whisper.audio")
     steps = [getattr(fw_audio, name, None) for name in ("_ignore_invalid_frames", "_group_frames", "_resample_frames")]
     if not all(callable(step) for step in steps):
-        return np.round(fw_audio.decode_audio(str(path), sampling_rate=SAMPLE_RATE) * 32768.0).astype(np.int16)
+        audio = fw_audio.decode_audio(str(path), sampling_rate=SAMPLE_RATE)
+        return audio if as_float else np.round(audio * 32768.0).astype(np.int16)
     import av
 
     ignore, group, resample = steps
     resampler = av.audio.resampler.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
     chunks = []
-    with av.open(str(path), mode="r", metadata_errors="ignore") as container:
+    try:
+        container = av.open(str(path), mode="r", metadata_errors="ignore")
+    except TypeError:
+        container = av.open(str(path), mode="r")  # PyAV 19 and later: no such option
+    with container:
         for frame in resample(group(ignore(container.decode(audio=0)), 500000), resampler):
             chunks.append(frame.to_ndarray().reshape(-1))
     # decode_audio() does this too: the resampler's objects outlive it otherwise (faster-whisper #390).
     del resampler
     gc.collect()
-    return np.concatenate(chunks).astype(np.int16, copy=False) if chunks else np.zeros(0, dtype=np.int16)
+    track = np.concatenate(chunks).astype(np.int16, copy=False) if chunks else np.zeros(0, dtype=np.int16)
+    return track.astype(np.float32) / np.float32(32768.0) if as_float else track
 
 
 def make_clip(video_id: str, start: float, end: float, fmt: str, fallback_audio: Optional[np.ndarray]):
