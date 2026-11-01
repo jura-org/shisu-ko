@@ -582,6 +582,18 @@ test("no banner while the server is offline, and none for a server that says no 
   assert.equal(none.popup.el("update-result").textContent, "No release found, the server checked 3 min ago");
 });
 
+test("the status line says a model out of memory loads when a video needs it, and a loading one as before", async () => {
+  const unloaded = { ok: true, data: { model: "large-v3", device: "cuda", compute_type: null, model_loaded: false } };
+  const idle = await open({ health: unloaded });
+  assert.equal(idle.popup.el("server-status").textContent, "Server online"); // the smoke test's exact words
+  assert.equal(idle.popup.el("server-detail").textContent, "large-v3 · cuda · loads when a video needs it");
+  const loaded = await open({ health: { ok: true, data: { ...unloaded.data, compute_type: "float16", model_loaded: true } } });
+  assert.equal(loaded.popup.el("server-detail").textContent, "large-v3 · cuda · float16");
+  const loading = await open({ health: { ok: true, data: { ...unloaded.data, model_loading: "large-v3" } } });
+  assert.equal(loading.popup.el("server-status").textContent, "Loading model");
+  assert.equal(loading.popup.el("server-detail").textContent, "large-v3");
+});
+
 test("an answer overtaken by a later question is dropped", async () => {
   // The popup opens while the server is offline and its first question is slow to come back; the
   // server comes online and the second question puts the banner up. The first answer, "offline",
