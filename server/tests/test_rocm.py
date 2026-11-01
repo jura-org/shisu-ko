@@ -256,8 +256,12 @@ def engine_imports(monkeypatch, devices=1):
 
 
 def run_main(monkeypatch, *argv):
-    """main() with `argv`; returns the code it ended on (SystemExit, or Exited from a stand-in exit), else None."""
-    monkeypatch.setattr(sys, "argv", ["server.py", *argv])
+    """main() with `argv`; returns the code it ended on (SystemExit, or Exited from a stand-in exit), else None.
+
+    With --model-idle-minutes 0: these tests are about the load at the start, which the default
+    engine makes only then (the AMD engine always does; test_model_on_demand.py has the start
+    that loads nothing)."""
+    monkeypatch.setattr(sys, "argv", ["server.py", "--model-idle-minutes", "0", *argv])
     try:
         server.main()
     except (SystemExit, Exited) as exc:

@@ -1100,7 +1100,7 @@ def test_only_the_server_s_own_app_sweeps(monkeypatch, tmp_path):
     app, _ = sweeper(monkeypatch, tmp_path)
     assert next(app.sweep, False) is False  # an App the tools and tests make sweeps nothing
     import inspect
-    assert inspect.getsource(server.start_app).count("sweep=True") == 2  # both of the server's own
+    assert inspect.getsource(server.start_app).count("sweep=True") == 3  # all three of the server's own
 
 
 # --------------------------------------------------------------------------- --lyrics
