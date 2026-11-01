@@ -36,10 +36,11 @@ Endpoints
 
 With --model-idle-minutes above 0 (the default, 1) the model is not loaded at the start: the
 transcriber thread loads it when a video needs a window transcribed (or a watched video's audio is
-on its way), and frees it again after that many minutes without one, so a server left running
-holds no model while it only hands out cues it already has, from the cache or from memory (the
-CUDA runtime keeps about 0.1 GB of GPU memory and 0.5 GB of RAM from the first load until the
-process ends).
+on its way), keeps it while a video a client watches has audio ahead of its playhead left to
+transcribe, paused or not, and frees it again after that many minutes without a window otherwise,
+so a server left running holds no model while it only hands out cues it already has, from the
+cache or from memory (the CUDA runtime keeps about 0.1 GB of GPU memory and 0.5 GB of RAM from the
+first load until the process ends).
 0 loads it at the start and keeps it, as before; so does the AMD engine, whatever the option says.
 
 With --update-check on (the default) a thread asks GitHub for the newest release once a day
@@ -165,9 +166,9 @@ SLOW_LOOKAHEAD = 900.0  # MLX and the CPU refill near real time or slower: a pau
 # --model-idle-minutes' default (App.tend_model()). Held in memory and idle, large-v3 costs about
 # 4 GB of GPU memory and, measured on an RTX 4070 Laptop GPU, no power the GPU did not draw without
 # it; loading it again takes 3 to 7 s there (2.9 GB of weights, under a second of warm-up), which
-# a new video spends fetching its audio anyway, and a paused one inside the lookahead above. A
-# video playing never lets a minute pass without a window: the planner tops the lookahead up a
-# window (--window, 30 s) at a time.
+# a new video spends fetching its audio anyway. A video playing never lets a minute pass without a
+# window (the planner tops the lookahead up a --window at a time), and a paused one with audio left
+# ahead keeps the model all the same (App.video_unfinished()).
 MODEL_IDLE_MINUTES = 1.0
 # Kitsune-Transcribe's Japanese students (kitsune_engine.py), by name. Each repo holds the training
 # run's bf16 export at its root (the bare name) and each precision in a folder of its own, as
@@ -2711,11 +2712,12 @@ def lookahead_for(s: Session, args) -> float:
     return min(args.lookahead, LANGUAGE_PROBE_AHEAD) if args.lookahead > 0 else LANGUAGE_PROBE_AHEAD
 
 
-def window_span(s: Session, args) -> Optional[tuple]:
+def window_span(s: Session, args, lookahead: Optional[float] = None) -> Optional[tuple]:
     """The [start, end) the planner takes next from what is covered, the playhead and the lookahead,
     before any audio is looked at; None when nothing is due. plan_window() narrows it to the audio
     there is, and App.audio_on_its_way() asks it whether a fetch will lead to a window at all.
-    Needs a known duration."""
+    `lookahead` 0 asks with no lookahead at all, whether any audio from the playhead to the end is
+    left to transcribe (App.video_unfinished()). Needs a known duration."""
     t = min(max(0.0, s.want_t), s.duration)
     ranges = planned_ranges(s)
     cov = find_covering(ranges, t)
@@ -2726,7 +2728,8 @@ def window_span(s: Session, args) -> Optional[tuple]:
         start = cov[1]
         if start >= s.duration - 0.05:
             return None
-        lookahead = lookahead_for(s, args)
+        if lookahead is None:
+            lookahead = lookahead_for(s, args)
         if lookahead > 0 and start - t > lookahead:
             return None
         size = args.window
@@ -6816,11 +6819,13 @@ class App:
         an App made with on_demand (main()'s, start_app()) does anything here, every other keeps
         the model it was given. Needed means a window waiting, or a video a client watches whose
         audio is on its way (audio_on_its_way()), so that the load runs beside the download instead
-        of after it. Not needed means neither, for idle_limit() since the last window: then the
-        model goes, and the GPU memory with it, and the server answers from the cues it has, cached
-        or in memory, until a video needs it again. A paused video lets it go too: the lookahead
-        keeps minutes transcribed ahead of the playhead (CUDA_LOOKAHEAD), far longer than a load
-        takes once the viewer plays on.
+        of after it. Kept, once loaded, while a video a client still watches has audio ahead of its
+        playhead left to transcribe (video_unfinished()), paused or not: the lookahead keeps minutes
+        transcribed ahead, so a pause to look a word up or mine a line outlasts the idle minute, and
+        freeing the model then only loads it again when the viewer plays on. Not needed means none
+        of these, for idle_limit() since the last window: then the model goes, and the GPU memory
+        with it, and the server answers from the cues it has, cached or in memory, until a video
+        needs it again: a minute after a video is transcribed to its end, or its tab closed.
 
         True when the loop is to plan again: a model was loaded or freed, or a window waits for
         one that cannot load yet (a failure under --retry-after), after a short rest.
@@ -6831,7 +6836,8 @@ class App:
             if work:
                 self.model_used = time.time()
                 return False
-            if time.time() - self.model_used < self.idle_limit() or self.audio_on_its_way():
+            if (time.time() - self.model_used < self.idle_limit() or self.audio_on_its_way()
+                    or self.video_unfinished()):
                 return False
             self.free_model()
             return True
@@ -6850,6 +6856,29 @@ class App:
         planner tops the lookahead up one window at a time), so a longer --window must not see its
         model freed and loaded again between two of them."""
         return max(self.model_idle, 2.0 * float(getattr(self.args, "window", 30.0) or 30.0))
+
+    def video_unfinished(self) -> bool:
+        """Whether a video a client still watches has audio from its playhead to the end that is not
+        transcribed yet (window_span() with no lookahead), so that the planner will want the model
+        again as soon as the viewer plays on (tend_model() keeps it). Watching means a sync within
+        --client-timeout (a paused tab syncs every few seconds), or within --idle-minutes where
+        --client-timeout is 0. A live stream is never finished, a video whose length is not known
+        yet not either. Not one its language paused or whose fetch failed: no window comes of those
+        until something changes. Audio before the playhead counts for nothing: a video started in the
+        middle is finished when it is transcribed from there to its end."""
+        timeout = float(getattr(self.args, "client_timeout", 30.0) or 0.0)
+        if timeout <= 0:
+            timeout = float(getattr(self.args, "idle_minutes", 30) or 30) * 60.0
+        now = time.time()
+        with self.lock:
+            sessions = list(self.sessions.values())
+        for s in sessions:
+            with s.lock:
+                if s.status == "error" or s.language_paused or now - s.last_sync > timeout:
+                    continue
+                if s.live or s.duration <= 0 or window_span(s, self.args, lookahead=0.0) is not None:
+                    return True
+        return False
 
     def audio_on_its_way(self) -> bool:
         """Whether a video a client synced within --client-timeout is fetching audio that a window
@@ -9356,7 +9385,8 @@ def parse_args(argv=None):
     p.add_argument("--idle-minutes", type=int, default=30, help="release decoded audio of videos not synced for this long")
     p.add_argument("--model-idle-minutes", type=minutes, default=MODEL_IDLE_MINUTES,
                    help="leave the model out of memory until a video needs transcribing, and free it again after this "
-                        "many minutes without anything to transcribe, so a server left running holds no model in GPU "
+                        "many minutes without anything to transcribe (a video still watched, paused or not, with audio "
+                        "left ahead keeps it), so a server left running holds no model in GPU "
                         f"memory while it hands out subtitles it already has (default {MODEL_IDLE_MINUTES:g}; 0 = load it at "
                         "the start and keep it). The AMD engine always keeps its model")
     p.add_argument("--retry-after", type=float, default=30.0, help="the longest wait between two attempts at a failed audio fetch (the waits start at 2 s and double; a permanent error is not retried), and the least time between two attempts to load a model that failed to download or load")

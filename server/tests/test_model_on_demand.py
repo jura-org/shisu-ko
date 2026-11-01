@@ -254,8 +254,94 @@ def test_audio_on_its_way_loads_the_model_beside_the_download_and_keeps_it(monke
     now[0] += 600
     s.last_sync = now[0]
     assert app.tend_model(False) is False and app.model is not None  # still downloading: kept
-    s.fetching = False
+    # The fetch ends on a video its cache covers to the end: nothing left for the model.
+    s.fetching, s.status, s.duration, s.covered = False, "ready", 60.0, [[0.0, 60.0]]
     assert app.tend_model(False) is True and app.model is None
+
+
+def test_a_watched_video_with_audio_left_keeps_the_model_through_a_pause(monkeypatch, tmp_path):
+    # The owner's log: the windows stopped while the viewer paused to mine, the idle minute passed,
+    # the model went, and it came back 53 s later for the next window of the same video.
+    now, _ = clock(monkeypatch)
+    app = make_app(monkeypatch, tmp_path, model_idle_minutes=1.0)
+    calls = fake_loader(monkeypatch)
+    app.tend_model(True)  # loaded for a window
+    # Cues to 1:20:13, the playhead at 1:17:10: 183 s ahead, past the lookahead, so no window is due.
+    s = watched(app, now[0], status="ready", duration=5400.0, covered=[[0.0, 4813.0]], want_t=4630.0)
+    for _ in range(10):  # ten minutes paused, the tab's heartbeat going on
+        now[0] += 60
+        s.last_sync = now[0]
+        assert app.tend_model(False) is False and app.model is not None
+    assert len(calls) == 1
+
+
+def test_the_model_goes_a_minute_after_the_video_is_transcribed_to_its_end(monkeypatch, tmp_path):
+    now, _ = clock(monkeypatch)
+    app = make_app(monkeypatch, tmp_path, model_idle_minutes=1.0)
+    fake_loader(monkeypatch)
+    app.tend_model(True)
+    s = watched(app, now[0], status="ready", duration=5400.0, covered=[[0.0, 5400.0]], want_t=5300.0)
+    now[0] += 59
+    s.last_sync = now[0]
+    assert app.tend_model(False) is False  # the idle minute is not over yet
+    now[0] += 2
+    s.last_sync = now[0]
+    assert app.tend_model(False) is True and app.model is None
+
+
+def test_a_video_started_in_the_middle_is_finished_once_transcribed_from_there_to_its_end(monkeypatch, tmp_path):
+    # The planner never goes back from where the viewer started: what lies before stays as it is.
+    now, _ = clock(monkeypatch)
+    app = make_app(monkeypatch, tmp_path, model_idle_minutes=1.0)
+    fake_loader(monkeypatch)
+    app.tend_model(True)
+    watched(app, now[0] + 61, status="ready", duration=5400.0, covered=[[1800.0, 5400.0]], want_t=5000.0)
+    now[0] += 61
+    assert app.tend_model(False) is True and app.model is None
+
+
+def test_the_model_goes_once_the_tab_stops_syncing(monkeypatch, tmp_path):
+    now, _ = clock(monkeypatch)
+    app = make_app(monkeypatch, tmp_path, model_idle_minutes=1.0)  # --client-timeout 30
+    fake_loader(monkeypatch)
+    app.tend_model(True)
+    s = watched(app, now[0], status="ready", duration=5400.0, covered=[[0.0, 4813.0]], want_t=4630.0)
+    now[0] += 61
+    s.last_sync = now[0] - 29
+    assert app.tend_model(False) is False  # a sync 29 s ago: still watched
+    s.last_sync = now[0] - 31
+    assert app.tend_model(False) is True and app.model is None
+
+
+def test_what_holds_the_model_and_what_does_not(monkeypatch, tmp_path):
+    now, _ = clock(monkeypatch)
+    for state, held in (({"live": True}, True),  # a live stream is never finished
+                        ({"duration": 0.0}, True),  # its length not known yet
+                        ({"language_paused": True}, False),  # no window comes while its language pauses it
+                        ({"status": "error"}, False)):  # nor while its fetch has failed
+        app = make_app(monkeypatch, tmp_path, model_idle_minutes=1.0)
+        fake_loader(monkeypatch)
+        app.tend_model(True)
+        base = dict(status="ready", duration=5400.0, covered=[[0.0, 4813.0]], want_t=4630.0)
+        watched(app, now[0] + 61, **{**base, **state})
+        now[0] += 61
+        assert (app.tend_model(False) is False) is held, state
+        assert (app.model is not None) is held, state
+
+
+def test_with_client_timeout_0_a_video_is_watched_for_the_idle_minutes(monkeypatch, tmp_path):
+    # --client-timeout 0 transcribes ahead for a video however long ago it synced; for the model's
+    # sake a video is left after --idle-minutes, as Fetcher.watched() has it.
+    now, _ = clock(monkeypatch)
+    app = make_app(monkeypatch, tmp_path, model_idle_minutes=1.0, client_timeout=0.0, idle_minutes=30)
+    fake_loader(monkeypatch)
+    app.tend_model(True)
+    s = watched(app, now[0], status="ready", duration=5400.0, covered=[[0.0, 4813.0]], want_t=4630.0)
+    now[0] += 29 * 60
+    assert app.tend_model(False) is False
+    now[0] += 2 * 60
+    assert app.tend_model(False) is True and app.model is None
+    assert s.last_sync < now[0] - 30 * 60
 
 
 def test_no_audio_is_on_its_way_from_a_paused_finished_or_failing_fetch(monkeypatch, tmp_path):
