@@ -241,9 +241,10 @@ filter, grouping and resampler) and keeps the int16: 453 MB, 1.1 GB at the peak,
 `audio_slice()` hands each window out as the very float32 `decode_audio()` gives (an int16 over
 32768 is exact in float32; `test_audio_track.py` compares the two on a real file where PyAV is
 installed). A clip cut from it (`make_clip()`'s fallback when the file is gone) takes the int16
-as it is. `decode_track()` also opens the file without `metadata_errors` where PyAV refuses it:
-PyAV 19 dropped the option, and faster-whisper 1.2.1's `decode_audio()`, which passes it, raises
-`TypeError` there; the tools take its `as_float` for the same reason.
+as it is. Both decoders run faster-whisper's steps through `run_decoding_steps()`, which opens
+the file without `metadata_errors` where PyAV refuses it: PyAV 19 dropped the option, and
+faster-whisper 1.2.1's `decode_audio()`, which passes it, raises `TypeError` there. The tools take
+`decode_audio_file()`: `decode_audio()` itself where it works, those steps where it does not.
 
 `old_record_sweep()` needs the model's language head: while there is none it yields False, a rest
 per step, and never loads one. `/sync`'s answers are unchanged, `/health` adds `model_loaded`.

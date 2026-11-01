@@ -302,9 +302,9 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   inline heredocs when running tools from a shell.
 - PyAV 19 dropped `av.open()`'s `metadata_errors`, which faster-whisper 1.2.1's `decode_audio()`
   still passes, so `decode_audio()` raises `TypeError` there (a fresh install gets PyAV 19: CI's
-  Python 3.12 and 3.13 did). The server and the tools decode through `decode_track()`, which runs
-  faster-whisper's own steps and opens the file without the option where PyAV refuses it;
-  never call `decode_audio()` directly.
+  Python 3.12 and 3.13 did). The server and the tools decode through `decode_audio_file()` (the
+  tools' float32) and `decode_track()` (the fetch's int16), which run faster-whisper's own steps on
+  a file opened without the option where PyAV refuses it; never call `decode_audio()` directly.
 - Hugging Face's xet transfer backend stalled on Windows; the server sets `HF_HUB_DISABLE_XET=1`.
   It also sets `HF_HUB_VERBOSITY=error` and `HF_HUB_DISABLE_SYMLINKS_WARNING=1` before the
   library is imported: the Hub's "set a HF_TOKEN" nag arrives as an `X-HF-Warning` header that

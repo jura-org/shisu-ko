@@ -102,7 +102,7 @@ def main(argv=None) -> int:
     import numpy as np
 
     # decode_audio()'s float32, through the server's decode, which also opens files with PyAV 19.
-    audio = np.ascontiguousarray(server.decode_track(src, as_float=True), dtype=np.float32)
+    audio = np.ascontiguousarray(server.decode_audio_file(src), dtype=np.float32)
     total = len(audio) / server.SAMPLE_RATE
     end = min(args.end or total, total)
     print(f"[{args.video_id}] {total:.0f}s decoded; dumping {args.start:.0f}-{end:.0f}s", flush=True)

@@ -3640,28 +3640,17 @@ def _decode_range(src: Path, start: float, end: float, rate: int = CLIP_RATE) ->
     return np.concatenate(chunks)
 
 
-def decode_track(path: Path, as_float: bool = False) -> np.ndarray:
-    """The whole audio track as faster-whisper's decode_audio() decodes it (16 kHz mono, through its
-    own resampler and frame grouping), kept as the int16 it is decoded to; `as_float` gives the
-    float32 decode_audio() returns instead (the tools, retranscribe.py and dump_words.py).
-
-    decode_audio() returns float32, twice the memory, and holds the int16 and two float32 copies
-    at once while it converts: a 4.1-hour stream measured 906 MB kept and 2.2 GB more at the peak,
-    against 453 MB and 1.1 GB this way. audio_slice() turns a window into float32 with the very
-    numbers decode_audio() gives (an int16 over 32768 is exact in float32). A faster-whisper
-    without those steps under these names gets decode_audio() itself, its float32 turned into int16
-    exactly. And decode_audio() opens the file with `metadata_errors`, which PyAV 19 no longer
-    takes (faster-whisper 1.2.1 still passes it): this opens it without where PyAV refuses it.
-    """
-    import importlib
-
-    # The submodule by its full name, as `from faster_whisper.audio import ...` takes it: from
-    # sys.modules when it is there, without the package (the tests stand in for the submodule alone).
-    fw_audio = importlib.import_module("faster_whisper.audio")
+def decoding_steps(fw_audio) -> Optional[list]:
+    """decode_audio()'s own steps in faster_whisper.audio (its frame filter, grouping and resampler),
+    or None for a faster-whisper that names them otherwise."""
     steps = [getattr(fw_audio, name, None) for name in ("_ignore_invalid_frames", "_group_frames", "_resample_frames")]
-    if not all(callable(step) for step in steps):
-        audio = fw_audio.decode_audio(str(path), sampling_rate=SAMPLE_RATE)
-        return audio if as_float else np.round(audio * 32768.0).astype(np.int16)
+    return steps if all(callable(step) for step in steps) else None
+
+
+def run_decoding_steps(steps, path) -> np.ndarray:
+    """The track's int16 samples at 16 kHz mono through decode_audio()'s own steps, on a file opened
+    with decode_audio()'s metadata_errors where PyAV takes it and without where it does not: PyAV 19
+    dropped the option, which faster-whisper 1.2.1's decode_audio() still passes and raises on."""
     import av
 
     ignore, group, resample = steps
@@ -3677,8 +3666,53 @@ def decode_track(path: Path, as_float: bool = False) -> np.ndarray:
     # decode_audio() does this too: the resampler's objects outlive it otherwise (faster-whisper #390).
     del resampler
     gc.collect()
-    track = np.concatenate(chunks).astype(np.int16, copy=False) if chunks else np.zeros(0, dtype=np.int16)
-    return track.astype(np.float32) / np.float32(32768.0) if as_float else track
+    return np.concatenate(chunks).astype(np.int16, copy=False) if chunks else np.zeros(0, dtype=np.int16)
+
+
+def decode_audio_file(path) -> np.ndarray:
+    """The whole track at 16 kHz mono float32, as faster-whisper's decode_audio() gives it, with any
+    PyAV the requirements let pip install.
+
+    decode_audio() opens the file with av.open(..., metadata_errors="ignore"), and PyAV 19 dropped
+    that option: faster-whisper 1.2.1 then raises TypeError on every track, and a fresh install gets
+    PyAV 19 (CI's Python 3.12 and 3.13 did). On that error alone this runs decode_audio()'s own
+    steps on a file opened without the option (run_decoding_steps()), and converts the s16 samples
+    as decode_audio() does, so the numbers are the ones it would give. A faster-whisper without
+    those steps under these names gets the error back. The tools (retranscribe.py, dump_words.py)
+    decode here, the server's fetch through decode_track(); nothing calls decode_audio() itself.
+    """
+    import importlib
+
+    # The submodule by its full name, as `from faster_whisper.audio import ...` takes it: from
+    # sys.modules when it is there, without the package (the tests stand in for the submodule alone).
+    fw_audio = importlib.import_module("faster_whisper.audio")
+    try:
+        return fw_audio.decode_audio(str(path), sampling_rate=SAMPLE_RATE)
+    except TypeError as exc:
+        steps = decoding_steps(fw_audio)
+        if "metadata_errors" not in str(exc) or steps is None:
+            raise
+    return run_decoding_steps(steps, path).astype(np.float32) / 32768.0
+
+
+def decode_track(path: Path) -> np.ndarray:
+    """The whole audio track as faster-whisper's decode_audio() decodes it (16 kHz mono, through its
+    own steps, run_decoding_steps()), kept as the int16 it is decoded to: the server's fetch.
+
+    decode_audio() returns float32, twice the memory, and holds the int16 and two float32 copies
+    at once while it converts: a 4.1-hour stream measured 906 MB kept and 2.2 GB more at the peak,
+    against 453 MB and 1.1 GB this way. audio_slice() turns a window into float32 with the very
+    numbers decode_audio() gives (an int16 over 32768 is exact in float32). A faster-whisper
+    without those steps under these names gets decode_audio_file()'s float32 turned into int16,
+    which is exact too.
+    """
+    import importlib
+
+    fw_audio = importlib.import_module("faster_whisper.audio")  # see decode_audio_file()
+    steps = decoding_steps(fw_audio)
+    if steps is None:
+        return np.round(decode_audio_file(path) * 32768.0).astype(np.int16)
+    return run_decoding_steps(steps, path)
 
 
 def make_clip(video_id: str, start: float, end: float, fmt: str, fallback_audio: Optional[np.ndarray]):

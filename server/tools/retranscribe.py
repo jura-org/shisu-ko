@@ -117,7 +117,7 @@ def run_video(app, worker, args, video_id: str, src: Path, out_dir: Path) -> dic
 
     t0 = time.time()
     # decode_audio()'s float32, through the server's decode, which also opens files with PyAV 19.
-    audio = np.ascontiguousarray(server.decode_track(src, as_float=True), dtype=np.float32)
+    audio = np.ascontiguousarray(server.decode_audio_file(src), dtype=np.float32)
     if args.limit_seconds > 0:
         audio = audio[: int(args.limit_seconds * server.SAMPLE_RATE)]
     s = server.Session(video_id=video_id, url="")

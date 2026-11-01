@@ -161,19 +161,17 @@ def test_decode_track_opens_without_metadata_errors_where_pyav_no_longer_takes_i
     track = server.decode_track(tmp_path / "a.webm")
     assert calls == [{"metadata_errors": "ignore"}, {}]  # decode_audio()'s options first, then none
     assert np.array_equal(track, chunk)
-    # The tools take decode_audio()'s float32 (as_float): from the same int16, exactly.
-    assert np.array_equal(server.decode_track(tmp_path / "a.webm", as_float=True), as_decode_audio_gives(chunk))
 
 
-def test_decode_track_as_float_is_decode_audio_itself_without_the_steps(monkeypatch, tmp_path):
-    # A faster-whisper that names its steps otherwise (and the tests' stand-ins for dump_words.py):
-    # decode_audio()'s own float32, untouched.
-    audio = np.linspace(-0.3, 0.3, RATE, dtype=np.float32)
+def test_decode_track_without_the_steps_is_decode_audio_s_float32_as_int16(monkeypatch, tmp_path):
+    # A faster-whisper that names its steps otherwise: decode_audio() itself (decode_audio_file()),
+    # its float32 turned into the int16 it came from, exactly.
+    track = pcm(1.0, seed=6)
     module = types.ModuleType("faster_whisper.audio")
-    module.decode_audio = lambda path, sampling_rate=RATE: audio
+    module.decode_audio = lambda path, sampling_rate=RATE: as_decode_audio_gives(track)
     monkeypatch.setitem(sys.modules, "faster_whisper.audio", module)
-    assert server.decode_track(tmp_path / "a.webm", as_float=True) is audio
-    assert server.decode_track(tmp_path / "a.webm").dtype == np.int16
+    decoded = server.decode_track(tmp_path / "a.webm")
+    assert decoded.dtype == np.int16 and np.array_equal(decoded, track)
 
 
 def test_decode_track_gives_decode_audio_s_numbers_on_a_real_file(tmp_path, monkeypatch):
