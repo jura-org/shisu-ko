@@ -47,6 +47,24 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   without `SHISUKO_NO_UPDATE` (`App.update_blocker()`); otherwise it answers
   `{ok: true, restarting: true, version}` and the process exits with `EXIT_UPDATE` (4). The
   server never spawns `update.py` and never downloads a release itself; the launcher does.
+- The model is in memory only while something needs it (`--model-idle-minutes`, default 1,
+  `model_on_demand()`): `start_app()` builds the server's App without one, and `App.tend_model()`,
+  asked by the transcriber after every `pick_work()`, loads it when a window waits or a watched
+  video's audio is on its way and frees it after `idle_limit()` without a window (the idle minutes,
+  never under two `--window`s, so a video playing keeps it). Until then every sync is answered from
+  the cues the server has, cached or in memory. Only the transcriber thread loads, runs or frees a
+  model, so no window ever runs on a model being freed. Every other App (`on_demand` False: the
+  tools', the tests') keeps the model it was given, None included, so a test's App with no model
+  never starts a load. `--model-idle-minutes 0` and the AMD engine load at the start and keep it:
+  the engine's crash guard counts the starts that load a model (a start that loaded none would
+  count as a crash), and on Windows no model may be freed there. On demand a switch loads the new
+  model at once and it then waits out `idle_limit()` like any, a failed switch reloads nothing
+  and never ends the server (the old model loads when a window needs it), a failed load
+  waits `--retry-after` by name (`load_failed`: a failed switch to another name overwrites
+  `model_error`), a fetch waiting between failed attempts is no audio on its way, and
+  `old_record_sweep()` waits for a model instead of loading one. Measured on the owner's laptop, an
+  idle model costs 4 GB of GPU memory and no power, and a load 3 to 7 s: `server-runtime.md`, "How
+  the model loads on demand".
 - Anki sync after mining is the server's job; no client calls AnkiConnect `sync`. The extension is
   a thin client of the server, and 0.20.0's sync in the extension needed the `alarms` permission
   (a timer dies with a stopped event page), which held 0.21.0 at the Chrome Web Store's review;

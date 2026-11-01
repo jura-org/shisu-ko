@@ -53,8 +53,8 @@ The demo recording in the README shows the expected behaviour: https://github.co
    The server is ready when it prints "Listening on http://127.0.0.1:8790".
    (--model base or --model tiny are faster still; Japanese accuracy is lower but subtitles
    appear the same way. On CPU a 20-second window takes roughly 5-15 s with "small". If setup's
-   download failed or was interrupted, the first start fetches the chosen model itself, without
-   the progress bar.)
+   download failed or was interrupted, the server fetches the chosen model itself when the first
+   video needs it, without the progress bar.)
 
 2. Install the extension: about:debugging#/runtime/this-firefox > Load Temporary Add-on > the zip.
 
@@ -64,8 +64,9 @@ The demo recording in the README shows the expected behaviour: https://github.co
 
 4. Open any YouTube video with Japanese speech, for example one from
    https://www.youtube.com/@cijapanese. A badge in the top-left corner of the player goes from
-   "Fetching audio..." through "Decoding audio..." to "Transcribing...", and the first subtitles
-   appear after 10-30 s on CPU. Hovering a subtitle pauses the video and shows a pickaxe at its
+   "Loading model small..." (the server loads its model when a video first needs it, and again
+   after a minute without one) and "Fetching audio..." through "Decoding audio..." to
+   "Transcribing...", and the first subtitles appear after 10-30 s on CPU. Hovering a subtitle pauses the video and shows a pickaxe at its
    right edge; moving the pointer away resumes it. Alt+Shift+L opens the transcript panel;
    clicking a timestamp seeks the video. Alt+Shift+H hides the badge in the top-left corner,
    whatever it says (the red "server offline" too), and shows it again; the popup's "Status
@@ -93,14 +94,14 @@ The demo recording in the README shows the expected behaviour: https://github.co
    starts with server.py's defaults: the model chosen at setup (config.json; "small" after
    step 1, already on disk) and --device auto, which falls back to the CPU on a machine without
    a GPU. The status line reaches "Server online" once server.log prints "Listening on
-   http://127.0.0.1:8790" (the server's output goes there when the button started it). Had
-   large-v3 been chosen at setup instead, a machine without a GPU would load its 3 GB on the
-   CPU, which takes minutes, longer than the 90 s the popup waits: the status line then falls
-   back to "Server offline" with the hint "No answer from the server after 90 s: look at
-   /home/<user>/.shisu-ko/server.log before starting it again; a first use downloads the model,
-   which takes minutes" and the button returns. Clicking it again is harmless: the host sees the
-   server's lock file and answers that it is already starting, so nothing is launched twice and
-   the popup waits again. The model can be changed in the popup's "Transcription model" field,
+   http://127.0.0.1:8790" (the server's output goes there when the button started it), within
+   seconds: the model loads when the first video needs it. Had large-v3 been chosen at setup
+   instead, that load would take minutes on a machine without a GPU, shown on the video as
+   "Loading model large-v3...". A server that does not answer within the 90 s the popup waits
+   makes the status line fall back to "Server offline" with the hint "No answer from the server
+   after 90 s: look at /home/<user>/.shisu-ko/server.log before starting it again" and the
+   button returns. Clicking it again is harmless: the host sees the server's lock file and
+   answers that it is already starting, so nothing is launched twice and the popup waits again. The model can be changed in the popup's "Transcription model" field,
    for example to "base", without restarting. Declining the permission only puts a hint on the
    status line.
 
@@ -112,7 +113,7 @@ The demo recording in the README shows the expected behaviour: https://github.co
    "Not now", and the toolbar icon gets a badge. "Update" sends POST /update to the server;
    the server exits, run.sh runs the project's own update.py (git fast-forward) and starts it
    again, and the status line reads "Updating server" until the new version answers (up to
-   two minutes, the model is loaded again). A server started without run.sh, or with
+   two minutes). A server started without run.sh, or with
    --no-update, answers 409 and the banner says it cannot update itself. With a checkout at
    the newest release and the extension of that release nothing but the result line shows. The
    listing gets releases by hand and can trail GitHub: when a release newer than <version>

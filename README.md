@@ -102,8 +102,8 @@ Last, where it finds an AMD graphics card, it offers the experimental AMD engine
 it downloads anything (see [AMD graphics cards](#amd-graphics-cards-experimental)); that step
 never makes the setup fail. When it says that everything is ready, close its window and start
 `run.cmd` / `run.sh`. The choice is kept even when the download fails or is stopped with Ctrl+C:
-the first start then downloads the chosen model itself, without the progress bar. The server is
-ready when it prints `Listening on http://127.0.0.1:8790`. Keep the window open while you watch; it
+the server then downloads the chosen model itself, without the progress bar, when a video first
+needs it. The server is ready when it prints `Listening on http://127.0.0.1:8790`. Keep the window open while you watch; it
 restarts itself if it ever crashes.
 
 **On Apple Silicon** the transcription runs on the Mac's own GPU, with no option to set:
@@ -138,7 +138,7 @@ The button passes no options: the server starts with its defaults (the model cho
 else large-v3, or large-v3-turbo on an
 Apple GPU; the GPU when there is one; the YouTube cookies of the browser chosen at setup, if
 any, see [YouTube sign-in](#youtube-sign-in)), exactly as a bare `run.cmd` / `run.sh` start
-would. The popup's model field switches the model once that default one is up; anything else you
+would. The popup's model field switches the model from the first video on; anything else you
 usually append to `run.cmd` / `run.sh` (`--device cpu`, `--js-runtime`, ...) needs a start by
 hand, see [Server options](#server-options). In Chrome the
 button is there for the [Chrome Web Store](https://chromewebstore.google.com/detail/shisu-ko/ecenifonpkaiccmmknpbllbebbfigjnm)
@@ -190,7 +190,8 @@ makes the server exit and its
 launcher take over: `run.cmd` / `run.sh` run `update.py` (a git clone is fast-forwarded, a zip
 install is replaced with the newest release) and start the server again, while the popup's
 status line reads "Updating server" until the new version answers, which can take up to two
-minutes because the restart loads the model again. A server that `run.cmd` / `run.sh` did not
+minutes (a server started with `--model-idle-minutes 0`, or on the AMD engine, also loads its
+model again before it answers). A server that `run.cmd` / `run.sh` did not
 start (Docker, Nix, `python server.py` by hand, or a `run.sh` from before 0.9.0 that has not been
 restarted since it updated itself; `run.cmd` picks its new loop up by itself) or that was started
 with `--no-update` cannot update itself; the banner then says the server was not started by
@@ -590,7 +591,8 @@ history bar takes the position on videos of about 20 minutes or more; on shorter
 The switch in the header is the master switch. Off means nothing happens on YouTube pages: no
 overlay, no requests to the server, no Anki watching, no word colours and no key handling, until
 it is switched on again (Alt+Shift+S flips it too). The status line beside the switch says whether the server
-answers, and with which model and device; while it does not answer, a **Start server** button
+answers, and with which model and device ("loads when a video needs it" while the server keeps the
+model out of memory, see `--model-idle-minutes`); while it does not answer, a **Start server** button
 on that line launches it with the server's default options (Firefox and the Chrome Web Store
 install, see [Start the server](#1-start-the-server)); the model field below takes effect once
 it is up. The same page opens as the add-on's preferences under Add-ons and themes > Shisu-ko.
@@ -664,6 +666,9 @@ the new model. Meanwhile the badge on the video says "Loading model X…"; a nam
 use shows "Shisu-ko: model X: …" with the reason, even with progress messages off, and the previous
 model keeps running. The popup mirrors this under the field: the status badge says "Loading model"
 during a switch, and the hint under the field carries the server's verdict on the name you typed.
+With the default `--model-idle-minutes` (not on the AMD engine) a swap that fails brings nothing
+back: the server stays up with the previous model's subtitles and loads that model again when a
+video needs it.
 With the experimental AMD engine on Windows the swap is a restart of the server (see
 [AMD graphics cards](#amd-graphics-cards-experimental)).
 
@@ -811,6 +816,7 @@ sends the YouTube cookies of the browser chosen there (see [YouTube sign-in](#yo
 | `--mine off` | Never write to Anki. The default `auto` gives a card Yomitan makes from a subtitle line that line's audio and picture, in the fields it left empty (and grows a sentence Yomitan cut short to the whole line), and takes the extension's Alt+Shift+M (see [Sentence mining](#sentence-mining)). Off by default inside the Docker image unless `--anki-url` is given |
 | `--mine-picture off` | A mined card gets the audio alone. The default `on` adds a frame of the video at the line, from YouTube's stream (one yt-dlp resolve per video, kept 4 hours) |
 | `--idle-minutes 30` | Release the decoded audio of a video nobody has synced for this long |
+| `--model-idle-minutes 1` | The default: the server starts without its model, loads it when a video needs transcribing (beside the audio download, so a new video waits little or no longer), and frees it again after this many minutes without anything to transcribe (never less than two `--window`s, so a playing video keeps it). Meanwhile it shows the subtitles it has already made, from its cache, and holds no model in GPU memory (until the first load none at all; after it, about 0.1 GB that the CUDA runtime keeps until the server ends); large-v3 holds about 4 GB and loads in 3 to 7 s on a laptop RTX 4070. A model switch loads the new model at once, which then waits out the idle minutes like any other. `0` loads the model at the start and keeps it, as before 0.28.0. The AMD engine always keeps its model |
 | `--retry-after 30` | The longest wait between two attempts at a failed audio fetch (the waits start at 2 s and double; a private or removed video is not retried), and the wait before a model name that failed to download or load is tried again |
 | `--js-runtime deno` | JavaScript runtime for yt-dlp: auto, node, deno, bun, or name:path |
 | `--allow-remote-ejs` | Lets yt-dlp fetch updated YouTube challenge-solver scripts from GitHub |
@@ -827,10 +833,11 @@ those servers are updated the way they were started.
 
 Endpoints, for anyone building on the server: `GET /health` (`model`, `default_model`,
 `model_loading`, `model_error` as `{model, error, names}` or null, where `names` lists every
-spelling of the failed model (aliases and repo id), `models` with the models downloaded so far,
-device, compute type, language), `POST /sync` (`{video_id, url, t, paused, since, model}`
-returns new cues and covered ranges plus `model` (the loaded one), `model_loading` (the name being
-prepared or swapped in) and `model_error`, the last judged for the name this request asked for
+spelling of the failed model (aliases and repo id), `model_loaded`, false while the model is out
+of memory (`--model-idle-minutes`), `models` with the models downloaded so far, device, compute
+type (null until a model has loaded), language), `POST /sync` (`{video_id, url, t, paused, since, model}`
+returns new cues and covered ranges plus `model` (the one in use, loaded or to load), `model_loading` (the name being
+prepared, swapped in or loaded for a video) and `model_error`, the last judged for the name this request asked for
 and null for any other; a model switch answers with a new session token, so the client starts
 over; for a live stream `t` is the stream's media clock, `getProgressState().current` in
 YouTube's player, and the reply carries `live: true`), `GET /clip?video_id=&start=&end=&format=mp3|wav`,
@@ -1113,7 +1120,7 @@ server does not send).
 | **Start server** says "launcher not registered" | Run `server\setup.cmd` (Windows) or `bash server/setup.sh` once, or start the server by hand once: `run.cmd` / `run.sh` register the launcher with Firefox and Chrome on every start. `run.cmd --check` prints "Start button launcher: Firefox registered at …; Chrome registered at …" once it is. The launcher is registered only for Firefox, Chrome (on Linux and macOS its stable channel; Beta, Dev and Canary keep folders of their own) and, on Linux, Chromium: in another browser with the store install (Brave, Edge, Chromium outside Linux) start the server by hand. |
 | **Start server** says "Allow Shisu-ko to talk to its launcher …" | The browser's permission prompt was declined. Click the button again and allow "Exchange messages with programs other than Firefox" (Firefox; the permission is also under Add-ons and themes > Shisu-ko > Permissions and data) or "Communicate with cooperating native applications" (Chrome). |
 | No **Start server** button in Chrome | The button is there for the [Chrome Web Store](https://chromewebstore.google.com/detail/shisu-ko/ecenifonpkaiccmmknpbllbebbfigjnm) install only: an unpacked build (`dist/chrome`, the release zip) has an id of its own, which the launcher is not registered for. Start `server\run.cmd` / `server/run.sh` by hand, or install from the store. |
-| **Start server** says "No answer from the server after 90 s" | The launch did not lead to a listening server, or the server is still downloading or loading its model: the button starts the defaults, so a first start downloads the default model unless setup already did (large-v3 is 3 GB, large-v3-turbo on a Mac about 1.6 GB), and a CPU load takes minutes. Look at the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS) before clicking again; clicking again while it loads is harmless, the launcher reports it as already starting. If the server is up but the popup still says offline, the server URL under Anki, clips and server points elsewhere. |
+| **Start server** says "No answer from the server after 90 s" | The launch did not lead to a listening server, or the server is still loading its model, which it does at the start only with `--model-idle-minutes 0` or the AMD engine (a CPU load takes minutes; by default the model, and a first download of it, wait for the first video, large-v3 being 3 GB and large-v3-turbo on a Mac about 1.6 GB). Look at the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS) before clicking again; clicking again while it loads is harmless, the launcher reports it as already starting. If the server is up but the popup still says offline, the server URL under Anki, clips and server points elsewhere. |
 | The banner or **Update** says the server cannot update itself | The server was not started by `run.cmd` / `run.sh` (Docker, Nix, `python server.py` by hand: it has no launcher to run `update.py` after the exit), was started with `--no-update` or `SHISUKO_NO_UPDATE`, or is a 0.8.0 server, which predates the button. The banner names the first of those causes whatever the actual one, because the server only reports that it cannot. Update it the way it was started: `docker compose build`, `nix run` with the new revision, or a plain restart of `run.cmd` / `run.sh`, which updates before every start. A `run.sh` that updated itself from before 0.9.0 keeps running its old loop, so its first server is refused too; restart `run.sh` once by hand (`run.cmd` reads its new loop as soon as it has updated and needs no restart). |
 | "The server restarted but still runs X; look at its window: update.py said why" | The launcher ran `update.py` but it could not update: local changes git would overwrite, a diverged branch, a detached HEAD, no network, or a release zip that could not be downloaded. Its message is in the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS); fix that and click **Update** again, or update by hand (`git pull`, or unpack the release). |
 | **Update** ends with "No answer from the server 120 s after the update" | The server exited for the update but nothing answered within two minutes: the new version is still loading its model (a CPU load takes minutes, and a new default model is downloaded first), or it did not start (the new version crashed, or `update.py` could not reinstall the requirements). Look at the server window (Windows) or `~/.shisu-ko/server.log` (Linux/macOS). A server that is still loading answers by itself in a while and the popup's status line follows; otherwise fix what the log says and click **Start server**, which is back on the status line. |
@@ -1126,7 +1133,7 @@ server does not send).
 | "Shisu-ko: model X: … not a CTranslate2/faster-whisper model" | The repo holds a PyTorch checkpoint, not converted weights. Convert it with `ct2-transformers-converter`, or pick a `*-ct2` or `faster-whisper` repo of the same model. |
 | "Shisu-ko: model kitsune-…: Kitsune models run on PyTorch, which is not installed" | Run `server/kitsune_setup.py` with the venv's Python (see [Kitsune-Transcribe models](#kitsune-transcribe-models)), or setup again picking a Kitsune model, then pick the model again. |
 | "Shisu-ko: model kitsune-…: its repo has no … folder" (or "no model at its root") | That size or precision is not published (yet). Pick another one. |
-| Server log says it has no model left and exits with code 3 | A switch failed and the previous model could not be reloaded either (usually GPU memory). The launcher restarts the server on its `--model`; fix or clear the name in the popup. |
+| Server log says it has no model left and exits with code 3 | A switch failed and the previous model could not be reloaded either (usually GPU memory). The launcher restarts the server on its `--model`; fix or clear the name in the popup. Only with `--model-idle-minutes 0` or the AMD engine: by default the server stays up and loads the previous model when a video needs it. |
 | Popup says "X was not found on this computer; the preset is used" or that a font name is letters, digits, spaces, dots, hyphens and underscores | Install the font, or type its family name exactly as the operating system lists it. Quotes, commas and other punctuation are refused; in both cases the preset font applies until the name resolves. |
 | "yt-dlp needs Node.js or Deno" | Install [Node.js](https://nodejs.org/) 20+ or [Deno](https://deno.com/), then restart the server. |
 | "YouTube asks for a sign-in" | Run `server\run.cmd --save-cookies-from-browser firefox` once (`server/run.sh` on Linux/macOS, `nix run . -- --save-cookies-from-browser firefox` with Nix), then start the server again, by hand or with **Start server** (see [YouTube sign-in](#youtube-sign-in)). In Docker, export a `cookies.txt` into the data folder and add `--cookies /data/cookies.txt`. |

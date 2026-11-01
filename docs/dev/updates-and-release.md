@@ -26,7 +26,7 @@ no `.xpi` handling; every GitHub release carries an `.xpi` AMO signed for self-d
   the `-unsigned.xpi`; https only; `published_at`). 404 is no release yet; 403/429 is "GitHub's
   rate limit is reached"; anything else that fails is an `error`, never a raise.
 - When (server). `start_update_check()` starts the `update-check` thread right after the HTTP
-  server is built (the model is loaded by then). `UpdateChecker` keeps
+  server is built (the model is loaded by then, unless it loads on demand). `UpdateChecker` keeps
   `~/.shisu-ko/update-check.json`: `{checked, error, failures, latest}`, `checked` the wall time
   (ms) of the last attempt, `latest` the release of the last attempt that went through (a
   failure leaves it). The next attempt is `UPDATE_CHECK_EVERY` (24 h) after a success and
