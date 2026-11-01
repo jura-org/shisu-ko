@@ -192,21 +192,27 @@ the viewer started), which a window fills, with a load, the next time the video 
   `model_loading` names it meanwhile: the content script says "Loading model X…", the popup's
   badge "Loading model". Loading while the audio downloads hides most of the load.
 - A model and a window: `model_used` moves on.
-- A model, no window for `idle_limit()` and no audio on its way: `free_model()` drops it, then
-  `gc.collect()`, `release_torch_memory()` (Kitsune) and `release_mlx_memory()` (MLX keeps freed
-  buffers in a cache of its own, in memory the browser on a Mac shares). `idle_limit()` is the
-  idle minutes, never under two windows: a video playing gets a window per `--window` of playback
-  (the planner tops the lookahead up one window at a time), so with the defaults (a minute, 30 s
-  windows) the model stays through playback and goes a minute after a pause or the video's end.
+- A model, and a video a client still watches (a sync within `--client-timeout`; a paused tab
+  syncs every few seconds) with audio from its playhead to its end not transcribed yet
+  (`video_unfinished()`: `window_span()` with no lookahead; a live stream, or a length not known
+  yet, counts too): kept, however long since the last window. A pause to look a word up or mine a
+  line outlasts the idle minute while minutes are transcribed ahead, and freeing the model then
+  only loaded it again when the viewer played on (the owner's log: freed, and loaded again 53 s
+  later for the same video). A video whose language paused it or whose fetch failed holds nothing.
+- A model, no window for `idle_limit()`, no audio on its way and no such video: `free_model()`
+  drops it, then `gc.collect()`, `release_torch_memory()` (Kitsune) and `release_mlx_memory()`
+  (MLX keeps freed buffers in a cache of its own, in memory the browser on a Mac shares). So the
+  model goes a minute after the video is transcribed from the playhead to its end, or after its
+  tab stopped syncing. `idle_limit()` is the idle minutes, never under two windows: a video
+  playing gets a window per `--window` of playback (the planner tops the lookahead up one window
+  at a time).
 
 `tend_model()` answers True after a load or a free, and the loop plans again: a window planned
 before a load of seconds may be stale. A load that fails sets `model_error` as a failed switch
 does, and the next try of that name waits `--retry-after` (`load_failed`, kept by name: a failed
 switch to another name overwrites `model_error`, and the two names would otherwise take turns
 failing as fast as the loop runs), with a half-second rest per round while a window waits. The
-server stays up and keeps answering with what it has. A paused video lets the model go too: the
-lookahead (`CUDA_LOOKAHEAD`, three minutes) holds far more than a load takes once the viewer plays
-on.
+server stays up and keeps answering with what it has.
 
 A switch (`switch_model_if_wanted()`) on demand is the swap of "How model switching works",
 whether a model is in memory or not, except that a failed one brings nothing back and never ends

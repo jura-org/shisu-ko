@@ -78,15 +78,16 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
 - The model is in memory only while something needs it (`--model-idle-minutes`, default 1,
   `model_on_demand()`): `start_app()` builds the server's App without one, and on the transcriber
   thread, the only one that loads, runs or frees a model, `App.tend_model()` loads it when a window
-  waits or a watched video's audio is on its way and frees it after `idle_limit()` without a
-  window (the idle minutes, never under two `--window`s). Until then every sync is answered from the
-  cues the server has. Every other App (`on_demand` False: the tools', the tests') keeps the model
-  it was given, None included; `--model-idle-minutes 0` and the AMD engine (its crash guard counts
-  starts that load a model, and Windows may never free one) load at the start and keep it. On
-  demand a switch loads the new model at once (it then waits out `idle_limit()` like any), a
-  failed switch reloads nothing and never ends the server, a failed load waits
-  `--retry-after` by name (`load_failed`), and `old_record_sweep()` waits for a model rather than
-  load one. Detail: `docs/dev/server-runtime.md`, "How the model loads on demand".
+  waits or a watched video's audio is on its way, keeps it while a watched video has audio left
+  ahead of its playhead (`video_unfinished()`, paused or not), and frees it after `idle_limit()`
+  without a window otherwise (the idle minutes, never under two `--window`s). Until then every sync
+  is answered from the cues the server has. Every other App (`on_demand` False: the tools', the
+  tests') keeps the model it was given, None included; `--model-idle-minutes 0` and the AMD engine
+  (its crash guard counts starts that load a model, and Windows may never free one) load at the
+  start and keep it. On demand a switch loads the new model at once (it then waits out
+  `idle_limit()` like any), a failed switch reloads nothing and never ends the server, a failed
+  load waits `--retry-after` by name (`load_failed`), and `old_record_sweep()` waits for a model
+  rather than load one. Detail: `docs/dev/server-runtime.md`, "How the model loads on demand".
 - A cue's word timings (`words`) and source (`src`, `"human"` on a line from the creator's
   subtitles) are opt-in on `/sync`: only a body with `"words": true` gets them, and the default
   response never changes (`without_words()`, `OPT_IN_CUE_FIELDS`). Their texts join to the cue's text
@@ -302,10 +303,11 @@ track arrived. `replay_cues.py --human` and `retranscribe.py --human` measure a 
 `LiveFollower`, `DashLiveSource`, `Session.live_audio`; live sessions are never cached. Model
 switching: `App.request_model()` and `App.switch_model_if_wanted()`, run before every window,
 never during one. The model on demand: `model_on_demand()`, `App.tend_model()` (after every
-`pick_work()`), `idle_limit()`, `audio_on_its_way()` (with `window_span()`, the planner's span
-before any audio), `load_on_demand()`, `free_model()`,
-`release_mlx_memory()`; a fetched track is int16 (`decode_track()`, faster-whisper's own decoding
-steps), and `audio_slice()` hands each window out as float32. Backends: `resolve_device()` decides `cuda` / `mlx` / `cpu` once and
+`pick_work()`), `idle_limit()`, `video_unfinished()`, `audio_on_its_way()` (with `window_span()`,
+the planner's span before any audio), `load_on_demand()`, `free_model()`, `release_mlx_memory()`;
+a fetched track is int16 (`decode_track()`, faster-whisper's own decoding steps), and
+`audio_slice()` hands each window out as float32.
+Backends: `resolve_device()` decides `cuda` / `mlx` / `cpu` once and
 `load_model()` builds either a `WhisperModel` or an `MlxWhisperModel`, which presents the same two
 methods over mlx-whisper; `server/mlx_beam.py` gives that path the beam search the library lacks.
 Kitsune models: `kitsune_name()`, `kitsune_download_plan()`, `load_kitsune_model()`, and in

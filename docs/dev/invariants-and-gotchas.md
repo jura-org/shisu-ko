@@ -50,8 +50,10 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
 - The model is in memory only while something needs it (`--model-idle-minutes`, default 1,
   `model_on_demand()`): `start_app()` builds the server's App without one, and `App.tend_model()`,
   asked by the transcriber after every `pick_work()`, loads it when a window waits or a watched
-  video's audio is on its way and frees it after `idle_limit()` without a window (the idle minutes,
-  never under two `--window`s, so a video playing keeps it). Until then every sync is answered from
+  video's audio is on its way, keeps it while a watched video, paused or not, has audio left ahead
+  of its playhead (`video_unfinished()`: a pause must not free it only to load it again when the
+  viewer plays on), and frees it after `idle_limit()` without a window otherwise (the idle minutes,
+  never under two `--window`s). Until then every sync is answered from
   the cues the server has, cached or in memory. Only the transcriber thread loads, runs or frees a
   model, so no window ever runs on a model being freed. Every other App (`on_demand` False: the
   tools', the tests') keeps the model it was given, None included, so a test's App with no model

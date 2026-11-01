@@ -1,6 +1,6 @@
 0.7.0 was the last version on this listing; 0.8.0 to 0.14.0 came out on GitHub only (https://github.com/Multysquid/shisu-ko/releases has every release's full notes). What changed since 0.7.0:
 
-- 0.28.0: the server loads its model only when a video needs it and frees it after an idle minute.
+- 0.28.0: the server loads its model only when a video needs it and frees it once the video is done.
 - 0.27.1: the server decodes a video's audio with PyAV 19 too, which a fresh install now gets.
 - 0.27.0: the phone portal keeps your watch history: a finished video leaves Up next for Watched. A resumed video's subtitles no longer freeze on iPhone.
 - 0.26.1: on an NVIDIA GPU the server transcribes 3 minutes ahead, not 15.
