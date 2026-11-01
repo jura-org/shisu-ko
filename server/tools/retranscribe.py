@@ -113,12 +113,11 @@ def count_drops(totals: dict, examples: list):
 
 
 def run_video(app, worker, args, video_id: str, src: Path, out_dir: Path) -> dict:
-    from faster_whisper.audio import decode_audio
-
     import numpy as np
 
     t0 = time.time()
-    audio = np.ascontiguousarray(decode_audio(str(src), sampling_rate=server.SAMPLE_RATE), dtype=np.float32)
+    # decode_audio()'s float32, through the server's decode, which also opens files with PyAV 19.
+    audio = np.ascontiguousarray(server.decode_audio_file(src), dtype=np.float32)
     if args.limit_seconds > 0:
         audio = audio[: int(args.limit_seconds * server.SAMPLE_RATE)]
     s = server.Session(video_id=video_id, url="")

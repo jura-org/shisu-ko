@@ -103,7 +103,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.27.0"
+VERSION = "0.27.1"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -3124,10 +3124,7 @@ class Fetcher:
             # milliseconds, so the first subtitles appear before the full decode finishes.
             if not have_preview:
                 self.make_preview(s, path)
-            from faster_whisper.audio import decode_audio
-
-            audio = decode_audio(str(path), sampling_rate=SAMPLE_RATE)
-            audio = np.ascontiguousarray(audio, dtype=np.float32)
+            audio = np.ascontiguousarray(decode_audio_file(path), dtype=np.float32)
             with s.lock:
                 s.audio = audio
                 s.duration = float(len(audio)) / SAMPLE_RATE
@@ -3609,6 +3606,44 @@ def _decode_range(src: Path, start: float, end: float, rate: int = CLIP_RATE) ->
     if not chunks:
         return np.zeros(0, dtype=np.int16)
     return np.concatenate(chunks)
+
+
+def decode_audio_file(path) -> np.ndarray:
+    """The whole track at 16 kHz mono float32, as faster-whisper's decode_audio() gives it, with any
+    PyAV the requirements let pip install.
+
+    decode_audio() opens the file with av.open(..., metadata_errors="ignore"), and PyAV 19 dropped
+    that option: faster-whisper 1.2.1 then raises TypeError on every track, and a fresh install gets
+    PyAV 19 (CI's Python 3.12 and 3.13 did). On that error alone this runs decode_audio()'s own
+    steps (its frame filter, grouping and resampler) on a file opened without the option, and
+    converts the s16 samples as decode_audio() does, so the numbers are the ones it would give. A
+    faster-whisper without those steps under these names gets the error back. The server's fetch
+    and the tools (retranscribe.py, dump_words.py) decode here; nothing calls decode_audio() itself.
+    """
+    import importlib
+
+    # The submodule by its full name, as `from faster_whisper.audio import ...` takes it: from
+    # sys.modules when it is there, without the package (the tests stand in for the submodule alone).
+    fw_audio = importlib.import_module("faster_whisper.audio")
+    try:
+        return fw_audio.decode_audio(str(path), sampling_rate=SAMPLE_RATE)
+    except TypeError as exc:
+        steps = [getattr(fw_audio, name, None) for name in ("_ignore_invalid_frames", "_group_frames", "_resample_frames")]
+        if "metadata_errors" not in str(exc) or not all(callable(step) for step in steps):
+            raise
+    import av
+
+    ignore, group, resample = steps
+    resampler = av.audio.resampler.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
+    chunks = []
+    with av.open(str(path), mode="r") as container:
+        for frame in resample(group(ignore(container.decode(audio=0)), 500000), resampler):
+            chunks.append(frame.to_ndarray().reshape(-1))
+    # decode_audio() does this too: the resampler's objects outlive it otherwise (faster-whisper #390).
+    del resampler
+    gc.collect()
+    samples = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.int16)
+    return samples.astype(np.float32) / 32768.0
 
 
 def make_clip(video_id: str, start: float, end: float, fmt: str, fallback_audio: Optional[np.ndarray]):
