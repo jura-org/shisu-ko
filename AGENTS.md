@@ -467,6 +467,10 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
   an access violation (exit code -1073741819), the warm-up having decoded without word timings.
   `safe_alignment_heads()` rewrites such a list from `model.bin`'s shape (`ct2_decoder_shape()`)
   before the load. Detail: `docs/dev/server-runtime.md`, "A converted model's word-timing heads".
+- The vertical docks set `text-orientation: upright`: Whisper writes digits, `?` and `!` in ASCII,
+  which `mixed` lays on their side, and the presets' Japanese fonts give `…`, `ー` and the brackets
+  their vertical forms. `text-transform: full-width` would turn only ASCII, but Chrome 152 still
+  lacks it, and a span for tate-chu-yoko would break `renderText()`'s one-span rule.
 - Hugging Face's xet backend stalled on Windows; the server sets `HF_HUB_DISABLE_XET=1`, plus
   `HF_HUB_VERBOSITY=error` and `HF_HUB_DISABLE_SYMLINKS_WARNING=1` before the import.
 - yt-dlp needs a JavaScript runtime (Deno preferred, Node 20+ works) for YouTube.

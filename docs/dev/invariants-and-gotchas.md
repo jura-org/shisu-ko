@@ -295,6 +295,13 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   `safe_alignment_heads()` rewrites such a list, from the decoder `ct2_decoder_shape()` reads in
   `model.bin`, to every head of the decoder's second half, CTranslate2's own default. See
   `server-runtime.md`, "A converted model's word-timing heads".
+- The vertical docks set `text-orientation: upright`. Whisper writes digits, `?` and `!` in ASCII
+  (in the cue cache about sixty times as often as `？`), and `mixed` lays those on their side. The
+  presets' Japanese fonts give `…`, `ー` and the brackets their vertical forms upright as well; a
+  Latin font a viewer puts in front can draw its own `…` across the column. `text-transform:
+  full-width` would turn ASCII alone, but Chrome 152 still lacks it, and setting two digits
+  side by side (tate-chu-yoko) needs a span of its own, which `renderText()`'s one-span rule leaves
+  out.
 - Hugging Face's xet transfer backend stalled on Windows; the server sets `HF_HUB_DISABLE_XET=1`.
   It also sets `HF_HUB_VERBOSITY=error` and `HF_HUB_DISABLE_SYMLINKS_WARNING=1` before the
   library is imported: the Hub's "set a HF_TOKEN" nag arrives as an `X-HF-Warning` header that

@@ -3259,6 +3259,16 @@ test("dockLayout hangs window-bottom from the viewport, centred on the video and
   assert.deepEqual([full.dock, full.outside], ["video-bottom", false]);
 });
 
+test("a vertical column stands every character upright, digits, ? and ! included", () => {
+  // Whisper writes 2024, ? and ! in ASCII, which text-orientation: mixed lays on their side.
+  const css = fs.readFileSync(path.join(ADDON, "content.css"), "utf8").replace(/\/\*[^]*?\*\//g, "");
+  const rule = css.split("}").find((block) => block.slice(0, block.lastIndexOf("{")).trim() === ".shisuko-subwrap.shisuko-vertical .shisuko-sub");
+  assert.ok(rule, "content.css has the vertical column's rule");
+  const declarations = rule.slice(rule.lastIndexOf("{") + 1).split(";").map((d) => d.replace(/\s+/g, " ").trim());
+  assert.ok(declarations.includes("writing-mode: vertical-rl"));
+  assert.ok(declarations.includes("text-orientation: upright"), declarations.join("; "));
+});
+
 test("dockLayout puts a side outside the video in vertical text, and inside when the room is short", () => {
   const { api } = loadContent();
   const right = plain(api.dockLayout("video-right", PLAYER, WIDE, { fontPx: 25 }));
