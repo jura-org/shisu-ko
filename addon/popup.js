@@ -20,18 +20,23 @@ const HEALTH_REFRESH_MS = 2000;
 // word-colour feature is on (see retryDecks).
 const DECKS_RETRY_MS = 30000;
 const OFFLINE_HINT = "start server/run.cmd or docker/up.cmd";
+// The status line's word for a model the server keeps out of memory until a video needs it
+// (/health's model_loaded false, server.py --model-idle-minutes).
+const MODEL_UNLOADED_TEXT = "loads when a video needs it";
 
-// The "Start server" button. The server answers /health only once its model is loaded, and a
-// cold start reads up to 3 GB of weights from disk: 10-40 s on a GPU, longer on a CPU, after the
-// launcher's own venv check, and a first use downloads them before that. The background owns the
-// launch and its 90 s window (START_WINDOW_MS there) and hands the popup the deadline; after it
-// the viewer is sent to the log instead of watching a badge that never changes, and told that the
-// server may still be on its way, so a second start waits for a look at the log. The launcher
-// names the log it opened (SHISUKO_HOME moves it); without one (Windows, where the server has a
-// window, or a launch the launcher did not make) the hint names the usual places.
+// The "Start server" button. A server that loads its model at the start (--model-idle-minutes 0,
+// the AMD engine) answers /health only once the model is loaded, and a cold start reads up to
+// 3 GB of weights from disk: 10-40 s on a GPU, longer on a CPU, after the launcher's own venv
+// check, and a first use downloads them before that; one that loads it on demand answers within
+// seconds. The background owns the launch and its 90 s window (START_WINDOW_MS there) and hands
+// the popup the deadline; after it the viewer is sent to the log instead of watching a badge that
+// never changes, and told that the server may still be on its way, so a second start waits for a
+// look at the log. The launcher names the log it opened (SHISUKO_HOME moves it); without one
+// (Windows, where the server has a window, or a launch the launcher did not make) the hint names
+// the usual places.
 function startNotUpHint(log) {
   const where = typeof log === "string" && log ? log : "its window (Windows) or ~/.shisu-ko/server.log";
-  return `No answer from the server after 90 s: look at ${where} before starting it again; a first use downloads the model, which takes minutes`;
+  return `No answer from the server after 90 s: look at ${where} before starting it again`;
 }
 const START_NOT_UP_HINT = startNotUpHint(null);
 // The launcher checks 127.0.0.1:8790 itself; when it saw a server there and this popup sees none,
@@ -573,6 +578,9 @@ function renderStatus() {
     cls = "badge ok";
     if (updateFlow.state === "done") evidence = `Updated to ${updateFlow.version}`;
     else if (updateFlow.state === "stale") evidence = updateFlow.detail;
+    // A server that frees its model when idle (--model-idle-minutes) says so; an older one says
+    // nothing, and its model is loaded.
+    else if (health.model_loaded === false) evidence = `${health.model} · ${health.device} · ${MODEL_UNLOADED_TEXT}`;
     else evidence = `${health.model} · ${health.device} · ${health.compute_type}`;
   } else if (launched) {
     word = "Starting server";

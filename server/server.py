@@ -16,9 +16,9 @@ live edge. Times are the stream's own media clock, which the extension reads fro
 player, so cues line up whatever latency the viewer is watching at.
 
 Endpoints
-  GET  /health   -> {ok, version, model, default_model, model_loading, model_error, models, device, compute_type,
-                     engine, language, launcher, latest, anki_sync: {state, last, error}}; latest is the
-                     update check's {version, url, xpi, published, checked, error} or null; ?decks=1 adds
+  GET  /health   -> {ok, version, model, default_model, model_loading, model_error, model_loaded, models, device,
+                     compute_type, engine, language, launcher, latest, anki_sync: {state, last, error}}; latest is
+                     the update check's {version, url, xpi, published, checked, error} or null; ?decks=1 adds
                      anki_decks: {ok, decks, seen, error}, Anki's deck names for the popup
   POST /sync     -> {ok, session, status, error, duration, title, live, covered, speech, cues, next, busy,
                      model, model_loading, model_error, heard, language_paused}; a body carrying the
@@ -33,6 +33,15 @@ Endpoints
                      run update.py and start it again; 409 {ok, error} when nothing would (Docker, Nix,
                      a hand start, --no-update, SHISUKO_NO_UPDATE). Extension and local non-browser
                      clients only: a loopback page may not restart the server (update_origin_allowed())
+
+With --model-idle-minutes above 0 (the default, 1) the model is not loaded at the start: the
+transcriber thread loads it when a video needs a window transcribed (or a watched video's audio is
+on its way), keeps it while a video a client watches has audio ahead of its playhead left to
+transcribe, paused or not, and frees it again after that many minutes without a window otherwise,
+so a server left running holds no model while it only hands out cues it already has, from the
+cache or from memory (the CUDA runtime keeps about 0.1 GB of GPU memory and 0.5 GB of RAM from the
+first load until the process ends).
+0 loads it at the start and keeps it, as before; so does the AMD engine, whatever the option says.
 
 With --update-check on (the default) a thread asks GitHub for the newest release once a day
 (UpdateChecker); the extension reads it from /health and makes no request of its own beyond the
@@ -104,7 +113,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.27.2"
+VERSION = "0.28.0"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -155,6 +164,13 @@ MLX_DEFAULT_MODEL = "large-v3-turbo"
 # The buffer ahead of the playhead only absorbs variation in how fast it refills.
 CUDA_LOOKAHEAD = 180.0  # an NVIDIA GPU refills at 4-13x real time: 3 minutes outlast any slowdown measured
 SLOW_LOOKAHEAD = 900.0  # MLX and the CPU refill near real time or slower: a pause is how the viewer gets ahead
+# --model-idle-minutes' default (App.tend_model()). Held in memory and idle, large-v3 costs about
+# 4 GB of GPU memory and, measured on an RTX 4070 Laptop GPU, no power the GPU did not draw without
+# it; loading it again takes 3 to 7 s there (2.9 GB of weights, under a second of warm-up), which
+# a new video spends fetching its audio anyway. A video playing never lets a minute pass without a
+# window (the planner tops the lookahead up a --window at a time), and a paused one with audio left
+# ahead keeps the model all the same (App.video_unfinished()).
+MODEL_IDLE_MINUTES = 1.0
 # Kitsune-Transcribe's Japanese students (kitsune_engine.py), by name: the repos as published, T-0.6B
 # (encoder-decoder, from Cohere Transcribe) and P-0.3B / P-0.1B (CTC, from Parakeet). Each holds the
 # training run's bf16 export at its root (the bare name) and each precision in a folder of its own,
@@ -2503,6 +2519,8 @@ class Session:
     title: str = ""
     duration: float = 0.0
     duration_hint: float = 0.0  # length reported by yt-dlp, used before the container is opened
+    # The whole track at 16 kHz: int16 from the fetch (decode_track(), 115 MB an hour), float32 from
+    # the tools' own decodes; audio_slice() hands out float32 either way.
     audio: Optional[np.ndarray] = None
     # (offset_seconds, samples): a short decode around the playhead that lets transcription start
     # before the whole track has been decoded. Dropped once `audio` holds everything.
@@ -2621,11 +2639,14 @@ class LiveAudio:
 
 
 def audio_slice(s: Session, start: float, end: float) -> Optional[np.ndarray]:
-    """Samples for [start, end): from the full decode, or from the preview while that is all there is."""
+    """Samples for [start, end), float32: from the full decode, or from the preview while that is all
+    there is. The fetch keeps the full decode as int16 (decode_track()), half the memory; its window
+    comes out as the float32 faster-whisper's decode_audio() would have given."""
     if s.live_audio is not None:
         return s.live_audio.slice(start, end)
     if s.audio is not None:
-        return s.audio[int(start * SAMPLE_RATE): int(end * SAMPLE_RATE)]
+        samples = s.audio[int(start * SAMPLE_RATE): int(end * SAMPLE_RATE)]
+        return samples.astype(np.float32) / np.float32(32768.0) if samples.dtype == np.int16 else samples
     if s.preview is None:
         return None
     offset, samples = s.preview
@@ -2696,12 +2717,12 @@ def lookahead_for(s: Session, args) -> float:
     return min(args.lookahead, LANGUAGE_PROBE_AHEAD) if args.lookahead > 0 else LANGUAGE_PROBE_AHEAD
 
 
-def plan_window(s: Session, args) -> Optional[tuple]:
-    """Pick the next [start, end) window to transcribe for a session, or None if idle."""
-    if s.live_audio is not None:
-        return plan_live_window(s, args)
-    if s.status != "ready" or (s.audio is None and s.preview is None) or s.duration <= 0:
-        return None
+def window_span(s: Session, args, lookahead: Optional[float] = None) -> Optional[tuple]:
+    """The [start, end) the planner takes next from what is covered, the playhead and the lookahead,
+    before any audio is looked at; None when nothing is due. plan_window() narrows it to the audio
+    there is, and App.audio_on_its_way() asks it whether a fetch will lead to a window at all.
+    `lookahead` 0 asks with no lookahead at all, whether any audio from the playhead to the end is
+    left to transcribe (App.video_unfinished()). Needs a known duration."""
     t = min(max(0.0, s.want_t), s.duration)
     ranges = planned_ranges(s)
     cov = find_covering(ranges, t)
@@ -2712,7 +2733,8 @@ def plan_window(s: Session, args) -> Optional[tuple]:
         start = cov[1]
         if start >= s.duration - 0.05:
             return None
-        lookahead = lookahead_for(s, args)
+        if lookahead is None:
+            lookahead = lookahead_for(s, args)
         if lookahead > 0 and start - t > lookahead:
             return None
         size = args.window
@@ -2720,6 +2742,19 @@ def plan_window(s: Session, args) -> Optional[tuple]:
     nxt = next_start_after(ranges, start + 0.01)
     if nxt is not None:
         end = min(end, nxt)
+    return start, end
+
+
+def plan_window(s: Session, args) -> Optional[tuple]:
+    """Pick the next [start, end) window to transcribe for a session, or None if idle."""
+    if s.live_audio is not None:
+        return plan_live_window(s, args)
+    if s.status != "ready" or (s.audio is None and s.preview is None) or s.duration <= 0:
+        return None
+    span = window_span(s, args)
+    if span is None:
+        return None
+    start, end = span
     if s.audio is None:
         # Only the preview exists: stay inside it, and leave anything outside for the full decode.
         offset, samples = s.preview
@@ -3129,7 +3164,7 @@ class Fetcher:
             # milliseconds, so the first subtitles appear before the full decode finishes.
             if not have_preview:
                 self.make_preview(s, path)
-            audio = np.ascontiguousarray(decode_audio_file(path), dtype=np.float32)
+            audio = decode_track(path)  # int16, half the memory of float32; audio_slice() converts a window
             with s.lock:
                 s.audio = audio
                 s.duration = float(len(audio)) / SAMPLE_RATE
@@ -3613,6 +3648,35 @@ def _decode_range(src: Path, start: float, end: float, rate: int = CLIP_RATE) ->
     return np.concatenate(chunks)
 
 
+def decoding_steps(fw_audio) -> Optional[list]:
+    """decode_audio()'s own steps in faster_whisper.audio (its frame filter, grouping and resampler),
+    or None for a faster-whisper that names them otherwise."""
+    steps = [getattr(fw_audio, name, None) for name in ("_ignore_invalid_frames", "_group_frames", "_resample_frames")]
+    return steps if all(callable(step) for step in steps) else None
+
+
+def run_decoding_steps(steps, path) -> np.ndarray:
+    """The track's int16 samples at 16 kHz mono through decode_audio()'s own steps, on a file opened
+    with decode_audio()'s metadata_errors where PyAV takes it and without where it does not: PyAV 19
+    dropped the option, which faster-whisper 1.2.1's decode_audio() still passes and raises on."""
+    import av
+
+    ignore, group, resample = steps
+    resampler = av.audio.resampler.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
+    chunks = []
+    try:
+        container = av.open(str(path), mode="r", metadata_errors="ignore")
+    except TypeError:
+        container = av.open(str(path), mode="r")  # PyAV 19 and later: no such option
+    with container:
+        for frame in resample(group(ignore(container.decode(audio=0)), 500000), resampler):
+            chunks.append(frame.to_ndarray().reshape(-1))
+    # decode_audio() does this too: the resampler's objects outlive it otherwise (faster-whisper #390).
+    del resampler
+    gc.collect()
+    return np.concatenate(chunks).astype(np.int16, copy=False) if chunks else np.zeros(0, dtype=np.int16)
+
+
 def decode_audio_file(path) -> np.ndarray:
     """The whole track at 16 kHz mono float32, as faster-whisper's decode_audio() gives it, with any
     PyAV the requirements let pip install.
@@ -3620,10 +3684,10 @@ def decode_audio_file(path) -> np.ndarray:
     decode_audio() opens the file with av.open(..., metadata_errors="ignore"), and PyAV 19 dropped
     that option: faster-whisper 1.2.1 then raises TypeError on every track, and a fresh install gets
     PyAV 19 (CI's Python 3.12 and 3.13 did). On that error alone this runs decode_audio()'s own
-    steps (its frame filter, grouping and resampler) on a file opened without the option, and
-    converts the s16 samples as decode_audio() does, so the numbers are the ones it would give. A
-    faster-whisper without those steps under these names gets the error back. The server's fetch
-    and the tools (retranscribe.py, dump_words.py) decode here; nothing calls decode_audio() itself.
+    steps on a file opened without the option (run_decoding_steps()), and converts the s16 samples
+    as decode_audio() does, so the numbers are the ones it would give. A faster-whisper without
+    those steps under these names gets the error back. The tools (retranscribe.py, dump_words.py)
+    decode here, the server's fetch through decode_track(); nothing calls decode_audio() itself.
     """
     import importlib
 
@@ -3633,22 +3697,30 @@ def decode_audio_file(path) -> np.ndarray:
     try:
         return fw_audio.decode_audio(str(path), sampling_rate=SAMPLE_RATE)
     except TypeError as exc:
-        steps = [getattr(fw_audio, name, None) for name in ("_ignore_invalid_frames", "_group_frames", "_resample_frames")]
-        if "metadata_errors" not in str(exc) or not all(callable(step) for step in steps):
+        steps = decoding_steps(fw_audio)
+        if "metadata_errors" not in str(exc) or steps is None:
             raise
-    import av
+    return run_decoding_steps(steps, path).astype(np.float32) / 32768.0
 
-    ignore, group, resample = steps
-    resampler = av.audio.resampler.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
-    chunks = []
-    with av.open(str(path), mode="r") as container:
-        for frame in resample(group(ignore(container.decode(audio=0)), 500000), resampler):
-            chunks.append(frame.to_ndarray().reshape(-1))
-    # decode_audio() does this too: the resampler's objects outlive it otherwise (faster-whisper #390).
-    del resampler
-    gc.collect()
-    samples = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.int16)
-    return samples.astype(np.float32) / 32768.0
+
+def decode_track(path: Path) -> np.ndarray:
+    """The whole audio track as faster-whisper's decode_audio() decodes it (16 kHz mono, through its
+    own steps, run_decoding_steps()), kept as the int16 it is decoded to: the server's fetch.
+
+    decode_audio() returns float32, twice the memory, and holds the int16 and two float32 copies
+    at once while it converts: a 4.1-hour stream measured 906 MB kept and 2.2 GB more at the peak,
+    against 453 MB and 1.1 GB this way. audio_slice() turns a window into float32 with the very
+    numbers decode_audio() gives (an int16 over 32768 is exact in float32). A faster-whisper
+    without those steps under these names gets decode_audio_file()'s float32 turned into int16,
+    which is exact too.
+    """
+    import importlib
+
+    fw_audio = importlib.import_module("faster_whisper.audio")  # see decode_audio_file()
+    steps = decoding_steps(fw_audio)
+    if steps is None:
+        return np.round(decode_audio_file(path) * 32768.0).astype(np.int16)
+    return run_decoding_steps(steps, path)
 
 
 def make_clip(video_id: str, start: float, end: float, fmt: str, fallback_audio: Optional[np.ndarray]):
@@ -3665,7 +3737,10 @@ def make_clip(video_id: str, start: float, end: float, fmt: str, fallback_audio:
             log.warning("[%s] clip decode from the source file failed (%s); using the 16 kHz copy", video_id, exc)
     if samples is None and fallback_audio is not None:
         a, b = int(start * SAMPLE_RATE), int(end * SAMPLE_RATE)
-        return encode_clip(fallback_audio[a:b], fmt)
+        part = fallback_audio[a:b]
+        if part.dtype == np.int16 and len(part):
+            return _encode_clip(part, SAMPLE_RATE, fmt)  # the fetch's decode (decode_track()) is int16 already
+        return encode_clip(part, fmt)
     if samples is None or len(samples) == 0:
         raise RuntimeError("no audio available for this range")
     return _encode_clip(samples, rate, fmt)
@@ -3878,6 +3953,8 @@ class Transcriber(threading.Thread):
                 if self.app.switch_model_if_wanted():
                     continue
                 picked = self.app.pick_work()
+                if self.app.tend_model(picked is not None):
+                    continue  # a model was loaded or freed, or the window waits for one: plan again
                 if picked is None:
                     if next(self.app.sweep, False) is False:  # idle: one step of the sweep, else rest
                         time.sleep(0.15)
@@ -6424,12 +6501,24 @@ def start_update_check(args) -> Optional[UpdateChecker]:
 # --------------------------------------------------------------------------- application
 
 class App:
-    def __init__(self, args, model, device: str, compute_type: str, model_name: Optional[str] = None,
-                 sweep: bool = False):
+    def __init__(self, args, model, device: str, compute_type: Optional[str], model_name: Optional[str] = None,
+                 sweep: bool = False, on_demand: bool = False):
         self.args = args
         self.model = model
         self.device = device
         self.compute_type = compute_type
+        # main()'s App under --model-idle-minutes (start_app()): the model loads when a window needs
+        # it and is freed after that many minutes without one (tend_model()). Every other App, the
+        # tools' and the tests', and the server's under 0 or the AMD engine, keeps the model it was
+        # given, None included.
+        self.on_demand = on_demand
+        self.model_idle = max(0.0, float(getattr(args, "model_idle_minutes", 0) or 0)) * 60.0
+        self.model_used = time.time()  # the last window planned, or the last load: the idle minutes run from it
+        # The folder the current model's files came from, for its next load (None: by name, as at a
+        # start), and when a load on demand last failed, by name: each name waits --retry-after
+        # before the next (load_on_demand()), whatever model_error has reported since.
+        self.model_path: Optional[str] = None
+        self.load_failed: dict = {}
         # The operator's --lookahead holds whatever runs; without one it follows the loaded model's
         # backend, which a switch or a CPU fallback can change (settle_lookahead()).
         self.lookahead_given = getattr(args, "lookahead", None) is not None
@@ -6473,10 +6562,12 @@ class App:
                 "model_loading": self.model_loading,
                 "model_error": ({"model": error[0], "error": error[1], "names": model_spellings(error[0])}
                                 if error else None),
+                # False while the model is not in memory (--model-idle-minutes): it loads when a video needs it.
+                "model_loaded": self.model is not None,
                 "models": downloaded_models(),
                 "device": self.device,
-                "compute_type": self.compute_type,
-                "engine": "kitsune" if getattr(self.model, "family", None) else "whisper",
+                "compute_type": self.compute_type,  # None until a model has loaded
+                "engine": self.engine_name(),
             }
         watcher = self.anki_watcher
         out = {"ok": True, "version": VERSION, **state, "language": self.args.language,
@@ -6487,6 +6578,13 @@ class App:
             out["anki_decks"] = (self.decks.deck_names() if self.decks is not None
                                  else {"ok": False, "error": DECK_OFF_TEXT, "seen": None, "offline": False})
         return out
+
+    def engine_name(self) -> str:
+        """/health's `engine`: the loaded model's, else the one its name (or the operator's folder) names."""
+        if self.model is not None:
+            return "kitsune" if getattr(self.model, "family", None) else "whisper"
+        folder = operator_folder(self.args, self.model_name)
+        return "kitsune" if is_kitsune_model_named(self.model_name) or is_kitsune_folder(folder) else "whisper"
 
     def update_blocker(self) -> Optional[str]:
         """Why POST /update would achieve nothing, or None when run.cmd / run.sh would act on the exit.
@@ -6570,6 +6668,11 @@ class App:
         server exits with code 3 so the launcher restarts it with the default. With the AMD engine
         on Windows the swap is a restart instead (restart_for_model()), refused before its download
         when nothing would start the server again (restart_blocker()).
+
+        On demand (--model-idle-minutes) the swap is the same whether a model is in memory or not,
+        but a failed one brings nothing back and never ends the server: `model_name` and the
+        sessions stay as they were, and the old model loads again when a window needs it
+        (tend_model()).
         """
         with self.lock:
             wanted, previous = self.wanted_model, self.model_name
@@ -6623,14 +6726,16 @@ class App:
                 self.model_failed_at = time.time()
                 if self.wanted_model == wanted:
                     self.wanted_model = previous  # nothing retries on its own: the client has to ask again
-                self.model_loading = previous
-            self.reload_model(previous)
+                self.model_loading = None if self.on_demand else previous
+            if not self.on_demand:
+                self.reload_model(previous)
             return False
         with self.lock:
             self.model, self.device, self.compute_type = loaded
-            self.model_name = wanted
+            self.model_name, self.model_path = wanted, prepared[1]
             self.model_loading = None
             self.model_error = None
+        self.model_used = time.time()
         self.settle_lookahead()
         self.restart_sessions()
         return True
@@ -6711,6 +6816,149 @@ class App:
             self.model, self.device, self.compute_type = loaded
             self.model_loading = None
         self.settle_lookahead()
+
+    def tend_model(self, work: bool) -> bool:
+        """Load the model when something needs it, free it when nothing has for --model-idle-minutes.
+
+        The transcriber asks this between windows, with whether a window is waiting (`work`); only
+        an App made with on_demand (main()'s, start_app()) does anything here, every other keeps
+        the model it was given. Needed means a window waiting, or a video a client watches whose
+        audio is on its way (audio_on_its_way()), so that the load runs beside the download instead
+        of after it. Kept, once loaded, while a video a client still watches has audio ahead of its
+        playhead left to transcribe (video_unfinished()), paused or not: the lookahead keeps minutes
+        transcribed ahead, so a pause to look a word up or mine a line outlasts the idle minute, and
+        freeing the model then only loads it again when the viewer plays on. Not needed means none
+        of these, for idle_limit() since the last window: then the model goes, and the GPU memory
+        with it, and the server answers from the cues it has, cached or in memory, until a video
+        needs it again: a minute after a video is transcribed to its end, or its tab closed.
+
+        True when the loop is to plan again: a model was loaded or freed, or a window waits for
+        one that cannot load yet (a failure under --retry-after), after a short rest.
+        """
+        if not self.on_demand:
+            return False
+        if self.model is not None:
+            if work:
+                self.model_used = time.time()
+                return False
+            if (time.time() - self.model_used < self.idle_limit() or self.audio_on_its_way()
+                    or self.video_unfinished()):
+                return False
+            self.free_model()
+            return True
+        if not work and not self.audio_on_its_way():
+            return False
+        if self.load_on_demand():
+            return True
+        if work:
+            time.sleep(0.5)
+            return True
+        return False
+
+    def idle_limit(self) -> float:
+        """Seconds without a window after which tend_model() frees the model: --model-idle-minutes,
+        but never under two windows. A video playing gets a window per --window of playback (the
+        planner tops the lookahead up one window at a time), so a longer --window must not see its
+        model freed and loaded again between two of them."""
+        return max(self.model_idle, 2.0 * float(getattr(self.args, "window", 30.0) or 30.0))
+
+    def video_unfinished(self) -> bool:
+        """Whether a video a client still watches has audio from its playhead to the end that is not
+        transcribed yet (window_span() with no lookahead), so that the planner will want the model
+        again as soon as the viewer plays on (tend_model() keeps it). Watching means a sync within
+        --client-timeout (a paused tab syncs every few seconds), or within --idle-minutes where
+        --client-timeout is 0. A live stream is never finished, a video whose length is not known
+        yet not either. Not one its language paused or whose fetch failed: no window comes of those
+        until something changes. Audio before the playhead counts for nothing: a video started in the
+        middle is finished when it is transcribed from there to its end."""
+        timeout = float(getattr(self.args, "client_timeout", 30.0) or 0.0)
+        if timeout <= 0:
+            timeout = float(getattr(self.args, "idle_minutes", 30) or 30) * 60.0
+        now = time.time()
+        with self.lock:
+            sessions = list(self.sessions.values())
+        for s in sessions:
+            with s.lock:
+                if s.status == "error" or s.language_paused or now - s.last_sync > timeout:
+                    continue
+                if s.live or s.duration <= 0 or window_span(s, self.args, lookahead=0.0) is not None:
+                    return True
+        return False
+
+    def audio_on_its_way(self) -> bool:
+        """Whether a video a client synced within --client-timeout is fetching audio that a window
+        will follow (tend_model()): the planner wants one at the playhead or within the lookahead
+        (window_span()), or the video's length is not known yet. A cached video whose cues reach
+        past the lookahead fetches its audio all the same and wants no model for it. Not one its
+        language paused, nor one waiting between the attempts of a failed fetch: the fetch thread
+        holds `fetching` through those waits (Fetcher.fetch()), however long the client stays."""
+        timeout = float(getattr(self.args, "client_timeout", 30.0) or 0.0)
+        now = time.time()
+        with self.lock:
+            sessions = list(self.sessions.values())
+        for s in sessions:
+            with s.lock:
+                if not s.fetching or s.status == "error" or s.language_paused:
+                    continue
+                if timeout > 0 and now - s.last_sync > timeout:
+                    continue
+                if not s.live and s.duration > 0:
+                    span = window_span(s, self.args)
+                    if span is None or span[1] - span[0] < 1.5:  # nothing due, or a gap plan_window() covers without a decode
+                        continue
+                return True
+        return False
+
+    def load_on_demand(self) -> bool:
+        """Load the current model for tend_model(): False without a try while its last failed load
+        here is under --retry-after, else True, loaded or not.
+
+        The wait is kept by name (`load_failed`), apart from model_error, which a failed switch to
+        another name overwrites: else this name and that one would take turns failing as fast as
+        the loop runs. A failure is reported as a failed switch is, and the server stays up. The
+        operator's --model loads as at a start; any other name comes through download_model_files()
+        first (a client's name never reaches WhisperModel() as it came).
+        """
+        with self.lock:
+            name, path = self.model_name, self.model_path
+            failed = self.load_failed.get(name)
+            if failed is not None and time.time() - failed < getattr(self.args, "retry_after", 30.0):
+                return False
+            if self.model_error is not None and self.model_error[0] == name:
+                self.model_error = None  # a fresh attempt: the old verdict would be reported beside it
+            self.model_loading = name
+        log.info("Loading the model '%s': a video needs it", name)
+        try:
+            if path is None and name != self.default_model:
+                path = download_model_files(name, self.device)
+            loaded = load_model(self.args, name, path=path)
+        except Exception as exc:  # noqa: BLE001
+            log.error("Could not load the model '%s': %s", name, exc)
+            with self.lock:
+                self.model_error = (name, friendly_model_error(exc, name))
+                self.model_failed_at = self.load_failed[name] = time.time()
+                self.model_loading = None
+            return True
+        with self.lock:
+            self.model, self.device, self.compute_type = loaded
+            self.model_path = path
+            self.model_loading = None
+            self.load_failed.pop(name, None)
+        self.model_used = time.time()
+        self.settle_lookahead()
+        return True
+
+    def free_model(self) -> None:
+        """Let the model go after the idle minutes (tend_model()); it loads again when a window needs
+        it. The transcriber thread alone calls this, as it alone runs the model."""
+        idle = time.time() - self.model_used
+        with self.lock:
+            self.model = None
+        gc.collect()  # CTranslate2 gives the GPU memory back once the last reference is gone
+        release_torch_memory()  # PyTorch (a Kitsune model) keeps it cached until asked
+        release_mlx_memory()  # and so does MLX, in memory the browser on a Mac shares
+        log.info("Freed the model '%s' after %.0f s without a window to transcribe; it loads again when a "
+                 "video needs it", self.model_name, idle)
 
     def settle_lookahead(self) -> None:
         """Set args.lookahead, which every planner reads, to the default for the backend now loaded,
@@ -7108,8 +7356,12 @@ class App:
         on disk. Any other is rewritten with the marker, one with no such range without reading audio.
         Left as they are: records of another model or language, written with --lyrics off
         (load_cache() gives those back) or paused, all of them under --lyrics off, one with ranges but
-        no audio on disk (a recheck never downloads), and one whose video a session holds by then."""
+        no audio on disk (a recheck never downloads), and one whose video a session holds by then.
+        While the model is freed (--model-idle-minutes) the sweep waits for it, a rest per step: it
+        never loads one itself."""
         for path in sorted(CACHE_DIR.glob("*.cues.json")):
+            while self.on_demand and self.model is None:
+                yield False
             video_id = path.name[:-len(".cues.json")]
             try:
                 data, audio = json.loads(path.read_text(encoding="utf-8")), find_cached_audio(video_id)
@@ -7120,6 +7372,8 @@ class App:
                 ranges, rescue = unheard_ranges(data["covered"], data["speech"], data["cues"]), False
                 probe = Session(video_id, "")  # what choose_path() learns of the video stays out of live sessions
                 for lo, hi, heard in ranges if audio is not None else ():
+                    while self.on_demand and self.model is None:
+                        yield False
                     samples = _decode_range(audio, lo, hi, rate=SAMPLE_RATE).astype(np.float32) / 32768.0
                     rescue = self.transcriber.choose_path(probe, samples, heard, lo, hi) != (False, [])
                     yield
@@ -8165,6 +8419,22 @@ def release_torch_memory() -> None:
             pass
 
 
+def release_mlx_memory() -> None:
+    """Give a freed MLX model's memory back to the system; MLX keeps freed buffers in a cache of its
+    own otherwise. mx.clear_cache() in current MLX, mx.metal.clear_cache() in older ones."""
+    mx = sys.modules.get("mlx.core")
+    if mx is None:
+        return
+    for owner in (mx, getattr(mx, "metal", None)):
+        clear = getattr(owner, "clear_cache", None)
+        if callable(clear):
+            try:
+                clear()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+
+
 def friendly_model_error(exc: BaseException, name: str) -> str:
     """A short reason for the popup; huggingface_hub's exceptions run to several lines with request ids."""
     msg = str(exc) or exc.__class__.__name__
@@ -8596,14 +8866,31 @@ def take_next_model(path: Path) -> Optional[str]:
     return canonical_model_name(name) if valid_model_name(name) else None
 
 
+def model_on_demand(args) -> bool:
+    """Whether this start leaves the model out of memory until a video needs it (--model-idle-minutes
+    above 0, App.tend_model()). Never with the AMD engine: its crash guard counts the starts that
+    load a model (count_rocm_start()), and on Windows no model may be freed there (KEPT_MODELS)."""
+    return float(getattr(args, "model_idle_minutes", 0) or 0) > 0 and not ROCM_ACTIVE
+
+
 def start_app(args) -> "App":
     """Load this start's model and build the App around it; ends the process with code 2 when none loads.
+
+    Under --model-idle-minutes (model_on_demand()) nothing loads here: the App starts without a
+    model, on the backend resolve_device() names, and its transcriber loads one when a video needs
+    it; a model that does not load then is reported as a failed switch is, and the server stays up.
 
     With the AMD engine on Windows a model switch is a restart (App.restart_for_model()), and the
     model it named is this start's. Its files come from download_model_files(), as in a switch, so
     that a name from the client never reaches WhisperModel() as a folder. When it does not load,
     the server starts with --model instead and reports the failure, as a failed switch does.
     """
+    if model_on_demand(args):
+        log.info("The model '%s' loads when a video needs it and is freed after %g minutes without one "
+                 "(--model-idle-minutes; 0 keeps it loaded)", args.model, args.model_idle_minutes)
+        return App(args, None, resolve_device(args.device), None, sweep=True, on_demand=True)
+    if ROCM_ACTIVE and float(getattr(args, "model_idle_minutes", 0) or 0) > 0:
+        log.info("The AMD engine keeps its model loaded from the start (--model-idle-minutes does not apply to it)")
     wanted = take_next_model(NEXT_MODEL_PATH) if rocm_on_windows() else None
     failed = None
     if wanted is not None and wanted != canonical_model_name(args.model):
@@ -9136,6 +9423,14 @@ def port_number(text: str) -> int:
     return value
 
 
+def minutes(text: str) -> float:
+    """--model-idle-minutes' type: a finite number of minutes, 0 or more."""
+    value = float(text)
+    if not math.isfinite(value) or value < 0:
+        raise argparse.ArgumentTypeError(f"{text} is not a number of minutes (0 or more)")
+    return value
+
+
 def anki_url(text: str) -> str:
     """--anki-url's type: AnkiConnect's http:// address."""
     parts = urlsplit(text)
@@ -9203,6 +9498,12 @@ def parse_args(argv=None):
     p.add_argument("--max-cue-seconds", type=float, default=7.0)
     p.add_argument("--min-cue-seconds", type=float, default=0.8, help="cues shorter than this are extended or merged")
     p.add_argument("--idle-minutes", type=int, default=30, help="release decoded audio of videos not synced for this long")
+    p.add_argument("--model-idle-minutes", type=minutes, default=MODEL_IDLE_MINUTES,
+                   help="leave the model out of memory until a video needs transcribing, and free it again after this "
+                        "many minutes without anything to transcribe (a video still watched, paused or not, with audio "
+                        "left ahead keeps it), so a server left running holds no model in GPU "
+                        f"memory while it hands out subtitles it already has (default {MODEL_IDLE_MINUTES:g}; 0 = load it at "
+                        "the start and keep it). The AMD engine always keeps its model")
     p.add_argument("--retry-after", type=float, default=30.0, help="the longest wait between two attempts at a failed audio fetch (the waits start at 2 s and double; a permanent error is not retried), and the least time between two attempts to load a model that failed to download or load")
     p.add_argument("--client-timeout", type=float, default=30.0, help="stop transcribing ahead for a video whose tab has not synced for this many seconds (0 = never stop)")
     p.add_argument("--cpu-threads", type=int, default=0)

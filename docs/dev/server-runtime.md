@@ -1,6 +1,6 @@
 # Server runtime: live streams, models, the Apple GPU, the Start button, the update step, the Anki sync
 
-The parts of the server that are not cue building. Read the matching section before changing `LiveFollower`, `switch_model_if_wanted()`, the Kitsune engine (`server/kitsune_engine.py`, `load_kitsune_model()`, `server/kitsune_setup.py`), `server/native_host.py`, `server/update.py`, `POST /update`, the launchers, `AnkiWatcher`, the experimental AMD engine (`rocm_engine()`, `server/amd_setup.py`) or any way out of the server process (`hard_exit()`, `finish()`).
+The parts of the server that are not cue building. Read the matching section before changing `LiveFollower`, `switch_model_if_wanted()`, `tend_model()` (the model on demand), the Kitsune engine (`server/kitsune_engine.py`, `load_kitsune_model()`, `server/kitsune_setup.py`), `server/native_host.py`, `server/update.py`, `POST /update`, the launchers, `AnkiWatcher`, the experimental AMD engine (`rocm_engine()`, `server/amd_setup.py`) or any way out of the server process (`hard_exit()`, `finish()`).
 
 ## How live streams work
 
@@ -60,13 +60,15 @@ runs while a window is being transcribed. It is a small state machine over `want
    if even that fails the server has no model left and calls `hard_exit(3)` (`os._exit(3)`
    except with the AMD engine on Windows) so the launcher restarts it on `--model`. With the AMD
    engine on Windows this step is a restart instead, since freeing a model can hang there: see
-   "A model switch on Windows" under "How the AMD engine works".
+   "A model switch on Windows" under "How the AMD engine works". On demand
+   (`--model-idle-minutes`) a failure reloads nothing and never exits: see "How the model loads
+   on demand".
 
 `restart_session()` clears cues, covered ranges, speech and `seg_next`, gives the session a new
 token (the client drops everything on a token change, `dropCues()` in `content.js`), sets a
 session without audio back to `pending` so `get_session()` fetches it again (the old model's
 cache may have marked it covered without ever downloading), and calls `load_cache()` for the new
-model. `/health` reports `model` (loaded, canonical), `default_model`, `model_loading`,
+model. `/health` reports `model` (loaded or to load, canonical), `model_loaded`, `default_model`, `model_loading`,
 `model_error` as `{model, error, names}` (`names` from `model_spellings()`: every alias and the
 repo id of the failed model, so the popup can match whatever spelling the viewer typed) and
 `models` (`downloaded_models()`, the `models--owner--name` folders under canonical names).
@@ -188,6 +190,108 @@ and the README's "YouTube sign-in" say exactly this, so a change here changes th
 install has no setup and no venv, so `run.sh` refuses there; its command is
 `nix run . -- --save-cookies-from-browser firefox` (the flake's loop stops on exit 0 and 2 like
 `run.sh`).
+
+## How the model loads on demand
+
+Measured first, on the owner's laptop (RTX 4070 Laptop GPU, 8 GB, the display on it; Windows 11,
+no browser playing): the server idling with large-v3 in memory held 4.0 GB of GPU memory, a
+0.7 GB working set, 5.6 GB of committed memory and 0.2 % of one core, and the GPU still reached
+its lowest power state (P8, 2.7 W against 2.6 W with no server; 14 W against 14 W while the
+desktop kept it in P4). Loading large-v3 took 3 to 7 s on a quiet machine (2.9 GB of weights,
+under a second of warm-up) and 11 s with a test run beside it. A model in memory costs memory,
+not watts, and a load costs little next to the audio fetch a new video waits for anyway.
+
+`--model-idle-minutes` (`MODEL_IDLE_MINUTES`, 1) makes `start_app()` build the App without a
+model (`on_demand=True`; `model_on_demand()`): `resolve_device()` names the backend, which
+`settle_lookahead()` and `prepare_model()` need, and `/health` answers a second or two after the
+start, with `model_loaded: false` and `compute_type: null` until a load. A video whose cached cues
+cover the playhead and the lookahead is answered from them and loads nothing, even while a record
+that stops short of the end has its audio fetched. Of the owner's 170 large-v3 records, 24 cover
+their video to the end; 37 lack only the first seconds (the planner never goes back from where
+the viewer started), which a window fills, with a load, the next time the video starts there. `Transcriber.run()` asks `App.tend_model(work)` after
+`pick_work()`, every round:
+
+- No model, and a window waiting, or a video a client synced within `--client-timeout` fetching
+  audio that a window will follow (`audio_on_its_way()`: the planner's `window_span()` wants one
+  at the playhead or within the lookahead, or the video's length is not known yet; not one its
+  language paused, nor one waiting between the attempts of a failed fetch, whose thread keeps
+  `fetching` set through the waits):
+  `load_on_demand()` loads `model_name` on the transcriber thread, the only one that runs the
+  model. The operator's `--model` loads by name, as at a start; any other name comes through
+  `download_model_files()` first, so a client's name never reaches `WhisperModel()` as it came.
+  `model_loading` names it meanwhile: the content script says "Loading model X…", the popup's
+  badge "Loading model". Loading while the audio downloads hides most of the load.
+- A model and a window: `model_used` moves on.
+- A model, and a video a client still watches (a sync within `--client-timeout`; a paused tab
+  syncs every few seconds) with audio from its playhead to its end not transcribed yet
+  (`video_unfinished()`: `window_span()` with no lookahead; a live stream, or a length not known
+  yet, counts too): kept, however long since the last window. A pause to look a word up or mine a
+  line outlasts the idle minute while minutes are transcribed ahead, and freeing the model then
+  only loaded it again when the viewer played on (the owner's log: freed, and loaded again 53 s
+  later for the same video). A video whose language paused it or whose fetch failed holds nothing.
+- A model, no window for `idle_limit()`, no audio on its way and no such video: `free_model()`
+  drops it, then `gc.collect()`, `release_torch_memory()` (Kitsune) and `release_mlx_memory()`
+  (MLX keeps freed buffers in a cache of its own, in memory the browser on a Mac shares). So the
+  model goes a minute after the video is transcribed from the playhead to its end, or after its
+  tab stopped syncing. `idle_limit()` is the idle minutes, never under two windows: a video
+  playing gets a window per `--window` of playback (the planner tops the lookahead up one window
+  at a time).
+
+`tend_model()` answers True after a load or a free, and the loop plans again: a window planned
+before a load of seconds may be stale. A load that fails sets `model_error` as a failed switch
+does, and the next try of that name waits `--retry-after` (`load_failed`, kept by name: a failed
+switch to another name overwrites `model_error`, and the two names would otherwise take turns
+failing as fast as the loop runs), with a half-second rest per round while a window waits. The
+server stays up and keeps answering with what it has.
+
+A switch (`switch_model_if_wanted()`) on demand is the swap of "How model switching works",
+whether a model is in memory or not, except that a failed one brings nothing back and never ends
+the server: `model_name` and the sessions stay as they were, and the old model loads again when a
+window needs it. A successful one keeps the files' folder in `model_path` for the load after a
+free.
+
+A switch on demand loads the new model at once, as any swap does, and it then waits out
+`idle_limit()` like any other: no window is needed for that load.
+
+### Memory
+
+Measured in one process, step by step, on the owner's laptop (the private working set, which is
+what Task Manager's "Memory" shows): the interpreter with `server.py`
+imported holds 24 MB; faster-whisper, a decode, the speech detector and the CUDA probe bring it
+to 68 MB, which is all a server that has never loaded a model holds (and no GPU memory). Loading
+large-v3 adds 528 MB of host memory, the CUDA runtime's and the libraries' (the weights are on
+the GPU), and passes through 3.1 GB while CTranslate2 reads the 2.9 GB file. Freeing the model
+gives back its GPU memory (4.0 GB) and most of the commit (5.8 to 1.7 GB), but only 16 MB of
+those 528: the CUDA context and what cuBLAS and cuDNN set up stay until the process ends (and
+about 0.1 GB of GPU memory with them), so a server that loaded once holds about 610 MB from then
+on. CUDA already loads its kernels lazily (`CUDA_MODULE_LOADING=LAZY` changes nothing; `EAGER`
+costs 1.5 GB). The committed memory of an idle server (about 0.8 GB before any load) is mostly
+OpenBLAS's buffers, reserved and never touched. On a laptop whose NVIDIA GPU powers off when
+unused, only a process that never loaded a model lets it.
+
+The decoded track of a video is the other large holder, kept for `--idle-minutes` after its last
+sync. faster-whisper's `decode_audio()` returns float32 (230 MB an hour) and holds the int16
+decode and two float32 copies at once while it converts: a 4.1-hour stream kept 906 MB and
+passed through 2.2 GB more. `decode_track()` runs the same steps (faster-whisper's own frame
+filter, grouping and resampler) and keeps the int16: 453 MB, 1.1 GB at the peak, and
+`audio_slice()` hands each window out as the very float32 `decode_audio()` gives (an int16 over
+32768 is exact in float32; `test_audio_track.py` compares the two on a real file where PyAV is
+installed). A clip cut from it (`make_clip()`'s fallback when the file is gone) takes the int16
+as it is. Both decoders run faster-whisper's steps through `run_decoding_steps()`, which opens
+the file without `metadata_errors` where PyAV refuses it: PyAV 19 dropped the option, and
+faster-whisper 1.2.1's `decode_audio()`, which passes it, raises `TypeError` there. The tools take
+`decode_audio_file()`: `decode_audio()` itself where it works, those steps where it does not.
+
+`old_record_sweep()` needs the model's language head: while there is none it yields False, a rest
+per step, and never loads one. `/sync`'s answers are unchanged, `/health` adds `model_loaded`.
+
+Not on demand: `--model-idle-minutes 0` (loaded at the start and kept, as before), the Apps of
+the tools and the tests (`on_demand` False: `tend_model()` does nothing, a None model stays None),
+and the AMD engine (`model_on_demand()` is False with `ROCM_ACTIVE`): its crash guard counts the
+starts that load a model, and on Windows no model may be freed (`KEPT_MODELS`).
+
+Tests: `server/tests/test_model_on_demand.py`, `server/tests/test_audio_track.py`,
+`addon/tests/popup.test.js`.
 
 ## How a failed audio fetch is retried
 
@@ -493,7 +597,8 @@ answered in order until stdin closes; `read_message()` / `write_message()`, `ser
 `{"cmd": "status"}` -> `{ok, running, version, root}`, `running` being a `/health` answer within
 1.5 s (`server_running()`); `{"cmd": "start"}` -> `{ok: true, already: true}` for a running
 server, `{ok: true, already: true, starting: true}` for one that holds the instance lock but
-does not answer yet (its model is loading; `server_starting()`), else `launch()` and
+does not answer yet (it is starting, or loading its model where that happens at the start:
+`--model-idle-minutes 0`, the AMD engine; `server_starting()`), else `launch()` and
 `{ok: true, started: true, log}` (`log` null on Windows, the path of `~/.shisu-ko/server.log`
 elsewhere) or `{ok: false, error}` in one line. Anything else, a request with extra keys
 included, is `{ok: false, error: "unknown command"}`; a frame over 1 MiB is answered and ends
@@ -555,8 +660,9 @@ only from the next `run.cmd` start (its register line runs before the update, an
 does not register).
 `launch()` passes no arguments to the launcher: a server the button started runs on `server.py`'s
 defaults (`--model` from `config.json`, else large-v3; `--device auto`; `--cookies-from-browser`
-from `config.json`, see "YouTube's sign-in"), and the popup's model
-setting only takes effect after that default model is loaded.
+from `config.json`, see "YouTube's sign-in"; `--model-idle-minutes` 1, so nothing loads before
+a video needs it, except on the AMD engine), and the popup's model setting takes effect with the first `/sync` (with
+`--model-idle-minutes 0`, once that default model is loaded).
 `run_check()` in `server.py` loads `native_host.py` by path and prints `status_text()`.
 
 Extension side: the popup's flow is `startFlow.state`, `idle -> requesting -> starting ->

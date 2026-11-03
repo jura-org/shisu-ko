@@ -32,9 +32,11 @@ const NATIVE_TIMEOUT_MS = 15000;
 const NATIVE_HOST = "shisuko";
 // A launch is remembered for as long as the popup waits for the server. The popup document dies
 // with every click outside it, and a reopened one must not offer a second start while the first
-// is still loading its model, which is the whole time /health stays silent (server.py binds the
-// port after load_model()): a second run.cmd would load a second model onto the same GPU. 90 s is
-// past any healthy start (10-40 s on a GPU after the launcher's venv check, longer on a CPU);
+// is still starting, which is the whole time /health stays silent (server.py binds the port after
+// start_app(), which loads the model there only with --model-idle-minutes 0 or the AMD engine): a
+// second run.cmd would load a second model onto the same GPU. 90 s is past any healthy start (seconds
+// by default; 10-40 s on a GPU after the launcher's venv check when the model loads at the start,
+// longer on a CPU);
 // after it the popup shows the log hint and the button again, since a launch that failed has to
 // be retried somehow. The record goes to storage.session as well as memory: Firefox ends an idle
 // event page after 30 s, and a model load takes longer than that.
@@ -360,7 +362,8 @@ async function startStatus() {
 
 // How long an update may take before the popup stops watching for the new server: the old one
 // exits, the launcher runs update.py (a git fetch, or a release download and unpack) and the new
-// one loads its model again, 10-40 s on a GPU and longer on a CPU. The popup owns the wait; the
+// one starts, loading its model again only with --model-idle-minutes 0 or the AMD engine (10-40 s on
+// a GPU, longer on a CPU). The popup owns the wait; the
 // record lives here, in storage.session like the launch record, so a reopened popup resumes it
 // and a restarted event page still knows about it.
 const UPDATE_WINDOW_MS = 120000;

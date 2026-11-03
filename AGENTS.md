@@ -75,6 +75,19 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   client's answer is unchanged. Nor did the word colours: `/sync`'s optional `deck: {name, word,
   pitch, since}` is answered `deck` only when its token moved, and `/health?decks=1` alone adds
   `anki_decks`.
+- The model is in memory only while something needs it (`--model-idle-minutes`, default 1,
+  `model_on_demand()`): `start_app()` builds the server's App without one, and on the transcriber
+  thread, the only one that loads, runs or frees a model, `App.tend_model()` loads it when a window
+  waits or a watched video's audio is on its way, keeps it while a watched video has audio left
+  ahead of its playhead (`video_unfinished()`, paused or not), and frees it after `idle_limit()`
+  without a window otherwise (the idle minutes, never under two `--window`s). Until then every sync
+  is answered from the cues the server has. Every other App (`on_demand` False: the tools', the
+  tests') keeps the model it was given, None included; `--model-idle-minutes 0` and the AMD engine
+  (its crash guard counts starts that load a model, and Windows may never free one) load at the
+  start and keep it. On demand a switch loads the new model at once (it then waits out
+  `idle_limit()` like any), a failed switch reloads nothing and never ends the server, a failed
+  load waits `--retry-after` by name (`load_failed`), and `old_record_sweep()` waits for a model
+  rather than load one. Detail: `docs/dev/server-runtime.md`, "How the model loads on demand".
 - A cue's word timings (`words`) and source (`src`, `"human"` on a line from the creator's
   subtitles) are opt-in on `/sync`: only a body with `"words": true` gets them, and the default
   response never changes (`without_words()`, `OPT_IN_CUE_FIELDS`). Their texts join to the cue's text
@@ -291,7 +304,12 @@ track arrived. `replay_cues.py --human` and `retranscribe.py --human` measure a 
 **Server runtime** (`docs/dev/server-runtime.md`). Live streams: `Fetcher.follow_live()`,
 `LiveFollower`, `DashLiveSource`, `Session.live_audio`; live sessions are never cached. Model
 switching: `App.request_model()` and `App.switch_model_if_wanted()`, run before every window,
-never during one. Backends: `resolve_device()` decides `cuda` / `mlx` / `cpu` once and
+never during one. The model on demand: `model_on_demand()`, `App.tend_model()` (after every
+`pick_work()`), `idle_limit()`, `video_unfinished()`, `audio_on_its_way()` (with `window_span()`,
+the planner's span before any audio), `load_on_demand()`, `free_model()`, `release_mlx_memory()`;
+a fetched track is int16 (`decode_track()`, faster-whisper's own decoding steps), and
+`audio_slice()` hands each window out as float32.
+Backends: `resolve_device()` decides `cuda` / `mlx` / `cpu` once and
 `load_model()` builds either a `WhisperModel` or an `MlxWhisperModel`, which presents the same two
 methods over mlx-whisper; `server/mlx_beam.py` gives that path the beam search the library lacks.
 Kitsune models: `kitsune_name()`, `kitsune_download_plan()`, `load_kitsune_model()`, and in
@@ -365,6 +383,8 @@ Start button's launcher is registered and which model a bare start runs).
 This machine's built-in default model: `server.py --default-model` prints it and exits, ignoring
 `config.json`, which is the choice it is about to be compared with.
 Music videos: `--lyrics auto` (default) or `--lyrics off`; see `docs/dev/cue-building.md`.
+The model in memory only while needed: `--model-idle-minutes N` (default 1; 0 loads it at the start
+and keeps it); see `docs/dev/server-runtime.md`, "How the model loads on demand".
 The creator's Japanese subtitles: `--human-subtitles auto` (default) or `off`; see
 `docs/dev/cue-building.md`, "Human subtitles".
 Model download with a progress bar: `server.py --download-model NAME`; see
@@ -458,9 +478,9 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
   CTranslate2, or it costs a minute on Windows and asks the CUDA driver for a GPU.
 - PyAV 19 dropped `av.open()`'s `metadata_errors`, which faster-whisper 1.2.1's `decode_audio()`
   still passes, so `decode_audio()` raises `TypeError` there (a fresh install gets PyAV 19: CI's
-  Python 3.12 and 3.13 did). The server and the tools decode through `decode_audio_file()`, which
-  runs faster-whisper's own steps on a file opened without the option on that error alone; never
-  call `decode_audio()` directly.
+  Python 3.12 and 3.13 did). The server and the tools decode through `decode_audio_file()` (the
+  tools' float32) and `decode_track()` (the fetch's int16), which run faster-whisper's own steps on
+  a file opened without the option where PyAV refuses it; never call `decode_audio()` directly.
 - CTranslate2 files a converted model's `alignment_heads` (`config.json`) by decoder layer without
   a bounds check, at every word-timed decode. kotoba-whisper's `-faster` conversions list
   large-v3's heads (layers 7 to 25) for a 2-layer decoder: the first window ended the server with
