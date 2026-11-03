@@ -105,9 +105,12 @@
   justify-content: flex-start;
 }
 
+/* Every character stands upright, as on a Japanese page: Whisper writes digits, ? and ! in ASCII,
+   which mixed lays on their side. The Japanese marks keep their vertical forms (…, ー and the
+   brackets come from the font's vertical alternates, which every preset stack has). */
 .shisuko-subwrap.shisuko-vertical .shisuko-sub {
   writing-mode: vertical-rl;
-  text-orientation: mixed;
+  text-orientation: upright;
   text-align: start;
   padding: 1.4em 0.25em;
   max-width: 100%;

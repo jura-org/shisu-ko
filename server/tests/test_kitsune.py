@@ -283,6 +283,19 @@ def test_kitsune_names_parse_to_a_base_and_a_precision():
     assert server.kitsune_name("large-v3") is None and server.kitsune_name(None) is None
 
 
+def test_each_name_downloads_the_repo_published_for_its_size():
+    # The students went out as kitsune-transcribe-t0.6b-ja (encoder-decoder) and -p0.3b-ja / -p0.1b-ja
+    # (CTC). The names first pointed at kitsune-transcribe-0.6b and so on, which were never published:
+    # no name could download, and the repo a viewer found had no model.bin for the Whisper path.
+    assert server.KITSUNE_REPOS == {"kitsune-0.6b": "Multy123/kitsune-transcribe-t0.6b-ja",
+                                    "kitsune-0.3b": "Multy123/kitsune-transcribe-p0.3b-ja",
+                                    "kitsune-0.1b": "Multy123/kitsune-transcribe-p0.1b-ja"}
+    # The repo id as the model card gives it is the model, on the Kitsune path, never the Whisper one.
+    assert server.kitsune_name("Multy123/kitsune-transcribe-p0.3b-ja") == ("kitsune-0.3b", "")
+    assert server.canonical_model_name("Multy123/kitsune-transcribe-t0.6b-ja") == "kitsune-0.6b"
+    assert server.kitsune_download_plan("kitsune-0.1b-int8")[:2] == ("Multy123/kitsune-transcribe-p0.1b-ja", "int8-w8a16")
+
+
 def test_every_spelling_of_one_set_of_weights_is_one_model():
     for name in ("kitsune-0.6b-int8", "kitsune-0.6b-int8-w8a16", "kitsune-0.6b-int8-w8a8"):
         assert server.canonical_model_name(name) == "kitsune-0.6b-int8"
@@ -525,6 +538,26 @@ def test_setup_fails_when_pytorch_does_not_import_afterwards(monkeypatch):
     assert ks.main([]) == 1
 
 
+def test_librosa_is_part_of_what_the_kitsune_models_need(monkeypatch):
+    # transformers' Parakeet and Cohere feature extractors refuse to load without librosa, which
+    # requirements-kitsune.txt did not list: after kitsune_setup.py every Kitsune model downloaded,
+    # then failed to load.
+    import importlib.util
+
+    present = {"torch", "transformers", "safetensors"}
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: object() if name in present else None)
+    assert server.kitsune_modules_missing() == ["librosa"]
+    assert server.kitsune_runtime_missing() == server.KITSUNE_INSTALL_HINT and "librosa" in server.KITSUNE_INSTALL_HINT
+    assert server.kitsune_runtime_line().startswith("Kitsune models: librosa not installed")
+    present.add("librosa")
+    assert server.kitsune_runtime_missing() is None
+    ks = load_kitsune_setup()
+    listed = {line.split(">=")[0].split("==")[0].strip().lower()
+              for line in ks.REQUIREMENTS.read_text(encoding="utf-8").splitlines() if line.strip() and not line.startswith("#")}
+    assert {"transformers", "safetensors", "librosa"} <= listed
+    assert "librosa.filters" in ks.IMPORT_CHECK, "the setup checks the part that imports numba"
+
+
 def test_setup_does_not_download_pytorch_again_when_only_transformers_is_missing(monkeypatch):
     ks, calls = fake_setup(monkeypatch, ["GPU 0: x"], [None, "2.14.0 5.13.1"], torch="2.14.0")
     assert ks.main([]) == 0
@@ -552,13 +585,18 @@ def test_a_clients_name_is_never_looked_at_as_a_folder(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr(server, "load_kitsune_model", lambda *a, **k: seen.append(a[1]) or "kitsune")
     import types
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    (hub / "model.bin").write_bytes(b"")
     fake_fw = types.ModuleType("faster_whisper")
-    fake_fw.WhisperModel = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("whisper path"))
+    fake_fw.download_model = lambda name, **k: str(hub)  # the hub's copy, never ./owner/name
+    fake_fw.WhisperModel = lambda folder, **k: (_ for _ in ()).throw(RuntimeError(f"whisper path {folder}"))
     monkeypatch.setitem(__import__("sys").modules, "faster_whisper", fake_fw)
     monkeypatch.setattr(server, "gpu_memory_mb", lambda: None)
     args = SimpleNamespace(model="large-v3", device="cpu", compute_type="auto", cpu_threads=0, language="ja")
-    with pytest.raises(RuntimeError, match="whisper path"):
+    with pytest.raises(RuntimeError, match="whisper path") as err:
         server.load_model(args, "owner/name")
+    assert str(err.value) == f"whisper path {hub}"
     assert seen == []
     assert server.load_model(SimpleNamespace(model=folder, language="ja"), folder) == "kitsune"
 

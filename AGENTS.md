@@ -122,7 +122,9 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   and resolved through `download_model_files()` — faster-whisper's own download, the MLX repo's on
   the Apple GPU, or, for a Kitsune name, `KITSUNE_REPOS` and `kitsune_download_plan()` — before it
   is loaded. A raw client string must never reach `WhisperModel()` or `kitsune_engine.load()`; only
-  the operator's `--model` may be a folder, and it skips the download.
+  the operator's `--model` may be a folder, and it skips the download. `load_model()` hands
+  `WhisperModel()` a folder, never a name (the operator's other `--model` values are downloaded
+  the same way), once `safe_alignment_heads()` has made its `config.json` fit the decoder.
 - A transcription backend is `transcribe()` and `detect_language()`, and nothing else in the server
   may know which one is loaded. `--device` names it, `resolve_device()` is the single place `auto`
   becomes one of `cuda`, `mlx` and `cpu`, and `canonical_model_name()` gives one set of weights one
@@ -459,6 +461,16 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
   Python 3.12 and 3.13 did). The server and the tools decode through `decode_audio_file()`, which
   runs faster-whisper's own steps on a file opened without the option on that error alone; never
   call `decode_audio()` directly.
+- CTranslate2 files a converted model's `alignment_heads` (`config.json`) by decoder layer without
+  a bounds check, at every word-timed decode. kotoba-whisper's `-faster` conversions list
+  large-v3's heads (layers 7 to 25) for a 2-layer decoder: the first window ended the server with
+  an access violation (exit code -1073741819), the warm-up having decoded without word timings.
+  `safe_alignment_heads()` rewrites such a list from `model.bin`'s shape (`ct2_decoder_shape()`)
+  before the load. Detail: `docs/dev/server-runtime.md`, "A converted model's word-timing heads".
+- The vertical docks set `text-orientation: upright`: Whisper writes digits, `?` and `!` in ASCII,
+  which `mixed` lays on their side, and the presets' Japanese fonts give `…`, `ー` and the brackets
+  their vertical forms. `text-transform: full-width` would turn only ASCII, but Chrome 152 still
+  lacks it, and a span for tate-chu-yoko would break `renderText()`'s one-span rule.
 - Hugging Face's xet backend stalled on Windows; the server sets `HF_HUB_DISABLE_XET=1`, plus
   `HF_HUB_VERBOSITY=error` and `HF_HUB_DISABLE_SYMLINKS_WARNING=1` before the import.
 - yt-dlp needs a JavaScript runtime (Deno preferred, Node 20+ works) for YouTube.

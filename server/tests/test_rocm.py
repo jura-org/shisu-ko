@@ -210,11 +210,20 @@ def alias_table(monkeypatch, **extra):
 
 
 def fake_whisper(monkeypatch, fail_on=(), fail_warmup=False, error=None, built=None):
-    """faster_whisper.WhisperModel that records (name, kwargs), fails for a device in `fail_on` (with `error`,
+    """faster_whisper.WhisperModel that records (folder, kwargs), fails for a device in `fail_on` (with `error`,
     else a HIP error), and warms up (or fails to, with a HIP error or the exception `fail_warmup` is) at once.
     Each model it builds goes into `built` as a weakref. gpu_memory_mb() finds nothing, as on Windows.
-    Returns the records."""
+    download_model() answers a size or a repo id with the folder <cache_dir>/<name> holding a model.bin,
+    and refuses any other name as faster-whisper does. Returns the records."""
     made = []
+
+    def download_model(name, cache_dir=None, **kwargs):
+        if name not in FAKE_MODELS and name != "tiny" and "/" not in name:
+            raise ValueError(f"Invalid model size '{name}', expected one of: {', '.join(FAKE_MODELS)}, tiny")
+        folder = Path(cache_dir) / name
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "model.bin").write_bytes(b"")
+        return str(folder)
 
     class WhisperModel:
         def __init__(self, name, **kwargs):
@@ -231,7 +240,7 @@ def fake_whisper(monkeypatch, fail_on=(), fail_warmup=False, error=None, built=N
                 raise RuntimeError("HIP error: an illegal memory access was encountered")
             return iter([]), None
 
-    alias_table(monkeypatch, WhisperModel=WhisperModel)
+    alias_table(monkeypatch, WhisperModel=WhisperModel, download_model=download_model)
     monkeypatch.setattr(server, "gpu_memory_mb", lambda: None)
     return made
 
@@ -899,8 +908,9 @@ def test_a_start_on_the_cpu_counts_nothing(monkeypatch, tmp_path):
 
 
 def test_a_model_that_loads_nowhere_takes_its_count_back(monkeypatch, tmp_path, caplog):
-    # A typo in --model, or a model not downloaded while offline: the GPU and then the CPU raise,
-    # and the start ends on 2, which is never retried. That is the model's fault, not the engine's.
+    # A typo in --model, or a model not downloaded while offline: its download raises before any
+    # device is tried, and the start ends on 2, which is never retried. That is the model's fault,
+    # not the engine's.
     turned_on(tmp_path)
     engine_imports(monkeypatch)
     monkeypatch.setattr(server, "ROCM_ACTIVE", True)
@@ -912,7 +922,7 @@ def test_a_model_that_loads_nowhere_takes_its_count_back(monkeypatch, tmp_path, 
     with caplog.at_level(logging.INFO, logger="shisu-ko"):
         assert run_main(monkeypatch, "--model", "large-v3-trubo") == 2
         assert run_main(monkeypatch, "--model", "large-v3-trubo") == 2
-    assert [kwargs["device"] for _, kwargs in made] == ["cuda", "cpu", "cuda", "cpu"]
+    assert made == [], "the name is refused before any device is tried"
     assert "Invalid model size" in caplog.text
     assert starts.read_text(encoding="utf-8") == "1\n"
     starts.unlink()
@@ -2017,7 +2027,8 @@ def test_a_passed_probe_turns_the_engine_on_and_clears_the_guard(monkeypatch, tm
     assert probe(monkeypatch) == [0]
     assert config(tmp_path) == {"model": "small", "engine": "rocm"}
     assert not (tmp_path / "rocm-starts").exists()
-    assert made == [("small", {"device": "cuda", "compute_type": "float16", "download_root": str(tmp_path / "models")})]
+    assert made == [(str(tmp_path / "models" / "small"),
+                     {"device": "cuda", "compute_type": "float16", "download_root": str(tmp_path / "models")})]
     out = capsys.readouterr().out
     assert f"CTranslate2 4.8.2 from {tmp_path / 'rocm' / 'ctranslate2'}: 1 device(s)" in out
     assert "AMD GPU engine works: device 0 (float16)" in out
@@ -2269,7 +2280,7 @@ def test_a_probe_with_a_kitsune_model_chosen_tests_whisper_tiny_and_keeps_the_ch
     write_json(tmp_path / "config.json", {"model": "kitsune-0.6b"})
     assert probe(monkeypatch) == [0]
     assert config(tmp_path) == {"model": "kitsune-0.6b", "engine": "rocm"}
-    assert [name for name, _kwargs in made] == [server.PROBE_WHISPER_MODEL]
+    assert [Path(folder).name for folder, _kwargs in made] == [server.PROBE_WHISPER_MODEL]
     assert "runs on PyTorch, not on this engine; testing with tiny instead" in capsys.readouterr().out
 
 
