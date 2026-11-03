@@ -155,13 +155,14 @@ MLX_DEFAULT_MODEL = "large-v3-turbo"
 # The buffer ahead of the playhead only absorbs variation in how fast it refills.
 CUDA_LOOKAHEAD = 180.0  # an NVIDIA GPU refills at 4-13x real time: 3 minutes outlast any slowdown measured
 SLOW_LOOKAHEAD = 900.0  # MLX and the CPU refill near real time or slower: a pause is how the viewer gets ahead
-# Kitsune-Transcribe's Japanese students (kitsune_engine.py), by name. Each repo holds the training
-# run's bf16 export at its root (the bare name) and each precision in a folder of its own, as
-# `python -m kitsune.quant export` writes it: kitsune-0.6b-int8 loads <repo>/int8-w8a16.
+# Kitsune-Transcribe's Japanese students (kitsune_engine.py), by name: the repos as published, T-0.6B
+# (encoder-decoder, from Cohere Transcribe) and P-0.3B / P-0.1B (CTC, from Parakeet). Each holds the
+# training run's bf16 export at its root (the bare name) and each precision in a folder of its own,
+# as `python -m kitsune.quant export` writes it: kitsune-0.6b-int8 loads <repo>/int8-w8a16.
 KITSUNE_REPOS = {
-    "kitsune-0.6b": "Multy123/kitsune-transcribe-0.6b",
-    "kitsune-0.3b": "Multy123/kitsune-transcribe-0.3b",
-    "kitsune-0.1b": "Multy123/kitsune-transcribe-0.1b",
+    "kitsune-0.6b": "Multy123/kitsune-transcribe-t0.6b-ja",
+    "kitsune-0.3b": "Multy123/kitsune-transcribe-p0.3b-ja",
+    "kitsune-0.1b": "Multy123/kitsune-transcribe-p0.1b-ja",
 }
 # A precision's short name -> its folder. The W8A8 / W4A4 files are byte-identical to the W8A16 /
 # W4A16 ones (the formats differ in the activations, which the server keeps 16-bit), so both
@@ -174,8 +175,11 @@ KITSUNE_FORMAT_ALIASES = {"bf16": "", "int8-w8a16": "int8", "int8-w8a8": "int8",
 KITSUNE_FILES = ("config.json", "generation_config.json", "processor_config.json", "preprocessor_config.json",
                  "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "model.safetensors",
                  "quantization.json", "student_meta.json", "README.md", "MODEL_CARD.md")
-KITSUNE_INSTALL_HINT = ("Kitsune models run on PyTorch, which is not installed for this server: run server/setup.cmd "
-                        "(setup.sh) again and pick a Kitsune model, or install it with server/kitsune_setup.py")
+# What the Kitsune models run on (kitsune_runtime_missing()). transformers' Parakeet and Cohere feature
+# extractors refuse to load without librosa, which requirements-kitsune.txt did not list before 0.27.2.
+KITSUNE_MODULES = ("torch", "transformers", "safetensors", "librosa")
+KITSUNE_INSTALL_HINT = ("Kitsune models need PyTorch, transformers and librosa, not all installed here: run "
+                        "server/kitsune_setup.py with the venv's Python, or setup.cmd (setup.sh) again")
 # The browsers yt-dlp reads cookies from (yt_dlp.cookies.SUPPORTED_BROWSERS), the names
 # --save-cookies-from-browser takes and config.json's "cookies_from_browser" may hold.
 COOKIE_BROWSERS = ("brave", "chrome", "chromium", "edge", "firefox", "opera", "safari", "vivaldi", "whale")
@@ -8077,18 +8081,24 @@ def require_kitsune_files(path: str, name: str, folder: str = "") -> None:
             raise ValueError(f"its repo has {where} ({needed} is missing); it may not be published yet")
 
 
-def kitsune_runtime_missing() -> Optional[str]:
-    """KITSUNE_INSTALL_HINT while PyTorch, transformers or safetensors cannot be imported, else None."""
+def kitsune_modules_missing() -> list:
+    """The modules of KITSUNE_MODULES that cannot be imported here."""
     import importlib.util
 
-    for module in ("torch", "transformers", "safetensors"):
+    missing = []
+    for module in KITSUNE_MODULES:
         try:
             found = importlib.util.find_spec(module) is not None
         except (ImportError, ValueError):
             found = False
         if not found:
-            return KITSUNE_INSTALL_HINT
-    return None
+            missing.append(module)
+    return missing
+
+
+def kitsune_runtime_missing() -> Optional[str]:
+    """KITSUNE_INSTALL_HINT while a module of KITSUNE_MODULES cannot be imported, else None."""
+    return KITSUNE_INSTALL_HINT if kitsune_modules_missing() else None
 
 
 _KITSUNE_ENGINE = None
@@ -9023,7 +9033,8 @@ def rocm_engine_line() -> Optional[str]:
 def kitsune_runtime_line() -> str:
     """What --check says about the Kitsune models' runtime: PyTorch and transformers, and whether PyTorch sees a GPU."""
     if kitsune_runtime_missing():
-        return "Kitsune models: PyTorch not installed (server/kitsune_setup.py installs it; Whisper models work without)"
+        missing = ", ".join(kitsune_modules_missing()) or ", ".join(KITSUNE_MODULES)
+        return f"Kitsune models: {missing} not installed (server/kitsune_setup.py installs them; Whisper models work without)"
     try:
         import torch
         import transformers

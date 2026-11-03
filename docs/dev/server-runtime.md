@@ -374,8 +374,13 @@ path (`kitsune_engine()`, registered in `sys.modules` before `exec_module` for i
 and the engine imports torch only inside the functions that load and run a model. Its pure parts
 (unpacking, timings, chunks, segments) are numpy only and tested in `test_kitsune.py` without torch.
 
-**Names.** `KITSUNE_REPOS` maps `kitsune-0.6b` / `-0.3b` / `-0.1b` to their repos
-(`Multy123/kitsune-transcribe-<size>`). A repo's root holds the training run's bf16 export (the
+**Names.** `KITSUNE_REPOS` maps `kitsune-0.6b` / `-0.3b` / `-0.1b` to the repos they were
+published to: `Multy123/kitsune-transcribe-t0.6b-ja` (T-0.6B, the Transcribe family) and
+`-p0.3b-ja` / `-p0.1b-ja` (P-0.3B and P-0.1B, the Parakeet family); P-0.05B (`-p0.05b-ja`) has
+no name yet. A repo id names its model as well (`kitsune_name()`), so the id from a model card
+takes the Kitsune path, never the Whisper one, which wants a `model.bin`. Until 0.27.2 the map
+named `kitsune-transcribe-<size>`, which were never published, and no Kitsune name downloaded.
+A repo's root holds the training run's bf16 export (the
 bare name), each precision a folder of its own as `python -m kitsune.quant export` writes it
 (`KITSUNE_FORMATS`: `fp16`, `int8` -> `int8-w8a16`, `fp8` -> `fp8-w8a8`, `nvfp4` -> `nvfp4-w4a16`,
 `mxfp4` -> `mxfp4-w4a4`). `kitsune_name()` parses a name into (base, short precision);
@@ -385,8 +390,11 @@ so the two formats run the same here. The canonical name is also the cue cache's
 precision keeps cues of its own. All names pass `MODEL_NAME_RE`; the popup's copy is unchanged.
 
 **Download.** `download_model_files()` refuses a Kitsune name while `kitsune_runtime_missing()`
-(torch, transformers, safetensors not importable): the download would be gigabytes for a model
-that cannot load, and the popup shows `KITSUNE_INSTALL_HINT`. Otherwise `kitsune_download_plan()`
+(`KITSUNE_MODULES` not all importable: torch, transformers, safetensors, and librosa, which
+transformers' Parakeet and Cohere feature extractors build their mel filters with and refuse to
+load without; `requirements-kitsune.txt` lacked it before 0.27.2, so no Kitsune model loaded
+after a fresh `kitsune_setup.py`). The download would be gigabytes for a model that cannot load,
+and the popup shows `KITSUNE_INSTALL_HINT`. Otherwise `kitsune_download_plan()`
 names the repo, the folder and `KITSUNE_FILES` in it, and `snapshot_download()` fetches only
 those; `require_kitsune_files()` refuses a folder the repo does not have ("may not be published
 yet"). `run_download_model()` (setup) takes Kitsune names like sizes: the choice goes to
