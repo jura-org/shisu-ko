@@ -112,6 +112,36 @@ Apple GPU it is the MLX build of that name, since the CTranslate2 files would be
 weights that backend never loads, and `--device cpu --download-model` still fetches the CTranslate2
 ones, so the download and the start that follows it agree.
 
+### A converted model's word-timing heads
+
+CTranslate2 times words with the cross-attention heads a converted model's `config.json` lists
+(`alignment_heads`, `[layer, head]` pairs). It reads the file as the model loads, and at every
+word-timed decode files the pairs by decoder layer without a bounds check
+(`TransformerDecoder::set_alignment_heads()`), so a pair past the decoder writes outside that
+table. kotoba-whisper's conversions (`kotoba-tech/kotoba-whisper-v2.0-faster`, v1.0 and bilingual
+v1.0 too) list large-v3's ten heads, in layers 7 to 25, for a decoder of 2 layers. The warm-up
+decodes without word timings and passed; the first window ended the process with an access
+violation (exit code -1073741819, 0xC0000005), on the CPU as reported and here. tiny given the
+same list raised `MemoryError: bad array new length` instead: what the stray write hits varies.
+
+`load_model()` therefore settles the folder before `WhisperModel()` sees it: the prepared `path`,
+the operator's `--model` folder, or `download_model_files(name)` for any other name (a size or a
+repo id, at a start as in a switch; a typo now fails there, before any device is tried). Then
+`safe_alignment_heads()` checks the folder's `config.json` against the decoder
+`ct2_decoder_shape()` reads from `model.bin`'s table of variables, in CTranslate2's own layout
+(binary versions 1 to 6) and without reading a weight: the layers are `decoder/layer_N/` counted
+from 0 up to the first one missing, as `build_layers_list()` builds them, and the heads
+`decoder/num_heads`. A list that does not fit, an empty one or none at all becomes every head of
+the decoder's second half, which is what CTranslate2's converter writes for a model that names
+none and what Systran's distil-whisper conversions hold (`[[1, 0]` to `[1, 19]]` for kotoba). The
+file is rewritten in place with one warning in the log: `os.replace()` replaces a hub symlink, not
+the blob behind it, and the hub returns a snapshot's files as they are, so the correction stays
+until the repo changes. A list that fits is never touched, and a `model.bin` the reader does not
+know leaves the file alone. A file that cannot be rewritten refuses the load (`ValueError`), since
+the model as it is would crash.
+
+Tests: `server/tests/test_alignment_heads.py` (`model.bin` files written in CTranslate2's layout).
+
 ### YouTube's sign-in
 
 YouTube answers some addresses with "Sign in to confirm you're not a bot" until a download

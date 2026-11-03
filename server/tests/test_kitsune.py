@@ -552,13 +552,18 @@ def test_a_clients_name_is_never_looked_at_as_a_folder(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr(server, "load_kitsune_model", lambda *a, **k: seen.append(a[1]) or "kitsune")
     import types
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    (hub / "model.bin").write_bytes(b"")
     fake_fw = types.ModuleType("faster_whisper")
-    fake_fw.WhisperModel = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("whisper path"))
+    fake_fw.download_model = lambda name, **k: str(hub)  # the hub's copy, never ./owner/name
+    fake_fw.WhisperModel = lambda folder, **k: (_ for _ in ()).throw(RuntimeError(f"whisper path {folder}"))
     monkeypatch.setitem(__import__("sys").modules, "faster_whisper", fake_fw)
     monkeypatch.setattr(server, "gpu_memory_mb", lambda: None)
     args = SimpleNamespace(model="large-v3", device="cpu", compute_type="auto", cpu_threads=0, language="ja")
-    with pytest.raises(RuntimeError, match="whisper path"):
+    with pytest.raises(RuntimeError, match="whisper path") as err:
         server.load_model(args, "owner/name")
+    assert str(err.value) == f"whisper path {hub}"
     assert seen == []
     assert server.load_model(SimpleNamespace(model=folder, language="ja"), folder) == "kitsune"
 

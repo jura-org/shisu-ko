@@ -79,6 +79,7 @@ import re
 import shutil
 import signal
 import site
+import struct
 import subprocess
 import sys
 import sysconfig
@@ -7926,6 +7927,104 @@ def require_model_bin(path: str, name: str) -> None:
                          "ct2-transformers-converter or pick a *-ct2 / faster-whisper repo")
 
 
+CT2_BINARY_VERSIONS = range(1, 7)  # the model.bin layouts ct2_decoder_shape() reads; CTranslate2 4 writes 6
+CT2_DECODER_LAYER_RE = re.compile(r"decoder/layer_(\d+)/")
+
+
+def ct2_decoder_shape(path: str) -> Optional[tuple]:
+    """(decoder layers, heads per layer) of the converted model in `path`, or None when model.bin is
+    not a file this reader knows.
+
+    Read from model.bin's table of variables, as CTranslate2's Model::load() reads it, seeking past
+    every weight. CTranslate2 counts the layers as it builds them, decoder/layer_0, _1, ... up to
+    the first one missing, and takes the heads from decoder/num_heads.
+    """
+    try:
+        with open(os.path.join(path, "model.bin"), "rb") as f:
+            def take(fmt: str) -> tuple:
+                want = struct.calcsize(fmt)
+                data = f.read(want)
+                if len(data) != want:
+                    raise ValueError("model.bin ends early")
+                return struct.unpack(fmt, data)
+
+            def text() -> str:
+                (length,) = take("<H")
+                return f.read(length).split(b"\0", 1)[0].decode("utf-8")
+
+            (version,) = take("<I")
+            if version not in CT2_BINARY_VERSIONS:
+                return None
+            if version >= 2:
+                text()
+                take("<I")  # the spec's name and revision
+            layers, heads = set(), None
+            for _ in range(take("<I")[0]):
+                name = text()
+                (rank,) = take("<B")
+                take(f"<{rank}I")
+                # Version 4 on: the type's id and the size in bytes; before: the item size and the count.
+                kind, count = take("<BI")
+                size = count if version >= 4 else kind * count
+                if name == "decoder/num_heads":
+                    heads = int.from_bytes(f.read(size), "little", signed=True)
+                    continue
+                match = CT2_DECODER_LAYER_RE.match(name)
+                if match:
+                    layers.add(int(match.group(1)))
+                f.seek(size, os.SEEK_CUR)
+    except (OSError, ValueError, struct.error, UnicodeDecodeError):
+        return None
+    count = 0
+    while count in layers:
+        count += 1
+    return (count, heads) if count and heads and heads > 0 else None
+
+
+def safe_alignment_heads(path: str, name: str) -> None:
+    """Make the converted model in `path` name only word-timing heads its decoder has.
+
+    CTranslate2 times words with the cross-attention heads config.json lists ("alignment_heads",
+    [layer, head] pairs) and files them by layer without a bounds check, so a pair past the decoder
+    writes outside its table. kotoba-whisper's conversions (v1.0, bilingual v1.0, v2.0) carry
+    large-v3's heads, layers 7 to 25, for a decoder of 2 layers: the first window with word timings
+    ended the server with an access violation (exit code -1073741819), the warm-up having decoded
+    without them. Such a list, or none, becomes every head of the decoder's second half, which is
+    what CTranslate2's converter writes for a model that names none, and what Systran's conversions
+    of distil-whisper hold. config.json is rewritten in place; ValueError when it cannot be, since
+    the model as it is would crash. A model.bin this reader does not know is left as it is.
+    """
+    config_path = os.path.join(path, "config.json")
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            config = json.load(f)
+    except (OSError, ValueError):
+        return  # no config at all: CTranslate2 refuses word timings with an error of its own
+    shape = ct2_decoder_shape(path)
+    if not isinstance(config, dict) or shape is None:
+        return
+    layers, heads = shape
+    listed = config.get("alignment_heads")
+    if isinstance(listed, list) and listed and all(
+            isinstance(pair, list) and len(pair) == 2 and all(type(i) is int for i in pair)
+            and 0 <= pair[0] < layers and 0 <= pair[1] < heads for pair in listed):
+        return
+    config["alignment_heads"] = [[layer, head] for layer in range(layers // 2, layers) for head in range(heads)]
+    temporary = config_path + ".tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(config, f, indent=2)
+        os.replace(temporary, config_path)  # replaces a hub symlink itself, never the blob it points at
+    except OSError as exc:
+        raise ValueError(f"its config.json names no word-timing heads its {layers}-layer decoder has, which "
+                         f"CTranslate2 needs (heads past the decoder crash it), and it could not be corrected ({exc})") from exc
+    log.warning("The model '%s' %s; its config.json now names the %d heads of the decoder's second half instead, "
+                "CTranslate2's own choice", name,
+                "named no word-timing heads" if listed is None else
+                f"named word-timing heads its {layers}-layer, {heads}-head decoder does not have, which crashes "
+                "CTranslate2", (layers - layers // 2) * heads)
+
+
 def download_model_files(name: str, device: str = "cpu") -> str:
     """Fetch the files of `name` into MODELS_DIR (or find them there) and return the directory.
 
@@ -8222,8 +8321,11 @@ def run_download_model(name: str, device: str = "auto") -> int:
 def load_model(args, name: Optional[str] = None, path: Optional[str] = None, strict: bool = False):
     """Load `name` (default: --model), picking device and precision for the GPU memory free right now.
 
-    `path` is the directory download_model_files() prepared for `name`; without it WhisperModel
-    resolves the name itself, which is fine for the operator's --model (a size, a repo or a folder).
+    `path` is the directory download_model_files() prepared for `name`; without it the operator's
+    --model folder is that directory, and any other name (a size, a repo) goes through
+    download_model_files() here. CTranslate2 reads the model's config.json as it loads, so the
+    folder is settled before WhisperModel() sees it, and safe_alignment_heads() has made the
+    word-timing heads in it fit the decoder.
     `strict` (--probe-gpu) means no CPU fallback, and a failed warm-up raises instead of warning.
     With the AMD engine, a model loaded and warmed up on the GPU resets the crash guard.
     A Kitsune model loads through load_kitsune_model() instead.
@@ -8268,18 +8370,20 @@ def load_model(args, name: Optional[str] = None, path: Optional[str] = None, str
         compute = "float16" if device == "cuda" else "int8"
     where = "the AMD GPU (ROCm)" if ROCM_ACTIVE and device == "cuda" else device
     log.info("Loading Whisper model '%s' on %s (%s); models are stored in %s", name, where, compute, MODELS_DIR)
+    folder = local or download_model_files(name)
+    safe_alignment_heads(folder, name)
     kwargs = {"device": device, "compute_type": compute, "download_root": str(MODELS_DIR)}
     if args.cpu_threads:
         kwargs["cpu_threads"] = args.cpu_threads
     try:
-        model = WhisperModel(path or name, **kwargs)
+        model = WhisperModel(folder, **kwargs)
     except Exception as exc:  # noqa: BLE001
         if device != "cuda" or strict:
             raise
         log.warning("CUDA initialisation failed (%s). Falling back to CPU int8, which is slow for large models.", exc)
         device, compute = "cpu", "int8"
         kwargs.update(device=device, compute_type=compute)
-        model = WhisperModel(path or name, **kwargs)
+        model = WhisperModel(folder, **kwargs)
     warm_up(model, args, device=device, strict=strict)
     return model, device, compute
 

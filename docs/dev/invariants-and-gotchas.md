@@ -287,6 +287,14 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   Python 3.12 and 3.13 did). The server and the tools decode through `decode_audio_file()`, which
   runs faster-whisper's own steps on a file opened without the option on that error alone; never
   call `decode_audio()` directly.
+- CTranslate2 files a converted model's `alignment_heads` (`config.json`) by decoder layer without
+  a bounds check, at every word-timed decode. kotoba-whisper's `-faster` conversions (v1.0,
+  bilingual v1.0, v2.0) list large-v3's heads, layers 7 to 25, for a 2-layer decoder: the warm-up
+  decodes without word timings and passed, and the first window ended the server with an access
+  violation (exit code -1073741819). `load_model()` settles the model's folder first and
+  `safe_alignment_heads()` rewrites such a list, from the decoder `ct2_decoder_shape()` reads in
+  `model.bin`, to every head of the decoder's second half, CTranslate2's own default. See
+  `server-runtime.md`, "A converted model's word-timing heads".
 - Hugging Face's xet transfer backend stalled on Windows; the server sets `HF_HUB_DISABLE_XET=1`.
   It also sets `HF_HUB_VERBOSITY=error` and `HF_HUB_DISABLE_SYMLINKS_WARNING=1` before the
   library is imported: the Hub's "set a HF_TOKEN" nag arrives as an `X-HF-Warning` header that
