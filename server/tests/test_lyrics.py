@@ -1215,11 +1215,19 @@ class RigModel(FakeModel):
 
 
 def fake_faster_whisper(monkeypatch, model, audio):
-    """faster_whisper in sys.modules for dump_words.main(): WhisperModel() is `model`, decode_audio() `audio`."""
+    """faster_whisper in sys.modules for dump_words.main(): WhisperModel() is `model`, decode_audio() `audio`,
+    and download_model() a folder holding a model.bin."""
     import types
+
+    def download_model(name, cache_dir=None, **kwargs):
+        folder = Path(cache_dir) / name
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "model.bin").write_bytes(b"")
+        return str(folder)
 
     package = types.ModuleType("faster_whisper")
     package.WhisperModel = lambda *args, **kwargs: model
+    package.download_model = download_model
     package.audio = types.ModuleType("faster_whisper.audio")
     package.audio.decode_audio = lambda path, sampling_rate=RATE: audio
     monkeypatch.setitem(sys.modules, "faster_whisper", package)

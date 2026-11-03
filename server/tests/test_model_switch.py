@@ -871,8 +871,10 @@ def test_health_without_a_models_directory(monkeypatch, tmp_path):
 
 # --------------------------------------------------------------------------- load_model and the files
 
-def test_load_model_passes_the_name_or_the_prepared_directory(monkeypatch):
-    names = []
+def test_load_model_downloads_the_name_or_takes_the_prepared_directory(monkeypatch, tmp_path):
+    # CTranslate2 reads config.json as it loads, so WhisperModel() gets the folder the server has
+    # already looked at (safe_alignment_heads()), never a name to resolve on its own.
+    names, fetched = [], []
 
     class WhisperModel:
         def __init__(self, name, **kwargs):
@@ -881,7 +883,14 @@ def test_load_model_passes_the_name_or_the_prepared_directory(monkeypatch):
         def transcribe(self, *a, **k):
             return iter(()), None
 
-    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=WhisperModel))
+    def download_model(name, cache_dir=None, **kwargs):
+        fetched.append((name, cache_dir))
+        folder = tmp_path / name
+        folder.mkdir(exist_ok=True)
+        (folder / "model.bin").write_bytes(b"")
+        return str(folder)
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=WhisperModel, download_model=download_model))
     # --device auto is the CPU only when neither GPU backend answers; without both of these the
     # test would ask for CTranslate2 on a CUDA machine and for MLX on an Apple one (see test_mlx.py).
     monkeypatch.setattr(server, "cuda_available", lambda: False)
@@ -891,7 +900,8 @@ def test_load_model_passes_the_name_or_the_prepared_directory(monkeypatch):
     assert isinstance(model, WhisperModel) and (device, compute) == ("cpu", "int8")
     server.load_model(args, "small")
     server.load_model(args, "small", path="/models/snapshots/abc")  # a client name never reaches WhisperModel raw
-    assert names == ["large-v3", "small", "/models/snapshots/abc"]
+    assert names == [str(tmp_path / "large-v3"), str(tmp_path / "small"), "/models/snapshots/abc"]
+    assert fetched == [("large-v3", str(server.MODELS_DIR)), ("small", str(server.MODELS_DIR))]
 
 
 def test_download_model_files_uses_the_models_directory_and_wants_model_bin(monkeypatch, tmp_path):

@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Installs what the Kitsune-Transcribe models run on: PyTorch, transformers and safetensors.
+"""Installs what the Kitsune-Transcribe models run on: PyTorch, transformers, safetensors and librosa.
 
 The server runs Whisper through CTranslate2 and needs none of this. Kitsune's students are not
 Whisper models, and the server runs them on PyTorch (server/kitsune_engine.py). setup.cmd /
 setup.sh run this file when a Kitsune model is picked, before the model downloads. It installs
 PyTorch's CUDA build where nvidia-smi lists an NVIDIA GPU, its CPU build elsewhere (about 3 GB
 against about 200 MB), PyPI's own build on macOS, and then server/requirements-kitsune.txt, all
-into the interpreter running it (the venv's). A later run with PyTorch already importable
-installs nothing unless --force says so.
+into the interpreter running it (the venv's). A later run with PyTorch already importable leaves
+PyTorch alone unless --force says so, and installs only what requirements-kitsune.txt lists and
+the venv lacks: librosa, say, which that file did not list before 0.27.2.
 
-  kitsune_setup.py            install when missing; exit 0 once torch and transformers import
+  kitsune_setup.py            install when missing; exit 0 once torch, transformers and librosa import
   kitsune_setup.py --cpu      the CPU build even where there is an NVIDIA GPU
   kitsune_setup.py --force    install again (a CPU build replaced by the CUDA one, say)
   kitsune_setup.py --status   what is installed and whether PyTorch sees a GPU; nothing is installed
@@ -32,7 +33,10 @@ REQUIREMENTS = HERE / "requirements-kitsune.txt"
 # it runs on every NVIDIA driver from 570 on.
 TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu128"
 TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
-IMPORT_CHECK = "import torch, transformers, safetensors; print(torch.__version__, transformers.__version__)"
+# librosa.filters, not librosa alone: librosa loads its parts lazily, and the mel filters the feature
+# extractors ask for import numba, which is where a numpy too new for it fails.
+IMPORT_CHECK = ("import torch, transformers, safetensors, librosa.filters; "
+                "print(torch.__version__, transformers.__version__)")
 
 
 def say(message: str) -> None:
@@ -81,7 +85,7 @@ def status(python: str = sys.executable) -> int:
     gpus = nvidia_gpus()
     say(f"NVIDIA GPU: {gpus[0] if gpus else 'none found'}")
     if not versions:
-        say("PyTorch / transformers: not installed (Kitsune models cannot run; Whisper models do)")
+        say("PyTorch / transformers / librosa: not all installed (Kitsune models cannot run; Whisper models do)")
         return 0
     say(f"PyTorch / transformers: {versions}")
     try:
@@ -117,13 +121,13 @@ def install(python: str = sys.executable, cpu: bool = False, force: bool = False
         if subprocess.call(torch_command(python, bool(gpus))) != 0:
             say("installing PyTorch failed")
             return 1
-    say("installing transformers and safetensors ...")
+    say("installing transformers, safetensors and librosa ...")
     if subprocess.call([python, "-m", "pip", "install", "-r", str(REQUIREMENTS)]) != 0:
         say(f"installing {REQUIREMENTS.name} failed")
         return 1
     after = installed(python)
     if not after:
-        say("PyTorch or transformers still does not import; Kitsune models cannot run here")
+        say("PyTorch, transformers or librosa still does not import; Kitsune models cannot run here")
         return 1
     say(f"ready: PyTorch / transformers {after}")
     return 0

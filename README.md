@@ -909,11 +909,11 @@ with 16-bit activations. Two spellings that differ only in the activations (`-in
 What to know:
 
 - **PyTorch.** Kitsune models are not Whisper models and do not run on CTranslate2; the server
-  runs them on PyTorch and transformers. Setup installs both when you pick a Kitsune model
-  (`server/kitsune_setup.py`: the CUDA build where it finds an NVIDIA GPU, about 3 GB, else the
-  CPU build). To add them later, run
+  runs them on PyTorch and transformers, with librosa. Setup installs them when you pick a Kitsune
+  model (`server/kitsune_setup.py`: PyTorch's CUDA build where it finds an NVIDIA GPU, about 3 GB,
+  else the CPU build). To add them later, run
   `~/.shisu-ko/venv/Scripts/python server/kitsune_setup.py` (`venv/bin/python` on Linux/macOS);
-  `--status` says what is installed. Without PyTorch the popup says so when you pick a Kitsune
+  `--status` says what is installed. Without them the popup says so when you pick a Kitsune
   model, and nothing is downloaded. `run.cmd --check` reports it too. The Docker image includes
   PyTorch; the Nix package does not.
 - **Japanese only.** A Kitsune model refuses to start with another `--language`. It has no
@@ -928,8 +928,10 @@ What to know:
   requires it); see the model card in each model's repo.
 
 `--compute-type` takes `bfloat16`, `float16` or `float32` for a Kitsune model. The models live in
-the repos `Multy123/kitsune-transcribe-<size>`, the bf16 export at the root and each precision in
-a folder of its own; `--model` also takes a local folder holding such a package.
+the repos `Multy123/kitsune-transcribe-t0.6b-ja` (kitsune-0.6b), `-p0.3b-ja` (kitsune-0.3b) and
+`-p0.1b-ja` (kitsune-0.1b), the bf16 export at the root and each precision in a folder of its
+own. `--model` and the popup also take such a repo id, and `--model` a local folder holding such
+a package.
 
 ## AMD graphics cards (experimental)
 
@@ -1131,7 +1133,7 @@ server does not send).
 | "Loading model X…" stays on the video for a long time | A model picked in the popup is downloaded first, at your connection speed (large-v3 is 3 GB, small about 500 MB); the current model keeps subtitling meanwhile, and the transcript starts over once the new one is in. The popup's status line follows along. |
 | "Shisu-ko: model X: unknown model size" or "… was not found on Hugging Face" | The name in the popup's Transcription model field is not a faster-whisper size or an existing `owner/name` repo. Fix the name there; the previous model keeps running meanwhile. |
 | "Shisu-ko: model X: … not a CTranslate2/faster-whisper model" | The repo holds a PyTorch checkpoint, not converted weights. Convert it with `ct2-transformers-converter`, or pick a `*-ct2` or `faster-whisper` repo of the same model. |
-| "Shisu-ko: model kitsune-…: Kitsune models run on PyTorch, which is not installed" | Run `server/kitsune_setup.py` with the venv's Python (see [Kitsune-Transcribe models](#kitsune-transcribe-models)), or setup again picking a Kitsune model, then pick the model again. |
+| "Shisu-ko: model kitsune-…: Kitsune models need PyTorch, transformers and librosa, not all installed here" | Run `server/kitsune_setup.py` with the venv's Python (see [Kitsune-Transcribe models](#kitsune-transcribe-models)), or setup again picking a Kitsune model, then pick the model again. Before 0.27.2 it did not install librosa, which the models cannot load without: run it again. |
 | "Shisu-ko: model kitsune-…: its repo has no … folder" (or "no model at its root") | That size or precision is not published (yet). Pick another one. |
 | Server log says it has no model left and exits with code 3 | A switch failed and the previous model could not be reloaded either (usually GPU memory). The launcher restarts the server on its `--model`; fix or clear the name in the popup. Only with `--model-idle-minutes 0` or the AMD engine: by default the server stays up and loads the previous model when a video needs it. |
 | Popup says "X was not found on this computer; the preset is used" or that a font name is letters, digits, spaces, dots, hyphens and underscores | Install the font, or type its family name exactly as the operating system lists it. Quotes, commas and other punctuation are refused; in both cases the preset font applies until the name resolves. |
@@ -1189,7 +1191,7 @@ server/
   mlx_beam.py         the beam search mlx-whisper lacks; server.py loads it on the Apple GPU
   kitsune_engine.py   the Kitsune-Transcribe models on PyTorch behind faster-whisper's interface:
                       packages, quantised weights, CTC and cross-attention word timings
-  kitsune_setup.py    installs PyTorch and transformers for them, run by setup (stdlib only)
+  kitsune_setup.py    installs PyTorch, transformers and librosa for them, run by setup (stdlib only)
   setup.cmd/.sh       setup, downloads the model     run.cmd/.sh   start (with auto-restart)
   amd_setup.py        the experimental AMD engine, run by setup: looks for a card, installs
                       CTranslate2 for ROCm into ~/.shisu-ko/rocm and tests it (stdlib only)
@@ -1312,7 +1314,7 @@ with [mlx-whisper](https://pypi.org/project/mlx-whisper/) on Apple Silicon,
 [yt-dlp](https://github.com/yt-dlp/yt-dlp),
 [PyAV](https://github.com/PyAV-Org/PyAV), OpenAI's [Whisper](https://github.com/openai/whisper)
 and [Kotoba-Whisper](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0), and for the Kitsune
-models on [PyTorch](https://pytorch.org/), [transformers](https://github.com/huggingface/transformers),
+models on [PyTorch](https://pytorch.org/), [transformers](https://github.com/huggingface/transformers), [librosa](https://librosa.org/),
 [Cohere Transcribe](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) and NVIDIA's
 [Parakeet](https://huggingface.co/nvidia/parakeet-tdt_ctc-0.6b-ja).
 `server/mlx_beam.py` ports openai-whisper's beam search decoder (MIT) onto MLX. The mining flow

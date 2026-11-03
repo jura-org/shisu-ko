@@ -267,9 +267,11 @@ try {
   await poll(storedDock, (value) => value === "video-right", 3000);
   const right = await page.locator(".shisuko-sub").evaluate((el) => {
     const r = el.getBoundingClientRect();
-    return { mode: getComputedStyle(el).writingMode, left: r.left, outside: !!el.closest(".shisuko-outside") };
+    return { mode: getComputedStyle(el).writingMode, orientation: getComputedStyle(el).textOrientation,
+      left: r.left, outside: !!el.closest(".shisuko-outside") };
   });
   assert.equal(right.mode, "vertical-rl");
+  assert.equal(right.orientation, "upright", "digits, ? and ! stand upright in the column");
   assert.equal(right.outside, true, "the right dock lives outside the player");
   assert.ok(right.left >= playerRect.x + playerRect.width, `the column must stand right of the video (left ${right.left})`);
   await dragGrip(playerRect.x + playerRect.width / 2, viewport.height - 10);

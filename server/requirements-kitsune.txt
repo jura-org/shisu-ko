@@ -2,3 +2,6 @@
 # picks its CUDA or CPU build; Whisper models need none of this.
 transformers>=5.13
 safetensors>=0.6
+# transformers' Parakeet and Cohere feature extractors build their mel filters with librosa, and
+# refuse to load without it.
+librosa>=0.10.2
