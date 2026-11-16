@@ -483,10 +483,13 @@ test("a newer release than the server runs is offered in the banner", async () =
   assert.equal(popup.el("update-result").textContent, "Newest release: 0.9.0, the server checked 3 min ago");
 });
 
+// A restart alone does not update Docker or Nix, so the banner names their commands.
+const CANNOT_UPDATE_TEXT = "Shisu-ko 0.9.0 is available — the server runs 0.8.0 and was not started by run.cmd / run.sh, so it cannot update itself; restart it by hand (Docker: update the folder, then docker compose up -d --build; Nix: nix run --refresh github:Multysquid/shisu-ko)";
+
 test("a server not started by the launcher gets the explanation and no Update button", async () => {
   const { popup } = await open({ health: healthOf("0.8.0", false) });
   assert.equal(popup.el("update-banner").hidden, false);
-  assert.equal(popup.el("update-text").textContent, "Shisu-ko 0.9.0 is available — the server runs 0.8.0 and was not started by run.cmd / run.sh, so it cannot update itself; restart it by hand to update");
+  assert.equal(popup.el("update-text").textContent, CANNOT_UPDATE_TEXT);
   assert.equal(popup.el("update-now").hidden, true);
   assert.equal(popup.el("update-later").hidden, false);
 });
@@ -544,7 +547,7 @@ test("a Chrome Web Store install behind the release is told the store updates it
   assert.equal(server.popup.el("update-text").textContent, "Shisu-ko 0.9.0 is available — the server runs 0.8.0.");
   assert.equal(server.popup.el("update-now").hidden, false);
   const cannot = await open({ health: healthOf("0.8.0", false), extension: "newer" }, CHROME_STORE_URL);
-  assert.equal(cannot.popup.el("update-text").textContent, "Shisu-ko 0.9.0 is available — the server runs 0.8.0 and was not started by run.cmd / run.sh, so it cannot update itself; restart it by hand to update");
+  assert.equal(cannot.popup.el("update-text").textContent, CANNOT_UPDATE_TEXT);
   assert.equal(cannot.popup.el("update-release").hidden, true);
   const behind = await open({ health: { ok: true, data: { version: "0.8.0", model: "large-v3", device: "cuda", compute_type: "float16" } }, extension: "newer" }, CHROME_STORE_URL);
   assert.equal(behind.popup.el("update-text").textContent, "Shisu-ko 0.9.0 is available — the server runs 0.8.0, which cannot be updated from here; restart it by hand to update (run.cmd / run.sh update it at start)");

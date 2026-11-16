@@ -829,7 +829,9 @@ function renderUpdate() {
       showUpdate = !(updateFlow.state === "failed" && updateFlow.refused);
       showLater = !busy;
     } else if (decision.server === "cannot") {
-      message = `Shisu-ko ${latest} is available — the server runs ${server} and was not started by run.cmd / run.sh, so it cannot update itself; restart it by hand to update`;
+      // A plain restart may start the same version again: Docker runs the image it built until
+      // it is rebuilt from the updated folder, and Nix may reuse the revision it fetched last.
+      message = `Shisu-ko ${latest} is available — the server runs ${server} and was not started by run.cmd / run.sh, so it cannot update itself; restart it by hand (Docker: update the folder, then docker compose up -d --build; Nix: nix run --refresh github:Multysquid/shisu-ko)`;
       showLater = true;
     } else if (decision.server === "behind") {
       // A server from before /update (0.8.0): its launcher, if it has one, updates it at the
