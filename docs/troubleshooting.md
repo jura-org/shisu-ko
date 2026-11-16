@@ -1,7 +1,6 @@
 # Troubleshooting
 
-Find the message or the symptom you see. The most common problems are also in the
-[README](../README.md#troubleshooting).
+Find the message or the symptom you see.
 
 | Symptom | Fix |
 |---|---|

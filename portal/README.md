@@ -3,6 +3,13 @@
 A phone-sized web page, served by the computer that runs the Shisu-ko server: a YouTube video with
 Shisu-ko's subtitles, word lookups through Yomitan, and one-tap mining into Anki.
 
+<p>
+<img src="../docs/images/portal-watch.png" width="190" alt="The watch view: the video, and the line being said in the middle with its words lighting up as they are spoken">
+<img src="../docs/images/portal-sheet.png" width="190" alt="A tapped word in the dictionary sheet: headword, reading with pitch accent, definitions and the Mine button">
+<img src="../docs/images/portal-anki-setup.png" width="190" alt="The Anki setup: deck, note type, and what each field of the note gets">
+<img src="../docs/images/portal-home.png" width="190" alt="The list of videos, each with how far you got">
+</p>
+
 ## Setting it up
 
 It uses the services the extension uses, so set those up first: the server, Anki with

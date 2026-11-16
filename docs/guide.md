@@ -2,7 +2,7 @@
 
 The [README](../README.md#using-shisu-ko) covers the basics. This page explains each part in
 full: watching, the shortcuts, reading with Yomitan, sentence mining, the word colours, live
-streams and every setting in the popup.
+streams, every setting in the popup and the limitations.
 
 - [Watching](#watching)
 - [Shortcuts](#shortcuts)
@@ -11,6 +11,7 @@ streams and every setting in the popup.
 - [Word colours](#word-colours)
 - [Live streams](#live-streams)
 - [Settings](#settings)
+- [Limitations](#limitations)
 
 ## Watching
 
@@ -366,3 +367,15 @@ accent field names (the last one
 empty means the first field named pitch or accent that holds a readable value), the audio
 padding around the sentence, the clip format (MP3 or WAV), the Shisu-ko server URL (default
 `http://127.0.0.1:8790`) and the result of the server's last update check.
+
+## Limitations
+
+- Subtitles are hidden while YouTube plays an ad.
+- YouTube changes its player regularly. Downloads can then fail until a new yt-dlp is out, usually
+  within days, and you have installed it (see [Troubleshooting](troubleshooting.md)). Shisu-ko's
+  own updates do not upgrade yt-dlp.
+- Whisper sometimes invents a line over music or silence. Loud noise and songs in other languages
+  stay blank.
+- Live streams work in Firefox only, and not on streams without DVR. On low-latency streams the
+  subtitles can trail the sound by a few seconds.
+- One video is transcribed at a time.
