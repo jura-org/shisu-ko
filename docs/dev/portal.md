@@ -169,7 +169,7 @@ Each ping carries the base URL's own parameters, a random `cpn`, the stretches p
 response's client (`c`, `cver`, `cr`), the phone's browser and system (`cbr`, `cbrver`, `cos`,
 `cosver`), `lact`, `volume`, `muted`, `fmt`, `afmt`, and fixed values (`ver`, `el`, `cplayer`,
 `fs`, `euri`, `vis`, `idpj`, `ldpj`), sent with the browser's YouTube cookies and
-`X-Goog-AuthUser: 0`. The README and `docs/amo/privacy-policy.md` state the same; a change here
+`X-Goog-AuthUser: 0`. `portal/README.md` and `docs/amo/privacy-policy.md` state the same; a change here
 changes them too.
 
 - **What is captured.** The tracking URLs must come from a signed-in player response: that is

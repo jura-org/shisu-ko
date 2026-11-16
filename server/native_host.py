@@ -188,9 +188,10 @@ def try_lock(path: Path):
 def server_starting(environ=os.environ) -> bool:
     """True while a server holds the instance lock but /health is still silent: it is loading.
 
-    server.py takes the lock before its model load and keeps it until it exits, so between a
-    launch and the first /health answer (10-40 s on a GPU, minutes for a first download) this
-    tells a starting server from none. A lock that cannot be tried (an unwritable data
+    server.py takes the lock before start_app() and keeps it until it exits, so between a launch
+    and the first /health answer (seconds; 10-40 s on a GPU where the model loads at the start,
+    with --model-idle-minutes 0 or the AMD engine, minutes for a first download) this tells a
+    starting server from none. A lock that cannot be tried (an unwritable data
     directory, a filesystem without locks) counts as not starting, which is what the answer
     used to be.
     """

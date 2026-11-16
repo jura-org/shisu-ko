@@ -190,3 +190,88 @@ shares the console pytest runs in, whose window is the terminal's own or none.
 per test file and runs up to one file per core at a time. `addon/tests/popup.test.js` waits on
 real timers (the 150 ms save debounce, `wait(200)`) and takes some 12 s alone, every other file
 under 2.5 s, so it sets the length of the run. CI runs the two folders in separate steps.
+
+## Checks and test coverage
+
+Checks:
+
+- Extension: `for file in addon/*.js; do node --check "$file"; done`, `npx web-ext lint --source-dir addon`,
+  `npx web-ext build --source-dir addon --artifacts-dir dist --overwrite-dest --ignore-files "tests/**"` (the
+  tests folder is not shipped).
+- Browser packages: `npm ci`, `npm test`, `npm run build`, `npm run watch`, and `npm run test:browser`.
+  `nix build .#addon` and `nix build .#addon-chrome` build the two release packages. Refresh committed PNG
+  icons after changing `addon/icons/icon.svg` with `npm run refresh-icons` (ImageMagick required).
+- Server: `python -W error -c "import ast; ast.parse(open('server/server.py', encoding='utf-8').read())"`,
+  `server/run.cmd --check`. The planning, cue-building and live-follower code is pure and easy
+  to unit test by importing `server.py` as a module (register it in `sys.modules` first because
+  of the postponed annotations).
+- Nix: `nix develop` gives the Python environment, `web-ext`, Node and Deno; `nix run .#tests`
+  runs both test suites; `nix build .#addon` produces the extension zip.
+
+Tests cover the pure logic on both sides, need no GPU, network or Firefox, and run in CI on
+every push and pull request via [`.github/workflows/tests.yml`](../../.github/workflows/tests.yml):
+
+```
+pip install -r server/requirements-test.txt
+python -m pytest server/tests
+node --test addon/tests/*.test.js
+```
+
+The server suite runs on up to eight processes at once (pytest-xdist); `-n 0` runs it in one, and
+so does a command line that names single test files. The one test that opens console windows, a
+real `start` in `test_native_host.py`, runs on CI and locally only with `SHISUKO_TEST_CONSOLES=1`.
+
+The browser smoke test uses a local fixture page and does not open a real video. The shared
+development commands are `npm ci`, `npm test`, `npm run build`, `npm run watch`, and
+`npm run test:browser`. Before the first browser test, run `npx playwright install chromium`
+(`npx playwright install --with-deps chromium` on Linux). Set `CHROMIUM_PATH` to use an existing
+Chromium executable instead. The browser test also runs an isolated AnkiConnect fixture; it does
+not change your Anki collection.
+
+The server suite covers window planning, interval merging, cue building and the hallucination
+gates, the preview decode, the live-stream buffer and follower (driven by a fake source and
+clock), fetch retries, the origin policy, session tokens and the on-disk cue cache.
+`test_model_switch.py` drives a model switch with a fake faster-whisper: name validation and
+aliases, the download beside the working model, the swap and session restart, every failure path
+and cooldown, the per-model cache files and what `/health` and `/sync` report. `test_mlx.py` does
+the same for the Apple GPU with MLX faked in as well: which backend `--device auto` picks, the
+model names shared with faster-whisper, the download of the converted weights, the voice-activity
+pass the wrapper runs in mlx-whisper's stead, and a model switch on that backend — no Mac needed.
+The beam search Shisu-ko adds to mlx-whisper is covered on the same fakes: the decoder itself, the
+cache reordering that skips the cross-attention half, and the fall back to greedy decoding when the
+patch cannot be applied.
+`test_native_host.py` drives the native host behind the Start button: the message framing, the
+two commands and every malformed request, the launch on each platform with a recorded `Popen`,
+the instance lock shared with `server.py`, registration for every browser into a temporary home
+with a fake registry, the host over a real pipe, and the wrapper and launcher scripts.
+`test_update_endpoint.py` drives `POST /update` over a real socket: the launcher variable and
+the two no-update switches, the 409s, the answer followed by the exit with code 4 through
+`main()`, the origin rule that admits the extension and no page, and the launchers' `:update`
+label, variable and code-4 lines. The extension
+suite runs `background.js` and the helpers of `content.js` in a Node `vm` sandbox that stands in
+for the WebExtension APIs: settings storage, the server proxy, the no-Anki fallback's downloads,
+sentence mining, the live clock and the master switch. `content.test.js` also covers the model
+name sent with every sync, the restart on a new session token, the model status and error
+messages and the font stack; `popup-copies.test.js` keeps the popup's copies of the font and
+model-name rules equal to those in `content.js` and `server.py`. `background.test.js` covers
+the `startServer` message: the native host's answers, the timeout, the mapping of the browser's
+errors to hints, and the launch record that outlives the event page; `popup.test.js` runs the
+popup's start flow against a fake document, from the button to the 90 s deadline and its hints.
+The update check is covered on both sides too: `server/tests/test_update_check.py` holds the
+server's request (two headers, no token or cookie), the day's cache, the backoff, the off switch
+and `/health`'s `latest`; `background.test.js` feeds `/health` answers carrying `latest` to the
+version helpers, `decideUpdate` and the badge, the `/update` request with its record, and the
+`/health` polls that end it; `popup.test.js` walks the banner through every verdict, Update to
+"Updated to 0.9.0", the old version coming back, the 120 s deadline and Not now;
+the notification at start and its click; `settings.test.js` holds that `addon/` makes no request
+beyond the server and that only `saveMine()` saves files. The word colours are
+covered in `words.test.js` (reading a note's fields and pitch accent, the card states, the
+conjugation matcher with its boundaries and the words it must not colour), `background.test.js`
+(the rows a /sync brings, a delta, a deck change, the server's verdicts, the deck list, and a grep
+that finds no AnkiConnect call in the extension), `content.test.js` (the spans a line is drawn
+with, the poll, a deck change, the refresh that redraws only the changed lines), `popup.test.js`
+(the deck list, its hints and when Anki is asked), `test_deck_index.py` (the server's deck: the
+five searches, the edits, a deleted note, a deck switch, the new-note trigger, Anki away, and its
+note reading against words.js over random fields) and the golden test
+(`deck-golden.test.js` with `test_deck_golden.py`: one invented deck, the extension's old path and
+the server's give the same entries).

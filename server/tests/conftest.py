@@ -121,9 +121,10 @@ def pytest_cmdline_main(config):
 
 
 class StoppedApp:
-    """The App a Transcriber thread finds once its test is over: no model to switch, no work, no sweep.
+    """The App a Transcriber thread finds once its test is over: no model to switch, no work, no
+    model to load or free, no sweep.
 
-    The thread's loop asks these three and sleeps, so from its next round on it touches nothing else;
+    The thread's loop asks these four and sleeps, so from its next round on it touches nothing else;
     `seen` is set at the start of that round, once whatever it was doing for its own App is done.
     """
 
@@ -137,6 +138,9 @@ class StoppedApp:
 
     def pick_work(self):
         return None
+
+    def tend_model(self, work: bool) -> bool:
+        return False
 
 
 @pytest.fixture(autouse=True)

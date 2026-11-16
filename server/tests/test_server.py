@@ -3,7 +3,7 @@
 The cue builder and the hallucination gates have their own file, test_cues.py.
 
 These do not touch the network, GPU or a real Whisper model: only the functions that are
-plain data in, data out, as called out in the README's Development section.
+plain data in, data out, as called out in the "Commands" section of AGENTS.md.
 """
 from __future__ import annotations
 

@@ -1,7 +1,9 @@
 # AGENTS.md
 
 Guidance for AI coding agents (and new contributors) working in this repository.
-Read this before changing code; the README is the user-facing document.
+Read this before changing code; the README, `portal/README.md` and the user pages in `docs/`
+(`install.md`, `guide.md`, `server.md`, `amd.md`, `troubleshooting.md`, `how-it-works.md`) are the
+user-facing documents.
 The detail behind every section lives in `docs/dev/` (index: `docs/dev/README.md`).
 
 ## What this project is
@@ -30,6 +32,8 @@ portal/       the phone portal: portal.py (stdlib server; yt-dlp and PyAV import
               (the pairing QR code), static/ (the page; lib.js holds its pure helpers and every UI
               string), tests/; started by server/portal.cmd / portal.sh or `nix run .#portal`
 docker/       Windows wrappers for docker compose, WSL Docker Engine installer
+docs/         the user pages the README links: install.md, guide.md, server.md, amd.md,
+              troubleshooting.md, how-it-works.md (the portal's is portal/README.md)
 docs/dev/     developer docs: the full design of each subsystem, its reasons and measurements
 docs/cws/     Chrome Web Store setup: the service account and publisher id cws-listing.yml needs
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example
@@ -75,6 +79,19 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   client's answer is unchanged. Nor did the word colours: `/sync`'s optional `deck: {name, word,
   pitch, since}` is answered `deck` only when its token moved, and `/health?decks=1` alone adds
   `anki_decks`.
+- The model is in memory only while something needs it (`--model-idle-minutes`, default 1,
+  `model_on_demand()`): `start_app()` builds the server's App without one, and on the transcriber
+  thread, the only one that loads, runs or frees a model, `App.tend_model()` loads it when a window
+  waits or a watched video's audio is on its way, keeps it while a watched video has audio left
+  ahead of its playhead (`video_unfinished()`, paused or not), and frees it after `idle_limit()`
+  without a window otherwise (the idle minutes, never under two `--window`s). Until then every sync
+  is answered from the cues the server has. Every other App (`on_demand` False: the tools', the
+  tests') keeps the model it was given, None included; `--model-idle-minutes 0` and the AMD engine
+  (its crash guard counts starts that load a model, and Windows may never free one) load at the
+  start and keep it. On demand a switch loads the new model at once (it then waits out
+  `idle_limit()` like any), a failed switch reloads nothing and never ends the server, a failed
+  load waits `--retry-after` by name (`load_failed`), and `old_record_sweep()` waits for a model
+  rather than load one. Detail: `docs/dev/server-runtime.md`, "How the model loads on demand".
 - A cue's word timings (`words`) and source (`src`, `"human"` on a line from the creator's
   subtitles) are opt-in on `/sync`: only a body with `"words": true` gets them, and the default
   response never changes (`without_words()`, `OPT_IN_CUE_FIELDS`). Their texts join to the cue's text
@@ -251,7 +268,7 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   opaque, expiring `/api/hls/<token>/` paths. Its only requests to YouTube under the viewer's account
   beyond yt-dlp's are the watch-history pings (`WatchReporter`), sent only with `--watch-history on`
   and a cookie browser (never in the container), and built from a signed-in player response's own
-  tracking URLs, never from yt-dlp's `mark_watched`; what they carry is listed in README.md,
+  tracking URLs, never from yt-dlp's `mark_watched`; what they carry is listed in `portal/README.md`,
   `docs/dev/portal.md` and `docs/amo/privacy-policy.md`, which change with them. It talks to the server only through `/sync`, `/clip`
   and `/health`, using `/sync`'s opt-in `words` and `deck` and its `retrying` / `retry_in` fields,
   and works without them. The page's word colours run the extension's own `addon/words.js`, which
@@ -291,7 +308,12 @@ track arrived. `replay_cues.py --human` and `retranscribe.py --human` measure a 
 **Server runtime** (`docs/dev/server-runtime.md`). Live streams: `Fetcher.follow_live()`,
 `LiveFollower`, `DashLiveSource`, `Session.live_audio`; live sessions are never cached. Model
 switching: `App.request_model()` and `App.switch_model_if_wanted()`, run before every window,
-never during one. Backends: `resolve_device()` decides `cuda` / `mlx` / `cpu` once and
+never during one. The model on demand: `model_on_demand()`, `App.tend_model()` (after every
+`pick_work()`), `idle_limit()`, `video_unfinished()`, `audio_on_its_way()` (with `window_span()`,
+the planner's span before any audio), `load_on_demand()`, `free_model()`, `release_mlx_memory()`;
+a fetched track is int16 (`decode_track()`, faster-whisper's own decoding steps), and
+`audio_slice()` hands each window out as float32.
+Backends: `resolve_device()` decides `cuda` / `mlx` / `cpu` once and
 `load_model()` builds either a `WhisperModel` or an `MlxWhisperModel`, which presents the same two
 methods over mlx-whisper; `server/mlx_beam.py` gives that path the beam search the library lacks.
 Kitsune models: `kitsune_name()`, `kitsune_download_plan()`, `load_kitsune_model()`, and in
@@ -351,7 +373,7 @@ Firefox source; `_serverlib.py`, `_loadBackground.js` and `_loadContent.js` load
 
 ## Commands
 
-Nix (any Linux with flakes, NixOS): `nix run . -- [options]` starts the server with CUDA
+Nix (x86-64 Linux with flakes, NixOS): `nix run . -- [options]` starts the server with CUDA
 (`flake.nix`; CTranslate2 comes prebuilt from `cache.nixos-cuda.org`, onnxruntime is the CPU build
 because only the VAD uses it). `nix run .#check`, `nix run .#tests`, `nix build .#addon`,
 `nix develop` for a shell with Python, web-ext, Node and Deno. `.#server-cpu` is the CUDA-free variant.
@@ -365,6 +387,8 @@ Start button's launcher is registered and which model a bare start runs).
 This machine's built-in default model: `server.py --default-model` prints it and exits, ignoring
 `config.json`, which is the choice it is about to be compared with.
 Music videos: `--lyrics auto` (default) or `--lyrics off`; see `docs/dev/cue-building.md`.
+The model in memory only while needed: `--model-idle-minutes N` (default 1; 0 loads it at the start
+and keeps it); see `docs/dev/server-runtime.md`, "How the model loads on demand".
 The creator's Japanese subtitles: `--human-subtitles auto` (default) or `off`; see
 `docs/dev/cue-building.md`, "Human subtitles".
 Model download with a progress bar: `server.py --download-model NAME`; see
@@ -458,9 +482,9 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
   CTranslate2, or it costs a minute on Windows and asks the CUDA driver for a GPU.
 - PyAV 19 dropped `av.open()`'s `metadata_errors`, which faster-whisper 1.2.1's `decode_audio()`
   still passes, so `decode_audio()` raises `TypeError` there (a fresh install gets PyAV 19: CI's
-  Python 3.12 and 3.13 did). The server and the tools decode through `decode_audio_file()`, which
-  runs faster-whisper's own steps on a file opened without the option on that error alone; never
-  call `decode_audio()` directly.
+  Python 3.12 and 3.13 did). The server and the tools decode through `decode_audio_file()` (the
+  tools' float32) and `decode_track()` (the fetch's int16), which run faster-whisper's own steps on
+  a file opened without the option where PyAV refuses it; never call `decode_audio()` directly.
 - CTranslate2 files a converted model's `alignment_heads` (`config.json`) by decoder layer without
   a bounds check, at every word-timed decode. kotoba-whisper's `-faster` conversions list
   large-v3's heads (layers 7 to 25) for a 2-layer decoder: the first window ended the server with
@@ -557,8 +581,8 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
 3. Run the checks above, then test manually on a real YouTube video: subtitles appear, hover
    pauses, transcript panel works, and (with Anki running) a Yomitan card gets its audio and
    picture from the server within seconds, and Alt+Shift+M fills the newest card with a toast.
-4. Update README sections that describe changed behaviour; keep this file's invariants current,
-   and the matching `docs/dev/` file.
+4. Update the README and the user pages in `docs/` (and `portal/README.md`) where they describe
+   changed behaviour; keep this file's invariants current, and the matching `docs/dev/` file.
 5. Commit with a descriptive message; do not commit `.env`, `dist/` or anything from `~/.shisu-ko`.
 
 ## Release
