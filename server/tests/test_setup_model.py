@@ -901,7 +901,7 @@ def test_setup_sh_asks_then_downloads_then_says_it_is_done():
     cookies = text.index('\n"${VENV}/bin/python" "${HERE}/server.py" --setup-cookies || true\n')
     download = text.index('if ! "${VENV}/bin/python" "${HERE}/server.py" --download-model "$MODEL"; then')
     failed = text.index('echo "The model could not be downloaded. Check the connection and run setup.sh again,"\n'
-                        '  echo "or start ./run.sh: the server then downloads $MODEL itself, without a progress bar."')
+                        '  echo "or start the server (bash server/run.sh): it then downloads $MODEL itself, without a progress bar."')
     exit_line = text.index("exit 1", failed)
     closed = text.index("\nfi\n", exit_line)
     # The AMD engine's offer: its own line, after the download's if-block has closed, and `|| true`
@@ -911,19 +911,29 @@ def test_setup_sh_asks_then_downloads_then_says_it_is_done():
     calls = [l for l in text.splitlines() if "amd_setup.py" in l and not l.startswith("#")]
     assert calls == [amd_call.strip("\n")], "amd_setup.py is called once, with the venv's Python and no arguments"
     complete = text.index('echo "Setup is complete: the $MODEL model is downloaded and everything is ready."')
-    last = text.index('echo "Close this window and start ./run.sh."')
+    last = text.index('echo "Start the server with: bash server/run.sh"')
     assert check < best < loop < read < large < small < kit6 < kit1 < done_loop < kitsune < cookies < download < failed \
         < exit_line < closed < amd < complete < last
     between = text[closed + len("\nfi\n"):amd].splitlines()
     assert all(l.startswith("#") or l == "echo" for l in between), "nothing but comments and a blank line before it"
     assert text[amd + len(amd_call):complete] == "echo\n"
-    assert text.rstrip("\n").endswith('echo "Close this window and start ./run.sh."')
+    assert text.rstrip("\n").endswith('echo "Start the server with: bash server/run.sh"')
+    # The command the docs give, which runs whether or not run.sh still has its executable bit.
+    assert "./run.sh" not in text and "./setup.sh" not in text
     assert "downloaded on the first start" not in text
     assert 'echo "  1  ${BEST_LINE}"' in text and "2  small" in text
     assert "also downloads it on its first start" not in text and not any("also downloads it" in l for l in cmd_lines())
 
 
 def test_the_amd_helper_both_setups_call_is_there():
+def test_the_sh_launchers_without_a_venv_name_setup_the_way_the_docs_do():
+    # bash runs setup.sh whether or not it still has its executable bit, from the Shisu-ko folder.
+    for name in ("run.sh", "portal.sh"):
+        text = (SERVER_DIR / name).read_text(encoding="utf-8")
+        assert '[ -x "${VENV}/bin/python" ] || { echo "Run bash server/setup.sh first"; exit 1; }' in text, name
+        assert not any(f"./{script}" in text for script in ("run.sh", "setup.sh", "portal.sh")), name
+
+
     # Neither setup looks at the call's verdict, so a missing file would only print Python's
     # "can't open file" and go on to "Setup is complete": its absence shows here instead.
     assert (SERVER_DIR / "amd_setup.py").is_file()

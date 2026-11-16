@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Starts the Shisu-ko transcription server (Linux/macOS) and restarts it if it stops
-# unexpectedly. Extra arguments are passed through, e.g. ./run.sh --cookies-from-browser firefox
-# or ./run.sh --no-update to start without looking for a newer version first.
+# unexpectedly. Extra arguments are passed through, e.g.
+# bash server/run.sh --cookies-from-browser firefox, or bash server/run.sh --no-update to
+# start without looking for a newer version first.
 set -uo pipefail
 VENV="${HOME}/.shisu-ko/venv"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # A copy of this file on its own (a zip browsed as a folder, a stray copy) has no siblings.
 [ -f "${HERE}/server.py" ] || { echo "This script is running on its own, without the rest of Shisu-ko: extract the whole zip first, then start server/run.sh from the extracted folder."; exit 1; }
-[ -x "${VENV}/bin/python" ] || { echo "Run ./setup.sh first"; exit 1; }
+[ -x "${VENV}/bin/python" ] || { echo "Run bash server/setup.sh first"; exit 1; }
 
 main() {
   # Looks for a newer version (git fast-forward, or the newest release for a downloaded

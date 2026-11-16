@@ -388,7 +388,7 @@ def test_the_command_is_the_one_this_install_starts_with():
 
 
 def test_a_nix_install_is_told_the_nix_command(monkeypatch):
-    """Nix has no setup and no venv: run.sh refuses there ("Run ./setup.sh first")."""
+    """Nix has no setup and no venv: run.sh refuses there ("Run bash server/setup.sh first")."""
     monkeypatch.setattr(sys, "prefix", "/nix/store/0000-python3-3.12-env")
     for exc in (WALL, MEMBERS):
         text = server.friendly_error(exc)
