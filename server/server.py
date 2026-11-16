@@ -9517,7 +9517,10 @@ def parse_args(argv=None):
     p.add_argument("--setup-cookies", action="store_true", help="ask whether to send Firefox's YouTube cookies; used by setup")
     p.add_argument("--cookies", default="", help="path to a Netscape-format cookies.txt for yt-dlp (use this inside Docker, e.g. /data/cookies.txt)")
     p.add_argument("--js-runtime", default="auto", help="JS runtime for yt-dlp: auto, node, deno, bun, or name:path")
-    p.add_argument("--allow-remote-ejs", action="store_true", help="let yt-dlp fetch updated challenge-solver scripts from GitHub")
+    p.add_argument("--allow-remote-ejs", action="store_true",
+                   help="let yt-dlp fetch its YouTube challenge-solver script from GitHub when the yt-dlp-ejs package is "
+                        "missing or does not match, in the version the installed yt-dlp expects; no substitute for "
+                        "updating yt-dlp")
     p.add_argument("--log-level", default="INFO")
     p.add_argument("--check", action="store_true", help="print environment diagnostics and exit")
     p.add_argument("--default-model", action="store_true",
