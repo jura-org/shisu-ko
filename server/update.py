@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import urllib.request
@@ -189,11 +190,41 @@ def latest_release() -> tuple[str, str]:
     return tag, f"https://github.com/{REPO}/archive/refs/tags/{tag}.zip"
 
 
+def zip_mode(entry: zipfile.ZipInfo) -> Optional[int]:
+    """The permission bits a zip entry records for a regular file, None when it records none.
+
+    GitHub's release zip comes from `git archive`, which records a mode for an executable file
+    alone (0o100755) and 0 for every other file. Only a regular file's permission bits count:
+    never a symlink's (0o777), and never setuid, setgid or sticky.
+    """
+    mode = entry.external_attr >> 16
+    return mode & 0o777 if stat.S_ISREG(mode) and mode & 0o777 else None
+
+
+def apply_mode(entry: zipfile.ZipInfo, staged: Path, target: Path) -> None:
+    """Give `staged`, about to replace `target`, the entry's mode bits, else `target`'s own.
+
+    A new file the entry records no mode for keeps the default. Best effort: a filesystem
+    without modes (FAT) keeps what it has rather than fail the update halfway, and Windows has
+    no mode bits to keep (its chmod only sets read-only).
+    """
+    if os.name != "posix":
+        return
+    try:
+        mode = zip_mode(entry)
+        if mode is None:
+            mode = stat.S_IMODE(target.stat().st_mode) & 0o777  # FileNotFoundError: a new file
+        os.chmod(staged, mode)
+    except OSError:
+        pass
+
+
 def unpack_over(archive: bytes, root: Path) -> int:
     """Write every file of the release zip over the checkout. Returns the file count.
 
     Each file is written next to its target and moved into place, so a running run.cmd/run.sh
-    is replaced whole, never half-written. Files the release no longer ships are left alone.
+    is replaced whole, never half-written, and with its mode bits (apply_mode()), so run.sh
+    stays executable. Files the release no longer ships are left alone.
     """
     with zipfile.ZipFile(io.BytesIO(archive)) as zf:
         names = [n for n in zf.namelist() if not n.endswith("/")]
@@ -214,6 +245,7 @@ def unpack_over(archive: bytes, root: Path) -> int:
             try:
                 with zf.open(name) as src, open(staged, "wb") as dst:
                     shutil.copyfileobj(src, dst)
+                apply_mode(zf.getinfo(name), staged, target)
                 os.replace(staged, target)
             except BaseException:
                 staged.unlink(missing_ok=True)

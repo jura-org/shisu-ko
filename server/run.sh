@@ -16,7 +16,7 @@ main() {
   "${VENV}/bin/python" "${HERE}/update.py" "$@"
   # Registers the native-messaging host behind the extension's "Start server" button
   # (cheap, idempotent), so a checkout that never re-ran setup.sh gets the button too. After
-  # the update, which writes files without their mode bits: registering restores the wrapper's.
+  # the update, which may rewrite the wrapper: registering also restores its mode bit.
   "${VENV}/bin/python" "${HERE}/native_host.py" --register
   # Tells server.py that this loop is around: its POST /update (the extension's Update button)
   # answers yes only then, and exits with code 4 so that the loop runs the update. A run.sh

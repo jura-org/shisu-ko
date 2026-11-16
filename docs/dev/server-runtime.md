@@ -610,7 +610,8 @@ server exits 2. `try_lock()` exists in both files (`msvcrt.locking` / `fcntl.flo
 (cmd.exe splits a full path holding `&` or `(` even when quoted), `DETACHED_PROCESS |
 CREATE_NEW_PROCESS_GROUP` and first `CREATE_BREAKAWAY_FROM_JOB`, retrying without it on
 `PermissionError`; on POSIX `bash run.sh` with `start_new_session=True` and stdout/stderr
-appended to the log (bash, not the file itself: a zip install has no mode bits). The browser
+appended to the log (bash, not the file itself: a zip install an older `update.py` updated lost
+its mode bits, see "How the update step works"). The browser
 starts the host with arguments of its own (Firefox: manifest path and extension id; Chrome: the
 extension's origin and, on Windows, `--parent-window=<handle>`); `main()` serves whenever no
 action flag is given and stdin is not a terminal.
@@ -644,8 +645,8 @@ folder this user cannot enter, such as a profile a browser once started through 
 root), which leaves the other browsers reported. Only when every browser was checked and none
 has it is the line the bare "not registered (run setup or start the server once)". The wrapper
 is `server/native-host.cmd` (CRLF) or `server/native-host.sh` (LF, mode 755; `register()`
-restores the bit a zip install drops): the venv's Python, else the system one, on
-`native_host.py`. `setup.cmd` / `setup.sh`
+restores the bit that an older zip update or a mode-blind copy drops): the venv's Python,
+else the system one, on `native_host.py`. `setup.cmd` / `setup.sh`
 register and then run `--check`, which reports it; `run.cmd` / `run.sh` register on every
 start, so an install that never re-ran setup gets the button after a manual start, with one
 exception: the start that updates an older checkout to a version with the button does not
@@ -700,7 +701,15 @@ branch, local changes git would overwrite, a detached HEAD or an unreachable rem
 tree alone with a message. In a folder without `.git` it compares `VERSION` with the newest
 GitHub release tag (`v<VERSION>`, so keep bumping `VERSION`, the manifest and the tag together)
 and unpacks the release zip over the folder, staging each file next to its target and
-`os.replace()`-ing it, without deleting anything. Both paths reinstall `requirements.txt` into
+`os.replace()`-ing it, without deleting anything. A staged file gets its mode bits before the
+replace (`apply_mode()`): the ones its zip entry records (`zip_mode()`, a regular file's
+permission bits alone; GitHub's zip comes from `git archive`, which records them for an
+executable file and nothing for any other), else those of the file it replaces, else the default.
+That is best effort: a filesystem that refuses a chmod (FAT) keeps its default rather than end
+the update halfway. An older `update.py` wrote every file without its mode bits, so a zip install
+it updated has `run.sh`, `setup.sh` and `portal.sh` without their executable bit until the next
+update: the launchers' messages and the docs name `bash server/run.sh` and `bash server/setup.sh`,
+and `launch()` runs `bash run.sh`. Both paths reinstall `requirements.txt` into
 the running interpreter when it changed (only inside a venv) and point out a changed
 `addon/manifest.json` version. It always exits 0: the server must start even when the update
 fails. `--no-update` or `SHISUKO_NO_UPDATE=1` skips it; `server.py` accepts `--no-update` too
@@ -717,7 +726,7 @@ AMD engine on Windows); every worker is a daemon thread, so nothing waits for a 
 code 4 means "run `update.py`, then start again": `run.cmd` has `if "%CODE%"=="4" goto update`
 after the 0 and 2 branches, `run.sh`
 `[ "$code" -eq 4 ] && { update.py "$@"; native_host.py --register; continue; }` (the register
-call restores the wrapper's mode bits, which the zip update drops). Codes 0 and 2 keep their
+call restores the wrapper's mode bit, which an older zip update dropped). Codes 0 and 2 keep their
 meaning, every other code keeps the 5 s restart.
 
 The update can replace the launcher that is running it. cmd.exe reads batch files incrementally,
