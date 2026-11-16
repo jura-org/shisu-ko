@@ -2807,13 +2807,14 @@ def save_cookies_command(prefix=None, windows=None) -> str:
 
     run.cmd / run.sh start setup's venv, which a Nix install has not (run.sh refuses there): its
     Python is the Nix store's (sys.prefix; a venv's is the venv's own folder, wherever its Python
-    came from), and `nix run . --` hands the option to server.py. Each text names only its own
-    install's command, which also keeps the viewer's line within the overlay's 160 characters.
+    came from), and `nix run github:Multysquid/shisu-ko --` hands the option to server.py from
+    any folder (`nix run . --` only inside a checkout). Each text names only its own install's
+    command, which also keeps the viewer's line within the overlay's 160 characters.
     """
     prefix = sys.prefix if prefix is None else prefix
     windows = os.name == "nt" if windows is None else windows
     if prefix.startswith("/nix/store/"):
-        launcher = "nix run . --"
+        launcher = "nix run github:Multysquid/shisu-ko --"
     else:
         launcher = "run.cmd" if windows else "run.sh"
     return f"{launcher} --save-cookies-from-browser firefox"

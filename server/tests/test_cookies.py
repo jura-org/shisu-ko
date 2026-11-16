@@ -383,8 +383,9 @@ def test_the_command_is_the_one_this_install_starts_with():
     # setup's venv, even one made from the Nix store's Python (NixOS): sys.prefix is the venv's folder.
     assert server.save_cookies_command("/home/u/.shisu-ko/venv", windows=False) == "run.sh --save-cookies-from-browser firefox"
     assert server.save_cookies_command(r"C:\Users\u\.shisu-ko\venv", windows=True) == "run.cmd --save-cookies-from-browser firefox"
+    # The flake from GitHub, which runs from any folder; `nix run .` only inside a checkout.
     assert server.save_cookies_command("/nix/store/0000-python3-3.12-env", windows=False) == \
-        "nix run . -- --save-cookies-from-browser firefox"
+        "nix run github:Multysquid/shisu-ko -- --save-cookies-from-browser firefox"
 
 
 def test_a_nix_install_is_told_the_nix_command(monkeypatch):
@@ -392,7 +393,7 @@ def test_a_nix_install_is_told_the_nix_command(monkeypatch):
     monkeypatch.setattr(sys, "prefix", "/nix/store/0000-python3-3.12-env")
     for exc in (WALL, MEMBERS):
         text = server.friendly_error(exc)
-        assert "nix run . -- --save-cookies-from-browser firefox" in text
+        assert "nix run github:Multysquid/shisu-ko -- --save-cookies-from-browser firefox" in text
         assert "run.sh" not in text and "run.cmd" not in text
 
 

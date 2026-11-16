@@ -777,7 +777,8 @@ def test_run_check_names_the_default_model(monkeypatch, tmp_path, capsys):
     # `nix run .#check` is this check with the Nix store's Python, which has no venv for run.sh to start.
     monkeypatch.setattr(sys, "prefix", "/nix/store/0000-python3-3.12-env")
     server.run_check()
-    assert "YouTube sign-in: none (if YouTube asks for one: nix run . -- --save-cookies-from-browser firefox)" in capsys.readouterr().out
+    assert ("YouTube sign-in: none (if YouTube asks for one: nix run github:Multysquid/shisu-ko -- "
+            "--save-cookies-from-browser firefox)") in capsys.readouterr().out
     monkeypatch.setenv("SHISUKO_CONTAINER", "1")
     server.run_check()
     assert "YouTube sign-in: none (if YouTube asks for one: a cookies.txt in the data folder and --cookies /data/cookies.txt)" in capsys.readouterr().out
@@ -925,7 +926,6 @@ def test_setup_sh_asks_then_downloads_then_says_it_is_done():
     assert "also downloads it on its first start" not in text and not any("also downloads it" in l for l in cmd_lines())
 
 
-def test_the_amd_helper_both_setups_call_is_there():
 def test_the_sh_launchers_without_a_venv_name_setup_the_way_the_docs_do():
     # bash runs setup.sh whether or not it still has its executable bit, from the Shisu-ko folder.
     for name in ("run.sh", "portal.sh"):
@@ -934,6 +934,7 @@ def test_the_sh_launchers_without_a_venv_name_setup_the_way_the_docs_do():
         assert not any(f"./{script}" in text for script in ("run.sh", "setup.sh", "portal.sh")), name
 
 
+def test_the_amd_helper_both_setups_call_is_there():
     # Neither setup looks at the call's verdict, so a missing file would only print Python's
     # "can't open file" and go on to "Setup is complete": its absence shows here instead.
     assert (SERVER_DIR / "amd_setup.py").is_file()

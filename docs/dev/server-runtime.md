@@ -188,7 +188,8 @@ contexts, a download may carry the other account's session or a mix. The jar sen
 only its host's cookies, GitHub's with `--allow-remote-ejs` included. `docs/amo/privacy-policy.md`
 and the "YouTube sign-in" section of `docs/server.md` say exactly this, so a change here changes them too. A Nix
 install has no setup and no venv, so `run.sh` refuses there; its command is
-`nix run . -- --save-cookies-from-browser firefox` (the flake's loop stops on exit 0 and 2 like
+`nix run github:Multysquid/shisu-ko -- --save-cookies-from-browser firefox`, which works from any
+folder (`nix run . --` only inside a checkout; the flake's loop stops on exit 0 and 2 like
 `run.sh`).
 
 ## How the model loads on demand
