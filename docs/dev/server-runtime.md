@@ -186,7 +186,7 @@ Multi-Account Container and every partitioned cookie (a YouTube embed on another
 one jar, where the last row of a domain, path and name wins: with YouTube signed in in two
 contexts, a download may carry the other account's session or a mix. The jar sends a request
 only its host's cookies, GitHub's with `--allow-remote-ejs` included. `docs/amo/privacy-policy.md`
-and the README's "YouTube sign-in" say exactly this, so a change here changes them too. A Nix
+and the "YouTube sign-in" section of `docs/server.md` say exactly this, so a change here changes them too. A Nix
 install has no setup and no venv, so `run.sh` refuses there; its command is
 `nix run . -- --save-cookies-from-browser firefox` (the flake's loop stops on exit 0 and 2 like
 `run.sh`).

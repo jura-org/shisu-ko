@@ -247,8 +247,9 @@ def grouped(beam, tokens, sum_logprobs, n_audio):
 
 
 # A first token that is locally best (0.5 against 0.3) but leads nowhere, against one that is
-# locally worse and leads to a near-certain continuation. This is the homophone the README is
-# about: 敬老 scores worse than 経老 until the word after it arrives.
+# locally worse and leads to a near-certain continuation. This is the homophone that
+# docs/dev/server-runtime.md ("The beam search") is about: 敬老 scores worse than 経老 until the
+# word after it arrives.
 SEARCH = Script({
     (0,): {1: 0.50, 2: 0.30, 3: 0.15, EOT: 0.05},
     (0, 1): {3: 0.50, 4: 0.30, EOT: 0.20},

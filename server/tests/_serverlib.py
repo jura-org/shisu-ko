@@ -2,7 +2,7 @@
 
 server.py is a script, not a package, and uses `from __future__ import annotations`
 (postponed evaluation), so it must be registered in sys.modules under its own name
-before exec, the same way the "Development" section of the README describes.
+before exec, the same way the "Commands" section of AGENTS.md describes.
 
 server.py fixes its data folder at import time (APP_DIR, and every path under it: the cache,
 config.json, next-model, rocm-starts, the instance locks): SHISUKO_HOME, else the real

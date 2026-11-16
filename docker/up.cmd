@@ -24,6 +24,6 @@ exit /b 0
 
 :failed
 echo.
-echo Starting the container failed. If Docker is not installed yet, see README.md, section "Docker".
+echo Starting the container failed. If Docker is not installed yet, see docs\install.md, section "Docker".
 pause
 exit /b 1

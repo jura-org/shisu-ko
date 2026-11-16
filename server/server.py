@@ -7320,7 +7320,7 @@ class App:
         s.duration = float(data.get("duration") or 0.0)
         watch = data.get("language_state")
         # Not restored with detection off: nothing could ever clear it again, and --language-patience 0
-        # is what the README offers a viewer whose video was paused by mistake.
+        # is what docs/troubleshooting.md offers a viewer whose video was paused by mistake.
         if isinstance(watch, dict) and float(getattr(self.args, "language_patience", 0.0) or 0.0) > 0:
             try:
                 s.foreign_seconds = float(watch.get("foreign_seconds") or 0.0)

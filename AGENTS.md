@@ -1,7 +1,9 @@
 # AGENTS.md
 
 Guidance for AI coding agents (and new contributors) working in this repository.
-Read this before changing code; the README is the user-facing document.
+Read this before changing code; the README, `portal/README.md` and the user pages in `docs/`
+(`install.md`, `guide.md`, `server.md`, `amd.md`, `troubleshooting.md`, `how-it-works.md`) are the
+user-facing documents.
 The detail behind every section lives in `docs/dev/` (index: `docs/dev/README.md`).
 
 ## What this project is
@@ -30,6 +32,8 @@ portal/       the phone portal: portal.py (stdlib server; yt-dlp and PyAV import
               (the pairing QR code), static/ (the page; lib.js holds its pure helpers and every UI
               string), tests/; started by server/portal.cmd / portal.sh or `nix run .#portal`
 docker/       Windows wrappers for docker compose, WSL Docker Engine installer
+docs/         the user pages the README links: install.md, guide.md, server.md, amd.md,
+              troubleshooting.md, how-it-works.md (the portal's is portal/README.md)
 docs/dev/     developer docs: the full design of each subsystem, its reasons and measurements
 docs/cws/     Chrome Web Store setup: the service account and publisher id cws-listing.yml needs
 Dockerfile, compose.yaml, compose.cpu.yaml, .env.example
@@ -264,7 +268,7 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   opaque, expiring `/api/hls/<token>/` paths. Its only requests to YouTube under the viewer's account
   beyond yt-dlp's are the watch-history pings (`WatchReporter`), sent only with `--watch-history on`
   and a cookie browser (never in the container), and built from a signed-in player response's own
-  tracking URLs, never from yt-dlp's `mark_watched`; what they carry is listed in README.md,
+  tracking URLs, never from yt-dlp's `mark_watched`; what they carry is listed in `portal/README.md`,
   `docs/dev/portal.md` and `docs/amo/privacy-policy.md`, which change with them. It talks to the server only through `/sync`, `/clip`
   and `/health`, using `/sync`'s opt-in `words` and `deck` and its `retrying` / `retry_in` fields,
   and works without them. The page's word colours run the extension's own `addon/words.js`, which
@@ -369,7 +373,7 @@ Firefox source; `_serverlib.py`, `_loadBackground.js` and `_loadContent.js` load
 
 ## Commands
 
-Nix (any Linux with flakes, NixOS): `nix run . -- [options]` starts the server with CUDA
+Nix (x86-64 Linux with flakes, NixOS): `nix run . -- [options]` starts the server with CUDA
 (`flake.nix`; CTranslate2 comes prebuilt from `cache.nixos-cuda.org`, onnxruntime is the CPU build
 because only the VAD uses it). `nix run .#check`, `nix run .#tests`, `nix build .#addon`,
 `nix develop` for a shell with Python, web-ext, Node and Deno. `.#server-cpu` is the CUDA-free variant.
@@ -577,8 +581,8 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
 3. Run the checks above, then test manually on a real YouTube video: subtitles appear, hover
    pauses, transcript panel works, and (with Anki running) a Yomitan card gets its audio and
    picture from the server within seconds, and Alt+Shift+M fills the newest card with a toast.
-4. Update README sections that describe changed behaviour; keep this file's invariants current,
-   and the matching `docs/dev/` file.
+4. Update the README and the user pages in `docs/` (and `portal/README.md`) where they describe
+   changed behaviour; keep this file's invariants current, and the matching `docs/dev/` file.
 5. Commit with a descriptive message; do not commit `.env`, `dist/` or anything from `~/.shisu-ko`.
 
 ## Release
