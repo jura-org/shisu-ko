@@ -9,11 +9,14 @@ readable with [Yomitan](https://yomitan.wiki/).
 
 [with sound](docs/demo.mp4).
 
-Shisu-ko works as a 2 pair application. For one there is a server that transcribes audio via an ASR model of the users choosing, additionally there is a the Firefox or Chrome addon that allows the server to send the transcriptions to the local browser and display them. 
+Shisu-ko works as a pair of applications. For one there is a server that transcribes audio via an
+ASR model of the user's choosing; additionally there is the Firefox or Chrome addon that allows the
+server to send the transcriptions to the local browser and display them.
 
-**[Install](#install)** · [Using it](#using-shisu-ko) · [Sentence mining](#sentence-mining) ·
-[Word colours](#word-colours) · [Phone portal](#phone-portal) · [Server options](docs/server.md) ·
-[Troubleshooting](#troubleshooting) · [Privacy](#privacy)
+**[Install](#install)** · [Using it](#using-shisu-ko) ·
+[Sentence mining](docs/guide.md#sentence-mining) · [Word colours](#word-colours) ·
+[Phone portal](portal/README.md) · [Server options](docs/server.md) ·
+[Troubleshooting](docs/troubleshooting.md) · [Privacy](docs/amo/privacy-policy.md)
 
 ## Requirements
 
@@ -26,7 +29,7 @@ Setup asks which model to download. Pick the one that fits your computer:
 | No suitable graphics card | `small` | about 500 MB | Runs on the CPU, less accurate |
 | AMD Radeon RX 7000 or RX 9000, and some others | `large-v3` | about 3 GB | Experimental, see [AMD graphics cards](docs/amd.md) |
 
-Alternatvely the Server also supports:
+Alternatively the server also supports:
 
 [Kitsune-Transcribe](docs/server.md#kitsune-transcribe-models) models: small, Japanese-only
 models that run on an NVIDIA graphics card or on the CPU.
@@ -43,7 +46,7 @@ You also need:
 ## Install
 
 > [!NOTE]
-> Only want subtitles? Steps 1 to 3 are all you need. Yomitan and Anki are optional.
+> Only want subtitles? Steps 1 and 2 are all you need. Yomitan and Anki are optional.
 
 ### 1. Start the server
 
@@ -72,9 +75,10 @@ bash server/run.sh
 Setup installs what the server needs into the `.shisu-ko` folder in your home folder
 (`C:\Users\<you>\.shisu-ko` on Windows). It asks two questions:
 
-1. **Which model should the server use?** Type the corrosponding number of the model you want. As a default Whisper is good. 
+1. **Which model should the server use?** Type the corresponding number of the model you want.
+   As a default, Whisper is good.
 2. **Should the server send Firefox's YouTube cookies with every download?** Type `Y` if you are
-   signed in to YouTube in Firefox
+   signed in to YouTube in Firefox.
 
 The server is ready when it prints `Listening on http://127.0.0.1:8790`. Keep its window open
 while you watch.
@@ -84,7 +88,7 @@ while you watch.
 - **Firefox:** [Shisu-ko on addons.mozilla.org](https://addons.mozilla.org/firefox/addon/shisu-ko/).
 - **Chrome:** [Shisu-ko in the Chrome Web Store](https://chromewebstore.google.com/detail/shisu-ko/ecenifonpkaiccmmknpbllbebbfigjnm).
 
-Both update by themselves. Additionally you can start and stop the Server from the addon.
+Both update by themselves. Additionally you can start the server from the addon.
 
 > [!IMPORTANT]
 > In Firefox, open the Shisu-ko popup once. If it shows **Allow on YouTube**, click it: Firefox
@@ -95,22 +99,23 @@ Both update by themselves. Additionally you can start and stop the Server from t
 
 Install [Anki](https://apps.ankiweb.net/) with the [AnkiConnect](https://ankiweb.net/shared/info/2055492159)
 add-on, and keep Anki open while you watch. When you add a card with Yomitan, the server fills in
-the line's audio and a picture of the video. See [Sentence mining](#sentence-mining).
+the line's audio and a picture of the video. See [Sentence mining](docs/guide.md#sentence-mining).
 
 ### Running the server
 
 - **The Start server button.** Setup registers a small launcher with your browsers. While the
-  server is off, the popup shows a **Start server** button.
-  **Start server** button always starts the server without options. See
-  [the server options](docs/server.md#server-options).
+  server is off, the popup shows a **Start server** button. The button always starts the server
+  without options; see [the server options](docs/server.md#server-options).
 - **Stopping.** Close the server's window, or press Ctrl+C in it. On Linux and macOS, a server the
-  button started has no window. 
+  button started has no window.
 
 ## Using Shisu-ko
 
 ### Reading with Yomitan
 
-Hover a subtitle and the video pauses. Look words up with Yomitan as usual. If you want to mine the word do it as usual. A screenshot as well as audio will get automatically attached to the new card.
+Hover a subtitle and the video pauses. Look words up with Yomitan as usual. If you want to mine
+the word, do it as usual. A screenshot as well as audio will get automatically attached to the new
+card.
 
 ### Shortcuts
 
@@ -144,13 +149,13 @@ The full rules: [Word colours](docs/guide.md#word-colours).
 
 ## Updating
 
-Shisu-ko mostly keeps itself up to date. On every restart the server pulls the newest version. 
+Shisu-ko mostly keeps itself up to date. On every restart the server pulls the newest version.
 
 ## Documentation
 
 - [Installing, updating and removing Shisu-ko](docs/install.md)
 - [Using Shisu-ko](docs/guide.md): every setting, sentence mining and the word colours in full,
-  and live streams
+  live streams and the limitations
 - [The server](docs/server.md): its options, YouTube sign-in, Apple Silicon and the
   Kitsune-Transcribe models
 - [AMD graphics cards](docs/amd.md) (experimental)
@@ -162,7 +167,7 @@ Shisu-ko mostly keeps itself up to date. On every restart the server pulls the n
 ## Development
 
 Bug reports and ideas are welcome as [issues](https://github.com/Multysquid/shisu-ko/issues).
-[AGENTS.md](AGENTS.md) explains the architecture,
+[AGENTS.md](AGENTS.md) explains the architecture, and
 [docs/dev](docs/dev/README.md) has the design of each part.
 
 `npm test` needs Node.js 22 or newer.
