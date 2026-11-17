@@ -424,12 +424,16 @@ Extension checks and browser packages:
 for file in addon/*.js; do node --check "$file"; done
 npx web-ext lint --source-dir addon
 npx web-ext build --source-dir addon --artifacts-dir dist --overwrite-dest --ignore-files "tests/**"
-
 npm ci
 npm test
 npm run build
 npx playwright install --with-deps chromium
 npm run test:browser
+python -W error -c "import ast; ast.parse(open('server/server.py', encoding='utf-8').read())"
+pip install -r server/requirements-test.txt
+python -m pytest server/tests
+python -m pytest portal/tests
+node --test portal/tests/lib.test.js
 ```
 
 `addon/manifest.json` is the Firefox source and remains directly loadable from `about:debugging`.
