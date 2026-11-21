@@ -83,7 +83,10 @@ no `.xpi` handling; every GitHub release carries an `.xpi` AMO signed for self-d
   (`#update-banner`, `renderUpdate()`) names the release and the server's version with
   **Update** and **Not now** for `newer`, the reason and no Update button for `cannot` ("was not
   started by run.cmd / run.sh", the one text for every blocker, since `/health` carries only the
-  flag and a `--no-update` server's 409 text is never fetched) and `behind` ("cannot be updated
+  flag and a `--no-update` server's 409 text is never fetched; then "restart it by hand" with
+  Docker's and Nix's commands, `docker compose up -d --build` after updating the folder and
+  `nix run --refresh github:Multysquid/shisu-ko`, since a plain restart may start the same
+  version there) and `behind` ("cannot be updated
   from here"). An extension behind gets its line whenever the server has none of its own
   (`current`, `unknown` or `offline`): the release page link, in Firefox only once `latest.xpi`
   is set (before that "its signed .xpi reaches the release page once addons.mozilla.org has

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Starts the Shisu-ko transcription server (Linux/macOS) and restarts it if it stops
-# unexpectedly. Extra arguments are passed through, e.g. ./run.sh --cookies-from-browser firefox
-# or ./run.sh --no-update to start without looking for a newer version first.
+# unexpectedly. Extra arguments are passed through, e.g.
+# bash server/run.sh --cookies-from-browser firefox, or bash server/run.sh --no-update to
+# start without looking for a newer version first.
 set -uo pipefail
 VENV="${HOME}/.shisu-ko/venv"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # A copy of this file on its own (a zip browsed as a folder, a stray copy) has no siblings.
 [ -f "${HERE}/server.py" ] || { echo "This script is running on its own, without the rest of Shisu-ko: extract the whole zip first, then start server/run.sh from the extracted folder."; exit 1; }
-[ -x "${VENV}/bin/python" ] || { echo "Run ./setup.sh first"; exit 1; }
+[ -x "${VENV}/bin/python" ] || { echo "Run bash server/setup.sh first"; exit 1; }
 
 main() {
   # Looks for a newer version (git fast-forward, or the newest release for a downloaded
@@ -15,7 +16,7 @@ main() {
   "${VENV}/bin/python" "${HERE}/update.py" "$@"
   # Registers the native-messaging host behind the extension's "Start server" button
   # (cheap, idempotent), so a checkout that never re-ran setup.sh gets the button too. After
-  # the update, which writes files without their mode bits: registering restores the wrapper's.
+  # the update, which may rewrite the wrapper: registering also restores its mode bit.
   "${VENV}/bin/python" "${HERE}/native_host.py" --register
   # Tells server.py that this loop is around: its POST /update (the extension's Update button)
   # answers yes only then, and exits with code 4 so that the loop runs the update. A run.sh

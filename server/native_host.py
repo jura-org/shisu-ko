@@ -232,8 +232,9 @@ def launch(root: Path = ROOT, environ=os.environ) -> dict:
         raise FileNotFoundError(f"{run_sh} is missing")
     log_path = data_dir(environ=environ) / "server.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    # Through bash, not by executing the file: a zip install (update.py writes every file
-    # without its mode bits) has run.sh without the executable bit, and it needs bash anyway.
+    # Through bash, not by executing the file: a zip install that an older update.py updated
+    # (it wrote every file without its mode bits) has run.sh without the executable bit, and
+    # it needs bash anyway.
     # A new session: Firefox ends the host after the answer, and the server must not go with it.
     with open(log_path, "ab") as log:
         subprocess.Popen(["bash", str(run_sh)], cwd=str(server_dir), start_new_session=True,
@@ -365,8 +366,8 @@ def register(root: Path = ROOT, home: Optional[Path] = None, environ=os.environ)
     """
     wrapper = wrapper_path(root)
     if not WINDOWS and wrapper.is_file():
-        # The browser executes the wrapper itself, so it needs its mode bit, which a zip install
-        # (update.py writes every file without one) or a copy through a mode-blind tool drops.
+        # The browser executes the wrapper itself, so it needs its mode bit, which an older
+        # update.py (it wrote every file without one) or a copy through a mode-blind tool drops.
         wrapper.chmod(wrapper.stat().st_mode | 0o111)
     done: dict[str, Path] = {}
     failures: list[str] = []

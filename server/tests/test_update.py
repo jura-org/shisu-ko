@@ -9,7 +9,9 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import shutil
+import stat
 import subprocess
 import sys
 import zipfile
@@ -337,6 +339,85 @@ def test_zip_skips_unsafe_entries_and_foreign_prefixes(tmp_path, monkeypatch):
     assert not (tmp_path / "escaped.txt").exists()
     assert not (tmp_path / "other-project").exists()
     assert not (tmp_path / "server" / "x.py").exists()
+
+
+# GitHub's release zip comes from `git archive`: it records a mode for an executable file, 0 for any other.
+def git_entry(name: str, mode: int = 0) -> zipfile.ZipInfo:
+    info = zipfile.ZipInfo(name)
+    info.external_attr = (stat.S_IFREG | mode) << 16 if mode else 0
+    return info
+
+
+def mode_of(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+posix_modes = pytest.mark.skipif(os.name != "posix", reason="Windows files have no mode bits")
+
+
+def test_zip_mode_takes_a_regular_files_permission_bits_alone():
+    def entry(attr: int) -> zipfile.ZipInfo:
+        info = zipfile.ZipInfo("shisu-ko-0.5.0/server/run.sh")
+        info.external_attr = attr
+        return info
+
+    assert update.zip_mode(git_entry("x", 0o755)) == 0o755
+    assert update.zip_mode(git_entry("x")) is None, "git archive records nothing for a file that is not executable"
+    assert update.zip_mode(entry(0o600 << 16)) is None, "bits without a file type: zipfile.writestr()'s default"
+    assert update.zip_mode(entry(0x20)) is None, "MS-DOS attributes alone"
+    assert update.zip_mode(entry((stat.S_IFLNK | 0o777) << 16)) is None, "a symlink's 0o777 is no file's mode"
+    assert update.zip_mode(entry((stat.S_IFREG | 0o6755) << 16)) == 0o755, "never setuid or setgid"
+
+
+@posix_modes
+def test_zip_gives_a_script_the_executable_bit_the_release_records(tmp_path, monkeypatch):
+    write_checkout(tmp_path)
+    run_sh = tmp_path / "server" / "run.sh"
+    run_sh.write_text("old\n", encoding="utf-8")
+    run_sh.chmod(0o644)  # as an earlier update left it, without the bit
+    install_calls(monkeypatch)
+    entries = [(git_entry("shisu-ko-0.5.0/server/run.sh", 0o755), "#!/usr/bin/env bash\n"),
+               (git_entry("shisu-ko-0.5.0/server/portal.sh", 0o755), "#!/usr/bin/env bash\n")]
+    fake_github(monkeypatch, "v0.5.0", release_zip("0.5.0", extra_entries=entries))
+    assert update.update(tmp_path) is True
+    assert mode_of(run_sh) == 0o755 and os.access(run_sh, os.X_OK)
+    assert mode_of(tmp_path / "server" / "portal.sh") == 0o755, "a script new in the release too"
+
+
+@posix_modes
+def test_zip_keeps_the_mode_of_a_file_the_release_records_none_for(tmp_path, monkeypatch):
+    write_checkout(tmp_path)
+    (tmp_path / "server" / "server.py").chmod(0o640)
+    tool = tmp_path / "server" / "tool.sh"
+    tool.write_text("old\n", encoding="utf-8")
+    tool.chmod(0o750)
+    install_calls(monkeypatch)
+    entries = [(git_entry("shisu-ko-0.5.0/server/tool.sh"), "new\n")]
+    fake_github(monkeypatch, "v0.5.0", release_zip("0.5.0", extra_entries=entries))
+    assert update.update(tmp_path) is True
+    assert tool.read_text(encoding="utf-8") == "new\n"
+    assert mode_of(tool) == 0o750
+    assert mode_of(tmp_path / "server" / "server.py") == 0o640, "not zipfile's 0o600, which names no file type"
+    assert mode_of(tmp_path / "docs" / "new-file.md") & 0o111 == 0, "a new file gets the default"
+
+
+@posix_modes
+def test_zip_update_finishes_where_the_filesystem_refuses_modes(tmp_path, monkeypatch, capsys):
+    """FAT refuses a chmod it cannot represent: the files keep its default, never half an update."""
+    write_checkout(tmp_path)
+    install_calls(monkeypatch)
+    entries = [(git_entry("shisu-ko-0.5.0/server/run.sh", 0o755), "#!/usr/bin/env bash\n")]
+    fake_github(monkeypatch, "v0.5.0", release_zip("0.5.0", extra_entries=entries))
+
+    def refuse(path, mode, **kwargs):
+        raise PermissionError(1, "Operation not permitted", str(path))
+
+    monkeypatch.setattr(update.os, "chmod", refuse)
+    assert update.update(tmp_path) is True
+    assert update.read_version((tmp_path / "server" / "server.py").read_text(encoding="utf-8")) == "0.5.0"
+    assert (tmp_path / "server" / "run.sh").read_text(encoding="utf-8") == "#!/usr/bin/env bash\n"
+    assert not list(tmp_path.rglob("*.shisuko-new"))
+    assert "unpacking the release failed" not in capsys.readouterr().out
 
 
 def test_zip_rejects_an_archive_without_a_checkout(tmp_path, monkeypatch, capsys):
