@@ -283,9 +283,16 @@ overlay, no requests to the server, no Anki watching, no word colours and no key
 it is switched on again (Alt+Shift+S flips it too). The status line beside the switch says whether the server
 answers, and with which model and device ("loads when a video needs it" while the server keeps the
 model out of memory, see [`--model-idle-minutes`](server.md#server-options)); while it does not answer, a **Start server** button
-on that line launches it with the server's default options (Firefox and the Chrome Web Store
-install, see [Start the server](install.md#the-start-server-button)); the model field below takes effect once
-it is up. The same page opens as the add-on's preferences under Add-ons and themes > Shisu-ko.
+on that line launches it (Firefox and the Chrome Web Store install, see
+[Start the server](install.md#the-start-server-button)) with the options in **Start server
+options**, a drawer of its own: empty, the server starts with its defaults; `--lyrics off
+--beam-size 1` or `--device cpu` there go to every start the button makes, and the line under
+the field says what it will pass, or which word the launcher would refuse (the list is in
+[Server options](server.md#server-options)). The model field below takes effect once the server
+is up. When another server answers on the Start button's address, one that is not this
+computer's own (an old copy, or a Docker container), the status line says **Other server** and
+who it is instead of "Server online": stop that one, and the button is back. The same page opens
+as the add-on's preferences under Add-ons and themes > Shisu-ko.
 
 A banner under the header appears when a newer release than the running server (or than this
 extension) is out: "Shisu-ko 0.9.0 is available — the server runs 0.8.0." with **Update**, which

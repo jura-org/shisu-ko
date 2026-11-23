@@ -124,8 +124,21 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   by the viewer loading a newer one; this has no counterpart in `docs/amo/`, which is the AMO
   listing's text.
 - The native host (`server/native_host.py`, name `shisuko`) answers only `status` and `start`. It
-  never takes a path, program or argument from a message; it runs only the checkout's own
-  `server/run.cmd` / `server/run.sh` and registers only under the user's own profile, for Firefox
+  never takes a path or program from a message; it runs only the checkout's own
+  `server/run.cmd` / `server/run.sh`, and the one thing a message adds to that command line is
+  `start`'s `options`, the popup's Start server options (`startOptions`): names from
+  `START_OPTIONS`, each followed by a number in its range or a word of its set (`check_options()`),
+  so no space and nothing cmd.exe or a shell reads can come from a message. Never on the list:
+  `--host`, `--port`, `--model`, and whatever takes an address, a path, a program, a browser's
+  cookies, code from the network or free text, or exits instead of serving.
+  `addon/start-options.js` (`SHISUKO_START_OPTIONS`, `parseStartOptions()`) holds the same table
+  for the popup and the background, kept equal by `test_native_host.py`; a message without
+  options stays the bare `{cmd: "start"}` every launcher understands. `status`'s `other` and
+  `start`'s refusal (`OTHER_SERVER_ERROR`) are a `/health` answer while nobody holds this data
+  folder's instance lock (`lock_state()`: `held` / `free` / `unknown`, and `unknown` claims
+  neither); the popup asks `status` (`launcherStatus`) only for a server whose `/health` lacks
+  `launcher: true`, at the launcher's address, once per server seen. The host registers only under
+  the user's own profile, for Firefox
   (`allowed_extensions`: the gecko id) and Chrome, plus Chromium on Linux (`allowed_origins`: the
   Chrome Web Store id `CHROME_EXTENSION_ID` alone, never a wildcard or an unpacked build's id).
   The popup offers the button on Firefox and under that store id (`START_AVAILABLE`,
@@ -133,7 +146,14 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   unpacked build. Other Chromium browsers holding the store install read host folders of their
   own and are deliberately left out.
   `nativeMessaging` stays in `optional_permissions`, requested by the popup's click handler before
-  its first `await` and by nothing else.
+  its first `await` and by nothing else; without the grant nothing sends to the host and nothing
+  prompts.
+- On Windows the server binds its port without `SO_REUSEADDR` (`OwnPortHTTPServer`): there the
+  option lets any other socket that sets it too listen on the same address, each taking some of
+  the connections, so another listener on 127.0.0.1:8790 (WSL's relay for a Docker container,
+  a second server) could sit beside it unnoticed. Without it the one that binds second fails
+  ("Cannot listen on ..."), and a restart still binds over the old server's TIME_WAIT
+  (`test_own_port.py`). POSIX keeps the option.
 - A client's model name (`model` in `/sync`) must match `MODEL_NAME_RE` and contain no `..`, else it
   gets `MODEL_NAME_HINT` and is never stored. A valid name is reduced by `canonical_model_name()`
   and resolved through `download_model_files()` — faster-whisper's own download, the MLX repo's on
@@ -318,8 +338,11 @@ Backends: `resolve_device()` decides `cuda` / `mlx` / `cpu` once and
 methods over mlx-whisper; `server/mlx_beam.py` gives that path the beam search the library lacks.
 Kitsune models: `kitsune_name()`, `kitsune_download_plan()`, `load_kitsune_model()`, and in
 `kitsune_engine.py` `read_package()`, `dequantize()`, `ctc_spans()`, `attention_boundaries()`,
-`KitsuneModel.transcribe()`. The Start button: `startServer()` in `background.js`, the native host's
-`handle()` and `launch()`, the instance lock `hold_instance_lock()` / `try_lock()`. The update
+`KitsuneModel.transcribe()`. The Start button: `startServer()`, `askLauncher()` and
+`launcherStatus()` in `background.js`, `parseStartOptions()` in `addon/start-options.js`,
+`renderStartOptionsHint()` and `checkOtherServer()` in `popup.js`, the native host's `handle()`,
+`check_options()`, `lock_state()` and `launch()`, the instance lock `hold_instance_lock()` /
+`try_lock()`, and the port `OwnPortHTTPServer`. The update
 step: `server/update.py`, `POST /update`, exit code 4. The AMD engine (experimental):
 `rocm_engine()` at import, the crash guard and `check_rocm_import()`, `hard_exit()` / `finish()`
 and `entry_point()`, `run_probe_gpu()`, `server/amd_setup.py`. Launcher rules that must not regress:
@@ -503,7 +526,7 @@ Full text: `docs/dev/invariants-and-gotchas.md`.
   `HF_HUB_VERBOSITY=error` and `HF_HUB_DISABLE_SYMLINKS_WARNING=1` before the import.
 - yt-dlp needs a JavaScript runtime (Deno preferred, Node 20+ works) for YouTube.
 - YouTube's "Sign in to confirm you're not a bot" needs a signed-in browser's cookies: the Start
-  button passes no options, so the browser lives in `config.json` (`cookies_from_browser`), never
+  button passes no cookie option (its Start server options cannot name one), so the browser lives in `config.json` (`cookies_from_browser`), never
   taken in the Docker image (`SHISUKO_CONTAINER`; toolbox and distrobox do take it). Offer
   Firefox: Chrome and Edge on Windows lock their cookies away.
 - Reordering a beam's KV cache must skip the cross-attention half. Those keys and values come from

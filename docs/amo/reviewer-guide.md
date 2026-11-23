@@ -90,8 +90,9 @@ The demo recording in the README shows the expected behaviour: https://github.co
    the optional nativeMessaging permission ("Exchange messages with programs other than
    Firefox"); after "Allow", the extension asks the native-messaging host "shisuko" (registered
    by setup.sh in step 1, ~/.mozilla/native-messaging-hosts/shisuko.json) to run server/run.sh
-   without any options, and the status line goes to "Starting server". The server therefore
-   starts with server.py's defaults: the model chosen at setup (config.json; "small" after
+   with the popup's "Start server options" (empty unless entered there), and the status line
+   goes to "Starting server". With the field empty the server starts with server.py's
+   defaults: the model chosen at setup (config.json; "small" after
    step 1, already on disk) and --device auto, which falls back to the CPU on a machine without
    a GPU. The status line reaches "Server online" once server.log prints "Listening on
    http://127.0.0.1:8790" (the server's output goes there when the button started it), within
@@ -103,7 +104,11 @@ The demo recording in the README shows the expected behaviour: https://github.co
    button returns. Clicking it again is harmless: the host sees the server's lock file and
    answers that it is already starting, so nothing is launched twice and the popup waits again. The model can be changed in the popup's "Transcription model" field,
    for example to "base", without restarting. Declining the permission only puts a hint on the
-   status line.
+   status line. To try the options, stop the server again, expand "Start server options" and
+   enter "--lyrics off --beam-size 1": the line under the field says what the button will pass,
+   and the next click starts run.sh with exactly those words. "--host 0.0.0.0" (or any option
+   off the list, or a value off its rule) is refused under the field and on the status line,
+   and the browser is not even asked for the permission.
 
 9. Optional, the update check: expand "Anki, clips and server" in the popup. The line at its
    bottom reads "Newest release: <release>, the server checked <when>" (or why the server's
@@ -191,13 +196,26 @@ PERMISSIONS
   the manifest has no update_url, so updates of the extension come from addons.mozilla.org.
 - nativeMessaging (optional_permissions; requested with browser.permissions.request from the
   click on the popup's "Start server" button, which is shown only while the companion server
-  does not answer): background.js sends the one message {cmd: "start"} to the native-messaging
-  host "shisuko" with browser.runtime.sendNativeMessage. That host is server/native_host.py in
-  the same repository (Python standard library only), registered for this extension id by the
-  server's setup script, and it can do exactly one thing: start the companion server's own
-  launcher (server/run.cmd or server/run.sh next to it). It takes no path, program or argument
-  from the message, answers "unknown command" to anything else, and is never contacted by any
-  other part of the extension. Without the grant the button only shows a hint.
+  does not answer): background.js sends {cmd: "start"} to the native-messaging host "shisuko"
+  with browser.runtime.sendNativeMessage. That host is server/native_host.py in the same
+  repository (Python standard library only), registered for this extension id by the server's
+  setup script, and it can do exactly one thing: start the companion server's own launcher
+  (server/run.cmd or server/run.sh next to it). The message carries "options" only when the
+  viewer entered "Start server options" in the popup: option names from a fixed list
+  (START_OPTIONS in native_host.py, the same table as SHISUKO_START_OPTIONS in
+  addon/start-options.js, which a test keeps equal), each followed by a number in its range or
+  a word of a fixed set; never --host, --port, a model, an address, a path, a program, cookies
+  or free text. The extension checks them (parseStartOptions()) and the host checks them again
+  (check_options()) before they reach the launcher's command line, so nothing a shell or
+  cmd.exe reads can come from a message. The only other message is {cmd: "status"}: when the
+  popup finds a server answering at the companion server's address whose /health does not say
+  that the launcher started it ("launcher" not true), it asks once per server seen, and only
+  once the permission is granted (without it there is no sendNativeMessage and nothing is
+  prompted); the host answers whether this computer's own server holds its lock file, so the
+  popup can say "Other server" (an old copy, or a Docker container) instead of "Server online".
+  The host takes no path or program from a message, answers "unknown command" to anything else,
+  and is never contacted by any other part of the extension. Without the grant the button only
+  shows a hint.
 
 CODE THAT MAY NEED A WORD
 
@@ -227,11 +245,11 @@ CODE THAT MAY NEED A WORD
   /health?decks=1. The content script asks the background for the entries every 2 s, answered
   from memory. words.js, loaded before content.js, finds the words in a line; it is pure,
   without DOM.
-- background.js, startServer(): the only use of nativeMessaging (above). It remembers a
-  launch in browser.storage.session (the host's answer and a deadline 90 s ahead) so a reopened
-  popup does not start a second server while the first is still loading its model; the record
-  is ignored past its deadline, cleared by a /health answer, replaced by the next launch, and
-  gone with the browser session.
+- background.js, startServer() and launcherStatus(): the only uses of nativeMessaging (above),
+  through askLauncher(). startServer() remembers a launch in browser.storage.session (the host's
+  answer and a deadline 90 s ahead) so a reopened popup does not start a second server while
+  the first is still loading its model; the record is ignored past its deadline, cleared by any
+  answer from the server, replaced by the next launch, and gone with the browser session.
 - background.js, checkFromHealth()/updateServer(): the server's update check (above) and the
   update request. Pure helpers compare versions (parseVersion, compareVersions, decideUpdate)
   and the badge (browser.action.setBadgeText "1") follows the comparison; the Update button is

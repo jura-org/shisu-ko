@@ -594,19 +594,50 @@ the popup's grant lands, while the service worker runs.
 
 Protocol (the browsers' own: 4-byte little-endian length, UTF-8 JSON, one request per message,
 answered in order until stdin closes; `read_message()` / `write_message()`, `serve()`, `handle()`):
-`{"cmd": "status"}` -> `{ok, running, version, root}`, `running` being a `/health` answer within
-1.5 s (`server_running()`); `{"cmd": "start"}` -> `{ok: true, already: true}` for a running
-server, `{ok: true, already: true, starting: true}` for one that holds the instance lock but
-does not answer yet (it is starting, or loading its model where that happens at the start:
-`--model-idle-minutes 0`, the AMD engine; `server_starting()`), else `launch()` and
+`{"cmd": "status"}` -> `{ok, running, starting, other, version, root}`, `running` being a
+`/health` answer within 1.5 s (`server_running()`), `starting` the instance lock held while
+`/health` is silent, `other` a `/health` answer while nobody holds the lock;
+`{"cmd": "start"}`, or `{"cmd": "start", "options": [...]}` (below) -> `{ok: true, already: true}`
+for this computer's running server, `{ok: false, other: true, error}` (`OTHER_SERVER_ERROR`) for
+a server answering while the lock is free, `{ok: true, already: true, starting: true}` for one
+that holds the instance lock but does not answer yet (it is starting, or loading its model where
+that happens at the start: `--model-idle-minutes 0`, the AMD engine), else `launch()` and
 `{ok: true, started: true, log}` (`log` null on Windows, the path of `~/.shisu-ko/server.log`
-elsewhere) or `{ok: false, error}` in one line. Anything else, a request with extra keys
-included, is `{ok: false, error: "unknown command"}`; a frame over 1 MiB is answered and ends
-the host. The instance lock is `APP_DIR/server-<port>.lock`: `server.py` takes it in
-`hold_instance_lock()` before `load_model()` and holds it until the process ends, a second
-server exits 2. `try_lock()` exists in both files (`msvcrt.locking` / `fcntl.flock`); only
-`LOCK_HELD_ERRNOS` mean "held", a filesystem that cannot lock at all counts as no lock.
-`launch()` on Windows runs `cmd.exe /c start "Shisu-ko server" .\run.cmd` with `cwd=server/`
+elsewhere) or `{ok: false, error}` in one line. Anything else, a request with other keys
+included (`status` takes none, `start` only `options`), is `{ok: false, error: "unknown
+command"}`; a frame over 1 MiB is answered and ends the host. The instance lock is
+`APP_DIR/server-<port>.lock`: `server.py` takes it in `hold_instance_lock()` before
+`load_model()` and holds it until the process ends, a second server exits 2. `try_lock()` exists
+in both files (`msvcrt.locking` / `fcntl.flock`); only `LOCK_HELD_ERRNOS` mean "held".
+`lock_state()` answers `held`, `free`, or `unknown` for a filesystem that cannot lock at all or a
+data folder that cannot be written, which claims neither: no server starting, and an answering
+server taken for this computer's own, which is what the answers were before the lock told them
+apart. A `free` lock with `/health` answering is someone else's server on 127.0.0.1:8790: an old
+copy from before the lock (the 0.2.1 Docker container through WSL's relay did this), a Docker
+container on Windows, whose `flock` on the shared data folder stays inside WSL, or a server
+started with another `SHISUKO_HOME`; on Linux a container's lock on a bind-mounted folder is the
+host's, and counts as this computer's own.
+
+The Start server options: `start` may carry `options`, a list of words that `check_options()`
+reads one by one against `START_OPTIONS` (option -> `None` for a flag, a list of words, or
+`{min, max}` / `{min, max, int}` for a number written as up to six ASCII digits and at most one
+point and three decimals). The first word off the list, a missing value, a value off its rule,
+more than `MAX_OPTION_TOKENS` (64) words or a list that is no list refuses the whole request
+before `/health` or the lock is asked; what passes goes to `launch(root, options=...)` exactly
+as it came, after `.\run.cmd` (Windows) or `run.sh` (POSIX), which hand it to `update.py` (it
+reads `--no-update` alone) and to every `server.py` start of their loop. The list holds what a
+viewer may want on the button's server (`--device`, `--compute-type`, `--beam-size`, the
+`auto|off` switches, the window and cue sizes, the idle timers, `--update-check`, `--log-level`,
+`--no-update`) and leaves out, on purpose, `--host` and `--port`, `--model`, everything that
+takes an address, a path, a program, a browser's cookies, code from the network or free text,
+and the options that exit (see `START_OPTIONS`' comment). `addon/start-options.js` holds the
+same table as a JSON literal and `parseStartOptions(text)`: the setting `startOptions` (what the
+viewer typed) split on whitespace, `--name=value` read as `--name value`, a word of a set typed
+in another case put in the set's spelling, `{ok, options}` or `{ok: false, error}` with the
+host's own wording. `test_native_host.py` keeps the two tables equal, checks that `server.py`'s
+`parse_args()` takes every option with each value its rule allows, and that no allowed word
+holds anything a command line reads.
+`launch()` on Windows runs `cmd.exe /c start "Shisu-ko server" .\run.cmd [options]` with `cwd=server/`
 (cmd.exe splits a full path holding `&` or `(` even when quoted), `DETACHED_PROCESS |
 CREATE_NEW_PROCESS_GROUP` and first `CREATE_BREAKAWAY_FROM_JOB`, retrying without it on
 `PermissionError`; on POSIX `bash run.sh` with `start_new_session=True` and stdout/stderr
@@ -658,10 +689,11 @@ gets Chrome's registration from the start that updates it on Linux and macOS (`m
 code-4 branch start the updated `native_host.py --register` after `update.py`), and on Windows
 only from the next `run.cmd` start (its register line runs before the update, and `:update`
 does not register).
-`launch()` passes no arguments to the launcher: a server the button started runs on `server.py`'s
-defaults (`--model` from `config.json`, else large-v3; `--device auto`; `--cookies-from-browser`
-from `config.json`, see "YouTube's sign-in"; `--model-idle-minutes` 1, so nothing loads before
-a video needs it, except on the AMD engine), and the popup's model setting takes effect with the first `/sync` (with
+`launch()` passes the launcher the checked options and nothing else: with none, a server the
+button started runs on `server.py`'s defaults (`--model` from `config.json`, else large-v3;
+`--device auto`; `--cookies-from-browser` from `config.json`, see "YouTube's sign-in";
+`--model-idle-minutes` 1, so nothing loads before a video needs it, except on the AMD engine),
+and the popup's model setting takes effect with the first `/sync` (with
 `--model-idle-minutes 0`, once that default model is loaded).
 `run_check()` in `server.py` loads `native_host.py` by path and prints `status_text()`.
 
@@ -673,24 +705,57 @@ button back; the permission request is issued in the click handler before its fi
 its hint was judged at the old address, and overtakes a `/health` request still under way
 (`healthAsked`: the old address may hold it up for the full timeout, and its answer is
 dropped). The background owns the launch (`startServer()`): one
-`sendNativeMessage` at a time (`startInFlight`), raced against `NATIVE_TIMEOUT_MS` (15 s), the
-answer recorded with a `deadline` of `START_WINDOW_MS` (90 s, past any healthy model load) in
-memory and in `browser.storage.session` (Firefox ends an idle event page after 30 s), so a
-reopened popup resumes at "waiting" (`startServerStatus`) instead of offering a second start
-while the first still loads; a `/health` answer through `apiRequest()` forgets the record.
+`sendNativeMessage` at a time (`startInFlight`), raced against `NATIVE_TIMEOUT_MS` (15 s) in
+`askLauncher()`, the answer recorded with a `deadline` of `START_WINDOW_MS` (90 s, past any
+healthy model load) in memory and in `browser.storage.session` (Firefox ends an idle event page
+after 30 s), so a reopened popup resumes at "waiting" (`startServerStatus`) instead of offering a
+second start while the first still loads; any JSON answer from the server through
+`apiRequest()`, a tab's `/sync` as much as the popup's `/health`, forgets the record (only the
+popup's poll did before, so a server that came up while the popup was closed and stopped again
+kept a reopened popup on "Starting server" for the rest of the window). `requestStart()` reads
+`startOptions` and parses it (`parseStartOptions()`): a word off the list is refused there
+(`Start server options: <error>`, `START_OPTIONS_HINT`) without the host; options go as
+`{cmd: "start", options}`, none as the bare `{cmd: "start"}`, and an "unknown command" answer to
+a request carrying options is a launcher from before them (`OLD_LAUNCHER_HINT`: one start with
+the field empty runs `run.cmd` / `run.sh`, whose update brings the newer launcher). The host's
+`other` refusal gets `OTHER_SERVER_HINT` and records no launch.
 `nativeError()` maps the browser's exceptions: "No such native application" / "not found" /
 "forbidden" -> `launcher not registered` with `LAUNCHER_HINT`; permission wording, or no
 `sendNativeMessage` at all -> `permission missing`; timeout -> `the launcher did not answer`;
 the host's own `{ok: false, error}` passes through. The popup keeps `already` and the host's
 `starting` (as `loading`) for the hint at the deadline: `START_ELSEWHERE_HINT` when the launcher
-saw a server answering that the popup cannot reach, else `startNotUpHint(log)`. Badge texts:
-`Checking server`, `Server offline`, `Starting server`, `Updating server`, `Loading model`,
-`Server online`. A start and an update exclude each other: `requestStart()` refuses while
+saw a server answering that the popup cannot reach, else `startNotUpHint(log)`. The click
+refuses Start server options off the list (the field's own value, before the permission is
+asked) and flushes a pending save (`flushSave()`, sent before the first `await` and awaited after
+the grant) before it sends `startServer`: the field's change event fires as it gives the focus
+to the button, and the background reads the options from the settings. The field's hint
+(`renderStartOptionsHint()`) says on every keystroke what the button will pass or what it
+refuses; the section shows only where the button does (`START_AVAILABLE`).
+
+Someone else's server: a `/health` answer at the launcher's address (`http://127.0.0.1:8790` or
+`http://localhost:8790`, `onLauncherAddress()`) from a server whose `launcher` is not `true` (an
+old copy has no such field; Docker, Nix and a start by hand say `false`) may not be this
+computer's at all. `checkOtherServer()` asks the background's `launcherStatus()`, which sends
+`{cmd: "status"}`, once per server seen (version, launcher flag, model, device) and only where
+the button is; without the permission there is no `sendNativeMessage`, the answer is
+`permission missing` and nothing prompts. With `other` the status line turns to `Other server`
+(`badge bad`, `otherServerText()`: who answers, and that it is an old copy or the Docker
+container to stop), and the Start button stays hidden, since a server of this computer's would
+only find the port taken; when that server goes, `/health` fails, the line says `Server offline`
+and the button is back. A server run.cmd / run.sh started is never asked about, and no verdict
+(no permission, no host, a host from before `other`) leaves `Server online`. Badge texts:
+`Checking server`, `Server offline`, `Starting server`, `Updating server`, `Other server`,
+`Loading model`, `Server online`. A start and an update exclude each other: `requestStart()` refuses while
 `pendingUpdate()` holds a record (`UPDATE_RUNNING_HINT`), `startStatus()` carries that record
 as `updating` so a reopened popup hides the button before its first paint, and the popup
 disables Update while `START_BUSY` and hides Start while `UPDATE_BUSY`.
 
-Tests: `server/tests/test_native_host.py`, `server/tests/test_server.py` (`hold_instance_lock()`), `addon/tests/background.test.js`, `addon/tests/popup.test.js`, `addon/tests/browser-api.test.js`.
+The server's own side of the port: on Windows `OwnPortHTTPServer` binds without `SO_REUSEADDR`,
+which there lets two listeners share an address (see `docs/dev/invariants-and-gotchas.md`), so
+a server that finds 127.0.0.1:8790 taken stops with "Cannot listen on ..." in its window instead
+of running unreachable, and nothing can join it later.
+
+Tests: `server/tests/test_native_host.py`, `server/tests/test_own_port.py`, `server/tests/test_server.py` (`hold_instance_lock()`), `addon/tests/start-options.test.js`, `addon/tests/background.test.js`, `addon/tests/popup.test.js`, `addon/tests/browser-api.test.js`.
 
 ## How the update step works
 
