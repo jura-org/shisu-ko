@@ -363,6 +363,23 @@ and marks the words of every line. Everything in words.js is pure, without DOM.
     follows must split into particles alone (`particleSplit()`), so no word ICU knows is cut
     (そうじ, ようやく). The adjective's form runs through the copula's past after そう (the tail
     `だっ`: 楽|しそう|だ|った is 楽しそうだった whole).
+  - The kanji a word's kana ending was fused with (`kanaHeadSeam()`, added by `boundsOf()`):
+    Firefox's segmenter starts a segment with the end of one word and the first kanji of the next
+    (腐|った肉|ある, 行|った場|合, 掘|ったら落|ちて, 飛|び越|え), where Node's cuts before the kanji
+    (腐|っ|た|肉), so the form before never ended there and the kanji word never began. The
+    kanji is a boundary when the segment's hiragana head begins with a kana no word begins with
+    (`NON_INITIAL`: っ, ん, the small kana, ゝ ゞ) or is one kana that is no particle and no
+    honorific prefix. On the viewer's 30,431 cached rows cut by Firefox 160, Node had a boundary
+    there 263 times in 266 (not in 月初|っ端, ったらぶ|っ飛, 照|れ隠); the heads left alone are
+    words or begin one, and Node keeps them whole with the kanji as often as not: お and ご (217
+    of 802 cut), a particle (に関して, と共に, を通して: 13 of 72), a longer kana word (この辺,
+    もう一度, やり方: 71 of 272). With the viewer's deck it brought 191 rows back to the colours
+    Node gives them (815 characters; with the particle option 163 rows, 868 characters) and
+    changed nothing on Node's cuts; six rows went further from Node, all compounds Firefox had
+    already split, where a one-kanji card now colours the first half (った炭|酸, ず肝|臓).
+    Firefox still differs from Node on 2,393 of those rows (4,863 with the particle option),
+    most of it particles fused with the next word's first kana (は|でき as はで|き, が|いい as
+    がい|い, は|とても as はと|て|も), which this seam does not touch.
   - `followOn()`: with the option, where a run ends inside a segment (a deck word boundedEnd() let
     end before particles, 広さ in Firefox's 広|さも|ある; a particle fused with the い of いる,
     人|がい|た), the particle or grammar word there is `learned` too.
