@@ -1924,6 +1924,33 @@ test("markWords finds the copula where Firefox's segmenter hides it", () => {
   assert.equal(markCut("大丈夫|そうだ", [], NAMES_ON), "大丈夫そうだ");
 });
 
+test("markWords finds the words where Firefox's segmenter fused a kana ending with the next kanji", () => {
+  // The viewer's line, as Firefox 160 cuts it (Node: 腐|っ|た|肉|ある|よ|。): 腐った ended inside
+  // った肉 before a kanji, and 肉 began no segment, so neither was found.
+  const deck = ["腐る", "肉", "行く", "場合", "掘る", "落ちる", "飛ぶ", "越える", "以上"].map((word) => [word, "learned", null]);
+  assert.equal(
+    markCut("腐|った肉|ある|よ|。", deck),
+    "腐った(learned,null) | 肉(learned,null) | ある(learned,null) | よ(learned,null) | 。",
+  );
+  assert.equal(markCut("腐|った肉|ある|よ|。", deck, NAMES_ON), "腐った(learned,null) | 肉(learned,null) | あるよ。");
+  // The kanji word begins there whether or not the deck holds the form before it; ある after a
+  // lone kanji of plain text stays plain, as in Node's cut.
+  assert.equal(markCut("腐|った肉|ある|よ|。", [["肉", "learned", null]], NAMES_ON), "腐った | 肉(learned,null) | あるよ。");
+  assert.equal(markCut("腐|った肉|ある|よ|。", []), "腐った肉ある | よ(learned,null) | 。");
+  // A head that begins with っ, or is one kana that is no particle and no honorific prefix.
+  assert.equal(markCut("行|った場|合|は", deck, NAMES_ON), "行った(learned,null) | 場合(learned,null) | は");
+  assert.equal(markCut("掘|ったら落|ちて|くる", deck, NAMES_ON), "掘ったら(learned,null) | 落ちて(learned,null) | くる");
+  assert.equal(markCut("飛|び越|え|た", deck, NAMES_ON), "飛び(learned,null) | 越えた(learned,null)");
+  assert.equal(markCut("もうこ|れ以|上|は", deck, NAMES_ON), "もうこれ | 以上(learned,null) | は");
+  // Heads that are words or begin one stay whole with their kanji, as Node keeps them: the
+  // honorific prefix (お金), a particle (と共に, が台), a longer kana word (この辺).
+  const inside = ["金", "共に", "台湾", "辺"].map((word) => [word, "learned", null]);
+  assert.equal(markCut("お金|が|ない", inside, NAMES_ON), "お金がない");
+  assert.equal(markCut("森|と共に|行き|よう", inside, NAMES_ON), "森と共に行きよう");
+  assert.equal(markCut("ここ|が台|湾|か", inside, NAMES_ON), "ここが台湾か");
+  assert.equal(markCut("この辺|です", inside, NAMES_ON), "この辺です");
+});
+
 test("markWords counts the grammar words as known with the particles, and never inside another word", () => {
   // The verbs that carry the grammar, in the forms the lines have them, and the everyday words.
   assert.equal(markCut("本|が|あった", []), "本 | が(learned,null) | あった(learned,null)");

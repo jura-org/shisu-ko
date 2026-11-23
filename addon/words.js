@@ -1046,9 +1046,9 @@ const SHISUKO_WORDS = (() => {
 
   // The word boundaries the matcher goes by: `starts`, plus the index after a て or で that ICU
   // fused with the く of the auxiliary behind it (TE_FORM: 食|べ|てく|れ|た), where a word may
-  // begin and a bounded one end, and the copula's seams (copulaSeam()). `starts` itself is never
-  // written (the content script keeps it per cue): the set is copied when there is something to
-  // add.
+  // begin and a bounded one end, the copula's seams (copulaSeam()) and the kanji a word's kana
+  // ending was fused with (kanaHeadSeam()). `starts` itself is never written (the content script
+  // keeps it per cue): the set is copied when there is something to add.
   function boundsOf(text, starts) {
     let bounds = starts;
     const add = (pos) => {
@@ -1058,8 +1058,34 @@ const SHISUKO_WORDS = (() => {
     for (const pos of starts) {
       if (TE_FORM.has(text[pos]) && text[pos + 1] === "く" && !starts.has(pos + 1)) add(pos + 1);
       for (const seam of copulaSeams(text, pos, starts)) add(seam);
+      const kanji = kanaHeadSeam(text, pos, starts);
+      if (kanji > 0) add(kanji);
     }
     return bounds;
+  }
+
+  // The kana no word begins with: っ, ん and the small kana, and the iteration marks.
+  const NON_INITIAL = new Set([..."っんぁぃぅぇぉゃゅょゎゝゞ"]);
+  const KANJI_HEAD = /^[\p{Script=Han}々]/u;
+
+  // Firefox's segmenter (ICU4X) fuses the kana that end one word with the kanji that begin the
+  // next (腐|った肉|ある, 行|った場|合, 掘|ったら落|ちて, 飛|び越|え, こ|れ以|上), where Node's ICU
+  // cuts before the kanji (腐|っ|た|肉): the form before never ends there and the kanji word
+  // after never begins. The index of that kanji, when the segment at `pos` opens with such a head
+  // of hiragana: one that begins with a kana of NON_INITIAL, or one kana that is no particle and
+  // no honorific prefix; else -1. Measured on the viewer's 30,431 cached subtitle rows cut by
+  // Firefox 160: such a head was followed by Node's boundary 263 times in 266 (not in 月初|っ端,
+  // ったらぶ|っ飛, 照|れ隠, words Node keeps whole). Not the heads that are words or begin one,
+  // which ICU keeps whole with the kanji as often as not: お and ご (お金, ご飯; Node cut 217 of
+  // 802), a particle (に関して, と共に, を通して; 13 of 72), a longer kana word (この辺, もう一度,
+  // やり方; 71 of 272).
+  function kanaHeadSeam(text, pos, starts) {
+    if (!NON_INITIAL.has(text[pos]) && (PARTICLES.has(text[pos]) || HONORIFICS.has(text[pos]))) return -1;
+    const end = segmentEnd(text, pos, starts);
+    let stop = pos;
+    while (stop < end && isHiragana(text[stop])) stop++;
+    if (stop === pos || stop >= end || !KANJI_HEAD.test(text.slice(stop, stop + 2))) return -1;
+    return NON_INITIAL.has(text[pos]) || stop === pos + 1 ? stop : -1;
   }
 
   // The auxiliaries ICU fuses with the copula after them (そうだ, そうです, そうだね in Firefox:
