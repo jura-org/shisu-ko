@@ -86,11 +86,12 @@ test("the manifest names the five commands, and the content script handles each"
 test("settings.js is loaded before the scripts that use it", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ADDON, "manifest.json"), "utf8"));
   // The background reads no note (the server does): words.js is the content script's alone.
-  assert.deepEqual(manifest.background.scripts, ["browser-api.js", "settings.js", "background.js"]);
+  assert.deepEqual(manifest.background.scripts, ["browser-api.js", "settings.js", "start-options.js", "background.js"]);
   for (const entry of manifest.content_scripts) assert.deepEqual(entry.js, ["browser-api.js", "settings.js", "words.js", "content.js"]);
   const html = fs.readFileSync(path.join(ADDON, "popup.html"), "utf8");
   assert.ok(html.indexOf('src="browser-api.js"') < html.indexOf('src="settings.js"'));
-  assert.ok(html.indexOf('src="settings.js"') < html.indexOf('src="popup.js"'));
+  assert.ok(html.indexOf('src="settings.js"') < html.indexOf('src="start-options.js"'));
+  assert.ok(html.indexOf('src="start-options.js"') < html.indexOf('src="popup.js"'));
   for (const file of ["background.js", "content.js"]) {
     assert.ok(!/const DEFAULT_SETTINGS = (Object\.freeze\()?\{/.test(fs.readFileSync(path.join(ADDON, file), "utf8")), `${file} still defines its own defaults`);
   }

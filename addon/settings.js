@@ -42,6 +42,10 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   // The sizes name the same weights on an Apple GPU, where the server loads their MLX build
   // instead; a repo id must then be an MLX one (mlx-community/whisper-large-v3-mlx).
   model: "",
+  // Server options the popup's Start server button passes to run.cmd / run.sh, as typed, from the
+  // list in start-options.js (SHISUKO_START_OPTIONS), which server/native_host.py checks again.
+  // Empty starts the server with its defaults, as the button always did.
+  startOptions: "",
   // sentence mining
   // The server attaches a line's audio and picture to a new Yomitan note when it matches a line of
   // the video playing; off, it attaches only what the viewer mines by hand (Alt+Shift+M). The

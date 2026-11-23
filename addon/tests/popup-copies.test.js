@@ -70,6 +70,7 @@ function loadPopupHelpers() {
   const sandbox = { document: { addEventListener: () => {} }, console };
   vm.createContext(sandbox);
   new vm.Script(fs.readFileSync(path.join(ADDON, "settings.js"), "utf8")).runInContext(sandbox);
+  new vm.Script(fs.readFileSync(path.join(ADDON, "start-options.js"), "utf8")).runInContext(sandbox);
   new vm.Script(POPUP, { filename: "popup.js" }).runInContext(sandbox);
   return new vm.Script("({ fontStack, modelNameOk, modelErrorFor, UPDATE_LOST_HINT, setHealth: (h) => { health = h; } })").runInContext(sandbox);
 }

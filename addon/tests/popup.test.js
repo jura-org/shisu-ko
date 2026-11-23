@@ -165,12 +165,14 @@ function loadPopup(answer, runtimeURL = "moz-extension://test/", opts = {}) {
   };
   vm.createContext(sandbox);
   new vm.Script(fs.readFileSync(path.join(ADDON, "settings.js"), "utf8")).runInContext(sandbox);
+  new vm.Script(fs.readFileSync(path.join(ADDON, "start-options.js"), "utf8"), { filename: "start-options.js" }).runInContext(sandbox);
   new vm.Script(fs.readFileSync(path.join(ADDON, "popup.js"), "utf8"), { filename: "popup.js" }).runInContext(sandbox);
   const api = new vm.Script(
     "({ startFlow, resumeStart, checkServer, startServerFromPopup, startNotUpHint, START_NOT_UP_HINT, START_ELSEWHERE_HINT, OFFLINE_HINT," +
       " START_AVAILABLE, ON_FIREFOX, CHROME_STORE_ID, START_PERMISSION_HINT," +
       " updateFlow, refreshUpdate, updateServerFromPopup, snoozeUpdateFromPopup, openReleasePage, relativeTime, renderStatus," +
-      " UPDATE_LOST_HINT, stillOldHint, init, resetStyle, onChange, renderDeckOptions, refreshDecks, DECK_NONE_HINT, HEALTH_REFRESH_MS, DECKS_RETRY_MS })"
+      " UPDATE_LOST_HINT, stillOldHint, init, resetStyle, onChange, renderDeckOptions, refreshDecks, DECK_NONE_HINT, HEALTH_REFRESH_MS, DECKS_RETRY_MS," +
+      " renderStartOptionsHint, START_OPTIONS_NONE, otherServerText })"
   ).runInContext(sandbox);
   // What the background's storage.local write of the settings looks like from the popup.
   const fireStorage = (settings) => {
@@ -1977,4 +1979,173 @@ test("the word colours edited in the other copy of the form land in the select a
   elsewhere({ pitchAccent: false });
   assert.equal(asked(), 8);
   assert.equal(hint.textContent, "", "both off: the hint goes without an ask");
+});
+
+// ------------------------------------------------------------------ someone else's server
+
+// A popup whose background answers /health with `health` and launcherStatus with `launcher`,
+// recording every message type.
+function launcherPopup(health, launcher, runtimeURL) {
+  const sent = [];
+  const popup = loadPopup((msg) => {
+    sent.push(msg.type);
+    if (msg.type === "launcherStatus") return typeof launcher === "function" ? launcher() : launcher;
+    if (msg.type === "startServerStatus") return { starting: false };
+    if (msg.type === "api") return typeof health === "function" ? health() : health;
+    return offline;
+  }, runtimeURL);
+  return { popup, sent, asked: () => sent.filter((type) => type === "launcherStatus").length };
+}
+const oldServer = { ok: true, data: { version: "0.2.1", model: "large-v3", device: "cuda", compute_type: "float16", language: "ja" } };
+
+// The old Docker container through WSL held 127.0.0.1:8790 with the viewer's server off: the
+// popup said "Server online", hid the Start button, and a browser restart was the only way out.
+test("a server run.cmd did not start is asked about once, and someone else's is named as such", async () => {
+  const { popup, asked } = launcherPopup(oldServer, { ok: true, running: true, starting: false, other: true });
+  await popup.checkServer(false);
+  await settle();
+  assert.equal(asked(), 1);
+  assert.equal(popup.el("server-status").textContent, "Other server");
+  assert.equal(popup.el("server-status").className, "badge bad");
+  assert.equal(popup.el("server-detail").textContent, popup.otherServerText(oldServer.data));
+  assert.match(popup.el("server-detail").textContent, /^Shisu-ko 0\.2\.1 answers here, not this computer's own: an old copy or the Docker container/);
+  assert.equal(popup.el("start-server").hidden, true, "starting this computer's server would only find the port taken");
+  await popup.checkServer(false);
+  await settle();
+  assert.equal(asked(), 1, "once per server seen");
+  assert.equal(popup.el("server-status").textContent, "Other server");
+});
+
+test("once someone else's server is gone, the popup is offline with the button, and asks again about the next one", async () => {
+  let health = oldServer;
+  let other = true;
+  const { popup, asked } = launcherPopup(() => health, () => ({ ok: true, running: !!health.ok, other }));
+  await popup.checkServer(false);
+  await settle();
+  assert.equal(popup.el("server-status").textContent, "Other server");
+  health = offline;
+  await popup.checkServer(false);
+  await settle();
+  assert.equal(popup.el("server-status").textContent, "Server offline");
+  assert.equal(popup.el("start-server").hidden, false);
+  // This computer's own server, started by hand (no launcher flag): the launcher holds it for its own.
+  health = { ok: true, data: { version: "0.29.0", launcher: false, model: "large-v3", device: "cuda", compute_type: "float16" } };
+  other = false;
+  await popup.checkServer(false);
+  await settle();
+  assert.equal(asked(), 2);
+  assert.equal(popup.el("server-status").textContent, "Server online");
+});
+
+test("someone else's server replaced by this computer's own, with no gap between, is online at the very next answer", async () => {
+  let health = oldServer;
+  const { popup, asked } = launcherPopup(() => health, { ok: true, running: true, other: true });
+  await popup.checkServer(false);
+  await settle();
+  assert.equal(popup.el("server-status").textContent, "Other server");
+  health = { ok: true, data: { version: "0.29.0", launcher: true, model: "large-v3", device: "cuda", compute_type: "float16" } };
+  await popup.checkServer(false); // no settle: the paint of this very answer
+  assert.equal(popup.el("server-status").textContent, "Server online");
+  assert.equal(asked(), 1, "a server run.cmd started is not asked about");
+});
+
+test("a server run.cmd started is not asked about, and no verdict leaves the line as it was", async () => {
+  const ours = { ok: true, data: { version: "0.29.0", launcher: true, model: "large-v3", device: "cuda", compute_type: "float16" } };
+  const own = launcherPopup(ours, () => assert.fail("a server run.cmd started is the launcher's own"));
+  await own.popup.checkServer(false);
+  await settle();
+  assert.equal(own.asked(), 0);
+  assert.equal(own.popup.el("server-status").textContent, "Server online");
+  // No permission, no host, an old host: no verdict, and the line says online as before.
+  for (const answer of [{ ok: false, error: "permission missing" }, { ok: true, running: true }, null]) {
+    const unknown = launcherPopup(oldServer, answer);
+    await unknown.popup.checkServer(false);
+    await settle();
+    assert.equal(unknown.asked(), 1);
+    assert.equal(unknown.popup.el("server-status").textContent, "Server online", JSON.stringify(answer));
+  }
+});
+
+test("no question where the button is not, or with a server URL that is not the launcher's", async () => {
+  for (const url of ["chrome-extension://test/", "safari-web-extension://test/"]) {
+    const unpacked = launcherPopup(oldServer, () => assert.fail("no launcher here"), url);
+    await unpacked.popup.checkServer(false);
+    await settle();
+    assert.equal(unpacked.asked(), 0, url);
+  }
+  for (const [value, asks] of [["http://127.0.0.1:8791", 0], ["http://192.168.1.5:8790", 0], ["http://localhost:8790/", 1], ["HTTP://127.0.0.1:8790", 1]]) {
+    const { popup, asked } = launcherPopup(oldServer, { ok: true, running: true, other: false });
+    popup.el("serverUrl").value = value;
+    await popup.checkServer(false);
+    await settle();
+    assert.equal(asked(), asks, value);
+  }
+});
+
+// ------------------------------------------------------------------ Start server options
+
+test("the Start server options' hint says what the button passes, or the word it refuses", () => {
+  const popup = loadPopup(() => offline);
+  const field = popup.el("startOptions");
+  const hint = popup.el("start-options-hint");
+  popup.renderStartOptionsHint();
+  assert.equal(hint.textContent, popup.START_OPTIONS_NONE);
+  field.value = "--lyrics OFF  --beam-size=1";
+  popup.renderStartOptionsHint();
+  assert.equal(hint.textContent, "The Start server button passes --lyrics off --beam-size 1 to the next server it starts; one already running keeps its own");
+  assert.equal(hint.className, "hint");
+  field.value = "--host 0.0.0.0";
+  popup.renderStartOptionsHint();
+  assert.equal(hint.textContent, "--host is not an option the Start button passes");
+  assert.equal(hint.className, "hint error");
+});
+
+test("a click with options off the list is refused before the browser asks for anything", async () => {
+  const sent = [];
+  const popup = loadPopup((msg) => {
+    sent.push(msg.type);
+    return msg.type === "startServer" ? assert.fail("nothing is started") : offline;
+  });
+  popup.el("startOptions").value = "--port 8791";
+  await popup.startServerFromPopup();
+  assert.deepEqual(popup.permissionRequests, []);
+  assert.deepEqual(sent.filter((type) => type === "startServer"), []);
+  assert.equal(popup.startFlow.state, "failed");
+  assert.equal(popup.el("server-detail").textContent,
+    "Start server options: --port is not an option the Start button passes. Fix them under Start server options, or empty the field");
+  assert.equal(popup.el("start-server").disabled, false);
+});
+
+test("a click right after an options edit saves the edit before it asks the background to start", async () => {
+  const sent = [];
+  const saves = [];
+  const popup = loadPopup((msg) => {
+    sent.push(msg.type);
+    if (msg.type === "saveSettings") saves.push(JSON.parse(JSON.stringify(msg.settings)));
+    if (msg.type === "startServer") return { ok: true, started: true, already: false, log: null, deadline: Date.now() + 90000 };
+    return offline;
+  });
+  const field = popup.el("startOptions");
+  field.value = "--lyrics off";
+  popup.onChange({ target: field }); // the change event the click fired: the field gave the focus to the button
+  await popup.startServerFromPopup();
+  assert.deepEqual(saves, [{ startOptions: "--lyrics off" }]);
+  assert.ok(sent.indexOf("saveSettings") < sent.indexOf("startServer"), sent.join(", "));
+  assert.deepEqual(popup.permissionRequests, [{ permissions: ["nativeMessaging"] }]);
+  assert.equal(popup.startFlow.state, "waiting");
+});
+
+test("the Start server options are there only where the button is", async () => {
+  for (const [url, hidden] of [["moz-extension://test/", false], [CHROME_STORE_URL, false], ["chrome-extension://test/", true]]) {
+    const popup = loadPopup((msg) => {
+      if (msg.type === "getSettings") return { ...DEFAULTS, startOptions: "--no-update" };
+      if (msg.type === "startServerStatus") return { starting: false };
+      return offline;
+    }, url);
+    await popup.init();
+    assert.equal(popup.el("start-options-section").hidden, hidden, url);
+    assert.equal(popup.el("startOptions").value, "--no-update");
+    assert.match(popup.el("start-options-hint").textContent, /passes --no-update/);
+    assert.match(popup.el("start-options-list").textContent, /^Options: --device --compute-type .* --no-update\. docs\/server\.md says what each does\.$/);
+  }
 });
