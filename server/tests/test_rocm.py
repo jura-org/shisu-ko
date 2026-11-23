@@ -851,7 +851,7 @@ def test_a_start_on_the_cpu_never_asks_for_the_amd_gpu(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "hold_instance_lock", lambda port: True)
     started = []
     monkeypatch.setattr(server, "start_app", lambda args: started.append(args.device) or SimpleNamespace(exit_code=None))
-    monkeypatch.setattr(server, "ThreadingHTTPServer", InstantServer)
+    monkeypatch.setattr(server, "OwnPortHTTPServer", InstantServer)
     monkeypatch.setattr(server.Handler, "app", None)
     assert run_main(monkeypatch, "--device", "cpu") is None
     assert started == ["cpu"] and not (tmp_path / "rocm-starts").exists()
@@ -1386,7 +1386,7 @@ def test_the_one_shot_commands_end_through_terminate_process_on_windows(monkeypa
 
 
 class InstantServer:
-    """ThreadingHTTPServer that serves nothing: serve_forever() returns at once."""
+    """OwnPortHTTPServer that serves nothing: serve_forever() returns at once."""
 
     def __init__(self, address, handler):
         self.daemon_threads = False
@@ -1405,7 +1405,7 @@ def test_the_server_s_end_goes_through_terminate_process_on_windows(monkeypatch,
     engine_imports(monkeypatch)
     monkeypatch.setattr(server, "hold_instance_lock", lambda port: True)
     monkeypatch.setattr(server, "start_app", lambda args: SimpleNamespace(exit_code=exit_code))
-    monkeypatch.setattr(server, "ThreadingHTTPServer", InstantServer)
+    monkeypatch.setattr(server, "OwnPortHTTPServer", InstantServer)
     monkeypatch.setattr(server.Handler, "app", None)
     assert run_main(monkeypatch) == result
     assert calls == terminated(code)
@@ -1428,7 +1428,7 @@ def test_a_start_that_cannot_run_ends_through_terminate_process_on_windows(monke
 
     monkeypatch.setattr(server, "hold_instance_lock", lambda port: True)
     monkeypatch.setattr(server, "start_app", lambda args: SimpleNamespace(exit_code=None))
-    monkeypatch.setattr(server, "ThreadingHTTPServer", taken)
+    monkeypatch.setattr(server, "OwnPortHTTPServer", taken)
     monkeypatch.setattr(server.Handler, "app", None)
     assert run_main(monkeypatch) == 2
     assert calls == terminated(2), "the port cannot be listened on"
@@ -1449,7 +1449,7 @@ def test_a_listen_that_fails_otherwise_ends_through_terminate_process_on_windows
 
     monkeypatch.setattr(server, "hold_instance_lock", lambda port: True)
     monkeypatch.setattr(server, "start_app", lambda args: SimpleNamespace(exit_code=None))
-    monkeypatch.setattr(server, "ThreadingHTTPServer", refused)
+    monkeypatch.setattr(server, "OwnPortHTTPServer", refused)
     monkeypatch.setattr(server.Handler, "app", None)
     with caplog.at_level(logging.INFO, logger="shisu-ko"):
         assert run_main(monkeypatch) == 2
@@ -1486,7 +1486,7 @@ def test_what_still_leaves_main_ends_through_terminate_process_on_windows(monkey
     monkeypatch.setattr(sys, "argv", ["server.py"])
     monkeypatch.setattr(server, "hold_instance_lock", lambda port: True)
     monkeypatch.setattr(server, "start_app", lambda args: SimpleNamespace(exit_code=None))
-    monkeypatch.setattr(server, "ThreadingHTTPServer", FailingServer)
+    monkeypatch.setattr(server, "OwnPortHTTPServer", FailingServer)
     monkeypatch.setattr(server.Handler, "app", None)
     with caplog.at_level(logging.INFO, logger="shisu-ko"):
         with pytest.raises(SystemExit) as info:  # the fake TerminateProcess returns, as only a failed one does
@@ -1732,7 +1732,7 @@ def test_ctrl_break_while_serving_ends_as_ctrl_c_does_on_windows(monkeypatch, ca
     engine_imports(monkeypatch)
     monkeypatch.setattr(server, "hold_instance_lock", lambda port: True)
     monkeypatch.setattr(server, "start_app", lambda args: SimpleNamespace(exit_code=exit_code))
-    monkeypatch.setattr(server, "ThreadingHTTPServer", BreakingServer)
+    monkeypatch.setattr(server, "OwnPortHTTPServer", BreakingServer)
     monkeypatch.setattr(BreakingServer, "closed", False)
     monkeypatch.setattr(server.Handler, "app", None)
     with caplog.at_level(logging.INFO, logger="shisu-ko"):
