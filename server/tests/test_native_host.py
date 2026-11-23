@@ -103,60 +103,87 @@ def test_read_message_raises_on_bad_json_after_consuming_the_frame():
 
 # --- handle() ----------------------------------------------------------------------------------
 
-def never_launch(root):
+def never_launch(root, options=()):
     raise AssertionError(f"launch() must not run for this request (root {root})")
 
 
+def lock_is(state):
+    return lambda: state
+
+
 def test_status_reports_running_version_and_root(tmp_path):
-    answer = nh.handle({"cmd": "status"}, running=lambda: True, launch=never_launch, root=tmp_path)
-    assert answer == {"ok": True, "running": True, "version": nh.VERSION, "root": str(tmp_path)}
-    assert nh.handle({"cmd": "status"}, running=lambda: False, launch=never_launch)["running"] is False
-    assert nh.handle({"cmd": "status"}, running=lambda: False, launch=never_launch)["root"] == str(ROOT)
+    answer = nh.handle({"cmd": "status"}, running=lambda: True, launch=never_launch, root=tmp_path, lock=lock_is(nh.HELD))
+    assert answer == {"ok": True, "running": True, "starting": False, "other": False, "version": nh.VERSION,
+                      "root": str(tmp_path)}
+    assert nh.handle({"cmd": "status"}, running=lambda: False, launch=never_launch, lock=lock_is(nh.FREE))["running"] is False
+    assert nh.handle({"cmd": "status"}, running=lambda: False, launch=never_launch, lock=lock_is(nh.FREE))["root"] == str(ROOT)
+
+
+@pytest.mark.parametrize("up, state, starting, other", [
+    (True, nh.HELD, False, False),     # this computer's server answers
+    (True, nh.FREE, False, True),      # an answer while nobody holds this data folder's lock: someone else's
+    (True, nh.UNKNOWN, False, False),  # no usable lock: taken for this computer's own, as before
+    (False, nh.HELD, True, False),     # launched, still loading
+    (False, nh.FREE, False, False),
+    (False, nh.UNKNOWN, False, False),
+])
+def test_status_tells_this_computers_server_from_another(up, state, starting, other):
+    answer = nh.handle({"cmd": "status"}, running=lambda: up, launch=never_launch, lock=lock_is(state))
+    assert (answer["running"], answer["starting"], answer["other"]) == (up, starting, other)
 
 
 def test_start_launches_only_when_the_server_is_down(tmp_path):
     calls = []
 
-    def launch(root):
-        calls.append(root)
+    def launch(root, options=()):
+        calls.append((root, options))
         return {"ok": True, "started": True, "log": None}
 
-    assert nh.handle({"cmd": "start"}, running=lambda: True, launch=launch,
-                     starting=lambda: pytest.fail("a running server needs no lock check")) == {"ok": True, "already": True}
+    assert nh.handle({"cmd": "start"}, running=lambda: True, launch=launch, lock=lock_is(nh.HELD)) == {
+        "ok": True, "already": True}
+    assert nh.handle({"cmd": "start"}, running=lambda: True, launch=launch, lock=lock_is(nh.UNKNOWN)) == {
+        "ok": True, "already": True}
     assert calls == []
-    assert nh.handle({"cmd": "start"}, running=lambda: False, launch=launch, root=tmp_path, starting=lambda: False) == {
+    assert nh.handle({"cmd": "start"}, running=lambda: False, launch=launch, root=tmp_path, lock=lock_is(nh.FREE)) == {
         "ok": True, "started": True, "log": None}
-    assert calls == [tmp_path]
+    assert calls == [(tmp_path, ())]
+
+
+def test_start_names_another_server_on_the_port_instead_of_launching_into_it():
+    """The old Docker container through WSL, a copy without the lock: the launcher's server would find the port taken."""
+    answer = nh.handle({"cmd": "start"}, running=lambda: True, launch=never_launch, lock=lock_is(nh.FREE))
+    assert answer == {"ok": False, "other": True, "error": nh.OTHER_SERVER_ERROR}
+    assert "127.0.0.1:8790" in nh.OTHER_SERVER_ERROR
 
 
 def test_start_waits_for_a_launched_server_that_is_still_loading():
     """The model load keeps /health silent for a while; the lock says a server is on its way."""
-    answer = nh.handle({"cmd": "start"}, running=lambda: False, launch=never_launch, starting=lambda: True)
+    answer = nh.handle({"cmd": "start"}, running=lambda: False, launch=never_launch, lock=lock_is(nh.HELD))
     assert answer == {"ok": True, "already": True, "starting": True}
 
 
 def test_start_turns_a_launch_failure_into_one_line():
-    def launch(root):
+    def launch(root, options=()):
         raise FileNotFoundError("run.cmd is missing\nsecond line")
 
-    answer = nh.handle({"cmd": "start"}, running=lambda: False, launch=launch, starting=lambda: False)
+    answer = nh.handle({"cmd": "start"}, running=lambda: False, launch=launch, lock=lock_is(nh.FREE))
     assert answer == {"ok": False, "error": "run.cmd is missing second line"}
 
 
-def test_server_starting_follows_the_instance_lock(tmp_path):
+def test_lock_state_follows_the_instance_lock(tmp_path):
     data = tmp_path / "data"
     env = {"SHISUKO_HOME": str(data)}
-    assert nh.server_starting(environ=env) is False
+    assert nh.lock_state(environ=env) == nh.FREE
     held = nh.try_lock(data / nh.LOCK_NAME)
     assert held is not None
     try:
-        assert nh.server_starting(environ=env) is True
+        assert nh.lock_state(environ=env) == nh.HELD
         assert nh.try_lock(data / nh.LOCK_NAME) is None
     finally:
         held.close()
-    assert nh.server_starting(environ=env) is False
+    assert nh.lock_state(environ=env) == nh.FREE
     (tmp_path / "file").write_text("")
-    assert nh.server_starting(environ={"SHISUKO_HOME": str(tmp_path / "file")}) is False, "no usable lock: as before"
+    assert nh.lock_state(environ={"SHISUKO_HOME": str(tmp_path / "file")}) == nh.UNKNOWN, "no usable lock"
 
 
 def lock_call_raises(monkeypatch, code: int) -> None:
@@ -169,19 +196,20 @@ def lock_call_raises(monkeypatch, code: int) -> None:
         monkeypatch.setattr(nh.fcntl, "flock", raise_)
 
 
-def test_server_starting_reads_only_a_held_lock_as_starting(tmp_path, monkeypatch):
+def test_lock_state_reads_only_a_held_lock_as_held(tmp_path, monkeypatch):
     """ENOLCK (an NFS home without a lock manager), EOPNOTSUPP, EINVAL: the file cannot be locked at all.
 
     Read as held, every "start" would answer "already" without launching: a button that never works.
+    Read as free, every answering server would be someone else's: a button that refuses the viewer's own.
     """
     env = {"SHISUKO_HOME": str(tmp_path / "data")}
     lock_call_raises(monkeypatch, errno.ENOLCK)
     with pytest.raises(OSError):
         nh.try_lock(tmp_path / "data" / nh.LOCK_NAME)
-    assert nh.server_starting(environ=env) is False
+    assert nh.lock_state(environ=env) == nh.UNKNOWN
     lock_call_raises(monkeypatch, errno.EACCES if WINDOWS else errno.EWOULDBLOCK)
     assert nh.try_lock(tmp_path / "data" / nh.LOCK_NAME) is None, "what a held lock raises"
-    assert nh.server_starting(environ=env) is True
+    assert nh.lock_state(environ=env) == nh.HELD
 
 
 def test_the_lock_is_the_one_server_py_holds_while_it_loads(tmp_path, monkeypatch):
@@ -194,16 +222,121 @@ def test_the_lock_is_the_one_server_py_holds_while_it_loads(tmp_path, monkeypatc
     assert server.instance_lock_path(nh.PORT) == data / nh.LOCK_NAME
     assert server.hold_instance_lock(nh.PORT) is True
     try:
-        assert nh.server_starting(environ={"SHISUKO_HOME": str(data)}) is True
+        assert nh.lock_state(environ={"SHISUKO_HOME": str(data)}) == nh.HELD
     finally:
         server.INSTANCE_LOCK.close()
-    assert nh.server_starting(environ={"SHISUKO_HOME": str(data)}) is False
+    assert nh.lock_state(environ={"SHISUKO_HOME": str(data)}) == nh.FREE
+
+
+# --- start options -----------------------------------------------------------------------------
+
+def test_start_hands_checked_options_to_the_launcher():
+    calls = []
+
+    def launch(root, options=()):
+        calls.append(options)
+        return {"ok": True, "started": True, "log": None}
+
+    options = ["--lyrics", "off", "--beam-size", "1", "--no-update", "--window", "45.5", "--log-level", "DEBUG"]
+    answer = nh.handle({"cmd": "start", "options": options}, running=lambda: False, launch=launch, lock=lock_is(nh.FREE))
+    assert answer == {"ok": True, "started": True, "log": None}
+    assert calls == [tuple(options)]
+    assert nh.handle({"cmd": "start", "options": []}, running=lambda: False, launch=launch, lock=lock_is(nh.FREE))["ok"]
+    assert calls[-1] == ()
+
+
+@pytest.mark.parametrize("options, says", [
+    (["--host", "0.0.0.0"], "--host is not an option"),
+    (["--port", "8791"], "--port is not an option"),
+    (["--model", "large-v3"], "--model is not an option"),
+    (["--anki-url", "http://evil:1"], "--anki-url is not an option"),
+    (["--cookies-from-browser", "chrome"], "--cookies-from-browser is not an option"),
+    (["--js-runtime", "node:C:\\evil.exe"], "--js-runtime is not an option"),
+    (["--initial-prompt", "x"], "--initial-prompt is not an option"),
+    (["--allow-remote-ejs"], "--allow-remote-ejs is not an option"),
+    (["--check"], "--check is not an option"),
+    (["--mod", "x"], "--mod is not an option"),  # argparse would take an abbreviation; the list does not
+    (["--lyrics=off"], "--lyrics=off is not an option"),
+    (["off"], "off is not an option"),
+    (["--beam-size"], "--beam-size needs a value"),
+    (["--beam-size", "0"], "--beam-size takes a whole number from 1 to 16"),
+    (["--beam-size", "17"], "--beam-size takes a whole number from 1 to 16"),
+    (["--beam-size", "1.5"], "--beam-size takes a whole number"),
+    (["--beam-size", "-1"], "--beam-size takes a whole number"),
+    (["--window", "1e3"], "--window takes a number from 1 to 600"),
+    (["--window", "\uff11\uff10"], "--window takes a number"),  # fullwidth digits: float() reads them, the rule does not
+    (["--window", "10 & calc"], "--window takes a number"),
+    (["--window", "nan"], "--window takes a number"),
+    (["--lyrics", "maybe"], "--lyrics takes auto or off"),
+    (["--lyrics", "OFF"], "--lyrics takes auto or off"),
+    (["--lyrics", "off&calc"], "--lyrics takes auto or off"),
+    (["--log-level", "debug"], "--log-level takes DEBUG or INFO or WARNING or ERROR"),
+    (["--no-update", "yes"], "yes is not an option"),
+    ([42], "int is not an option"),
+    (["--lyrics", 1], "--lyrics needs a value"),
+    ("--lyrics off", "not a list"),
+    ({"--lyrics": "off"}, "not a list"),
+    (["--no-update"] * (nh.MAX_OPTION_TOKENS + 1), "not a list"),
+])
+def test_start_refuses_options_outside_the_list_before_anything_else(options, says):
+    answer = nh.handle({"cmd": "start", "options": options}, running=lambda: pytest.fail("refused before /health"),
+                       launch=never_launch, lock=lambda: pytest.fail("refused before the lock"))
+    assert answer["ok"] is False and says in answer["error"], answer
+
+
+def test_every_value_the_rules_allow_is_one_no_command_line_reads_into():
+    # cmd.exe parses the launcher's command line (start, then run.cmd's %*): & | < > ^ % ! " ( ) and
+    # spaces must never reach it from a message. Every rule's words and number shapes stay in this set.
+    safe = re.compile(r"[A-Za-z0-9._-]+")
+    for name, rule in nh.START_OPTIONS.items():
+        assert safe.fullmatch(name) and name.startswith("--"), name
+        if isinstance(rule, list):
+            assert all(safe.fullmatch(word) for word in rule), name
+        elif rule is not None:
+            assert set(rule) <= {"min", "max", "int"} and rule["min"] <= rule["max"], name
+    for value in ("0", "600", "45.5", "1.125"):
+        assert safe.fullmatch(value) and nh.NUMBER_RE.fullmatch(value)
+
+
+def sample_values(rule):
+    if rule is None:
+        return [None]
+    if isinstance(rule, list):
+        return list(rule)
+    whole = rule.get("int")
+    low, high = rule["min"], rule["max"]
+    return [str(low), str(high)] + ([] if whole else [f"{low + 0.5:g}" if low + 0.5 <= high else str(low)])
+
+
+def test_every_start_option_is_one_server_py_accepts_with_every_value_its_rule_allows():
+    from _serverlib import load_server
+
+    server = load_server()
+    for name, rule in nh.START_OPTIONS.items():
+        for value in sample_values(rule):
+            argv = [name] if value is None else [name, value]
+            nh.check_options(argv)
+            try:
+                server.parse_args(argv)
+            except SystemExit:
+                pytest.fail(f"server.py refuses {argv}")
+
+
+def test_the_extension_checks_the_same_options():
+    """addon/start-options.js holds the table the popup's hint and the background check with."""
+    text = (ROOT / "addon" / "start-options.js").read_text(encoding="utf-8")
+    match = re.search(r"const SHISUKO_START_OPTIONS = Object\.freeze\((\{.*?\})\);", text, re.S)
+    assert match, "SHISUKO_START_OPTIONS is a JSON object literal in addon/start-options.js"
+    assert json.loads(match.group(1)) == nh.START_OPTIONS
+    assert f"MAX_OPTION_TOKENS = {nh.MAX_OPTION_TOKENS};" in text
 
 
 @pytest.mark.parametrize("request_", [
     {"cmd": "stop"},
     {"cmd": "start", "path": "C:\\evil.exe"},
     {"cmd": "start", "args": ["--model", "x"]},
+    {"cmd": "start", "options": [], "path": "x"},
+    {"cmd": "status", "options": []},
     {"cmd": ["start"]},
     {"cmd": None},
     {"command": "start"},
@@ -223,8 +356,8 @@ def test_anything_but_a_bare_command_is_unknown(request_):
 
 def test_serve_answers_each_message_in_order_and_stops_at_eof(monkeypatch):
     monkeypatch.setattr(nh, "server_running", lambda: False)
-    monkeypatch.setattr(nh, "server_starting", lambda: False)
-    monkeypatch.setattr(nh, "launch", lambda root: {"ok": True, "started": True, "log": None})
+    monkeypatch.setattr(nh, "lock_state", lambda: nh.FREE)
+    monkeypatch.setattr(nh, "launch", lambda root, options=(): {"ok": True, "started": True, "log": None})
     nested = b"[" * 50000 + b"]" * 50000  # well under MAX_MESSAGE_BYTES, past json's recursion limit
     stdin = io.BytesIO(frame({"cmd": "status"}) + struct.pack("<I", 3) + b"{ab" + frame("junk") + frame(None)
                        + struct.pack("<I", len(nested)) + nested + frame({"cmd": "start"}))
@@ -289,6 +422,16 @@ def test_launch_on_windows_opens_a_console_with_the_repo_launcher_and_nothing_el
 
 
 @windows_only
+def test_launch_on_windows_puts_the_options_after_the_launcher(tmp_path, monkeypatch):
+    root = fake_checkout(tmp_path)
+    calls = []
+    monkeypatch.setattr(nh.subprocess, "Popen", RecordedPopen(calls))
+    nh.launch(root, options=("--lyrics", "off", "--no-update"))
+    (argv, _), = calls
+    assert argv == ["cmd.exe", "/c", "start", "Shisu-ko server", ".\\run.cmd", "--lyrics", "off", "--no-update"]
+
+
+@windows_only
 def test_launch_on_windows_retries_without_breakaway_when_the_job_forbids_it(tmp_path, monkeypatch):
     root = fake_checkout(tmp_path)
     calls = []
@@ -345,6 +488,16 @@ def test_launch_on_posix_starts_the_repo_launcher_in_a_new_session_logging_to_th
 
 
 @posix_only
+def test_launch_on_posix_puts_the_options_after_the_launcher(tmp_path, monkeypatch):
+    root = fake_checkout(tmp_path)
+    calls = []
+    monkeypatch.setattr(nh.subprocess, "Popen", RecordedPopen(calls))
+    nh.launch(root, environ={"SHISUKO_HOME": str(tmp_path / "data")}, options=("--beam-size", "1"))
+    (argv, _), = calls
+    assert argv == ["bash", str(root / "server" / "run.sh"), "--beam-size", "1"]
+
+
+@posix_only
 def test_launch_on_posix_logs_under_the_home_when_shisuko_home_is_unset(tmp_path, monkeypatch):
     root = fake_checkout(tmp_path)
     calls = []
@@ -359,7 +512,7 @@ def test_launch_refuses_a_checkout_without_the_launcher(tmp_path, monkeypatch):
     with pytest.raises(FileNotFoundError):
         nh.launch(tmp_path, environ={"SHISUKO_HOME": str(tmp_path / "data")})
     assert calls == []
-    answer = nh.handle({"cmd": "start"}, running=lambda: False, launch=nh.launch, root=tmp_path, starting=lambda: False)
+    answer = nh.handle({"cmd": "start"}, running=lambda: False, launch=nh.launch, root=tmp_path, lock=lock_is(nh.FREE))
     assert answer["ok"] is False and "missing" in answer["error"]
 
 
