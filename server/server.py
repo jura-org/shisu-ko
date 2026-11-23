@@ -113,7 +113,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.28.1"
+VERSION = "0.29.1"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -7479,6 +7479,24 @@ def update_origin_allowed(origin: Optional[str]) -> bool:
     return origin is None or origin.startswith(EXTENSION_ORIGIN_PREFIXES)
 
 
+class OwnPortHTTPServer(ThreadingHTTPServer):
+    """The stdlib's threading HTTP server, holding its port alone: no SO_REUSEADDR on Windows.
+
+    http.server sets SO_REUSEADDR everywhere. On POSIX that only lets a restart bind over its own
+    connections in TIME_WAIT; on Windows it lets any other socket that sets it too bind the very
+    same address and port, and both then listen, each getting some of the connections, so another
+    listener on 127.0.0.1:8790 (WSL's relay for a Docker container, a second Python server) could
+    sit beside this one unnoticed. Windows binds over TIME_WAIT without the option
+    (socket.create_server() leaves it off there for the same reasons), so the server that comes
+    second now fails with "address in use" and says so (main(): "Cannot listen on ..."), and
+    nothing can join this one.
+    """
+
+    def server_bind(self) -> None:
+        self.allow_reuse_address = os.name != "nt"  # read here, not at import, so a test can pick the platform
+        super().server_bind()
+
+
 SHUTDOWN_DELAY = 0.5  # seconds between the answer to POST /update and the end of serve_forever()
 
 
@@ -9630,10 +9648,11 @@ def main() -> None:
             signal.signal(signal.SIGBREAK, previous)  # and so does a Ctrl+Break, never the console's ExitProcess
     Handler.app = app
     try:
-        server = ThreadingHTTPServer((args.host, args.port), Handler)
+        server = OwnPortHTTPServer((args.host, args.port), Handler)
     except (OSError, OverflowError, ValueError, TypeError) as exc:
         # OverflowError: a port out of range; ValueError / TypeError: a host that cannot be encoded.
-        log.error("Cannot listen on %s:%d (%s). Is another server already running?", args.host, args.port, exc)
+        log.error("Cannot listen on %s:%d (%s). Is another server already running there (another window, "
+                  "or the Docker container: docker/down.cmd stops it)?", args.host, args.port, exc)
         finish(2)
     server.daemon_threads = True
     app.anki_watcher = start_anki_watcher(args, app)

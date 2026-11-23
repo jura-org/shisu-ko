@@ -334,12 +334,12 @@ def main_ready(monkeypatch, tmp_path):
         first_window=20.0, window=40.0, lookahead=900.0, idle_minutes=30, retry_after=30.0, no_update=False))
     created = []
 
-    class Recording(server.ThreadingHTTPServer):
+    class Recording(server.OwnPortHTTPServer):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             created.append(self)
 
-    monkeypatch.setattr(server, "ThreadingHTTPServer", Recording)
+    monkeypatch.setattr(server, "OwnPortHTTPServer", Recording)
     outcome = {}
 
     def run():

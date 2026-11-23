@@ -124,9 +124,37 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   counterpart in `docs/amo/`: those texts go to addons.mozilla.org, which lists the Firefox build
   only.
 - The native host (`server/native_host.py`, name `shisuko`) answers only `status` and `start`.
-  It never takes a path, a program or an argument from a message: the only thing it can run is
-  the checkout's own `server/run.cmd` / `server/run.sh` (root = the parent of the folder the
-  host file lives in), and it registers only under the user's own profile, never system-wide:
+  It never takes a path or a program from a message: the only thing it can run is the
+  checkout's own `server/run.cmd` / `server/run.sh` (root = the parent of the folder the host
+  file lives in). The one thing a message adds to that launcher's command line is `start`'s
+  `options`, the popup's Start server options (the `startOptions` setting): option names from
+  `START_OPTIONS`, each followed by what its rule allows, a number in a range written as ASCII
+  digits with at most one point, or one word of a fixed set (`check_options()`, which refuses
+  the whole request at the first wrong word, before `/health` or the lock is asked). So no
+  space and none of `& | < > ^ % ! " ( )` can reach `cmd.exe /c start ... .\run.cmd` or
+  `bash run.sh` from a message. `--host`, `--port` (the button's server is the one on
+  127.0.0.1:8790, which the popup and `lock_state()` look at), `--model` (the popup's model
+  field picks the model; only the operator's `--model` may name a folder), everything that takes
+  an address, a path, a program, a browser's cookies, code from the network or free text
+  (`--anki-url`, `--cookies`, `--cookies-from-browser`, `--save-cookies-from-browser`,
+  `--js-runtime`, `--allow-remote-ejs`, `--initial-prompt`, `--language`) and the options that
+  exit instead of serving stay off the list. `addon/start-options.js` holds the same table as a
+  JSON object literal (`SHISUKO_START_OPTIONS`) with the parser the popup's hint and the
+  background share (`parseStartOptions()`); `test_native_host.py` reads it and keeps the two
+  equal, and checks that `server.py`'s `parse_args()` takes every option with every value its
+  rule allows. A request without options is the bare `{cmd: "start"}`, which a launcher from
+  before the options still understands; one with them gets "unknown command" from such a
+  launcher, which the background words as `OLD_LAUNCHER_HINT`. The instance lock also tells
+  this computer's own server from another (`lock_state()`: `held`, `free`, or `unknown` for a lock
+  that cannot be tried, which claims neither): a `/health` answer while the lock is free is
+  someone else's server (an old copy without the lock, the Docker container through WSL, a
+  server with another `SHISUKO_HOME`), `status` says `other` and `start` refuses with
+  `OTHER_SERVER_ERROR` instead of launching a server that would find the port taken. The popup
+  asks `status` (`launcherStatus`) only where the button is, at the launcher's address, for a
+  server whose `/health` lacks `launcher: true` (run.cmd and run.sh always set it), once per
+  server seen, and only with the permission granted: without it the background has no
+  `sendNativeMessage` and nothing prompts. The host registers only under the user's own
+  profile, never system-wide:
   for Firefox (`HKCU\Software\Mozilla\NativeMessagingHosts`, `~/.mozilla/native-messaging-hosts`,
   `~/Library/Application Support/Mozilla/NativeMessagingHosts`) and for Chrome
   (`HKCU\Software\Google\Chrome\NativeMessagingHosts`, `~/.config/google-chrome/NativeMessagingHosts`,
@@ -330,10 +358,26 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   the viewer through `friendly_model_error()`.
 - yt-dlp needs a JavaScript runtime (Deno preferred, Node 20+ works) for YouTube. The Docker image
   ships Deno; the native setup relies on what is installed.
+- `http.server` sets `SO_REUSEADDR`, and on Windows that option does not mean what it means on
+  POSIX: a socket that sets it may bind an address and port that another socket with the option
+  already listens on, and both then listen, each getting some of the connections (on POSIX only
+  `SO_REUSEPORT` allows that), so another listener on 127.0.0.1:8790 could sit beside the
+  native server unnoticed. WSL's relay for the old 0.2.1 Docker container held that address in
+  November 2026, and the popup said "Server online" (0.2.1's model and device) with no server
+  window open and no Start button, until a browser restart seemed the only way out; with the
+  native server off nothing shares anything, and only the native host's `other` (above) tells
+  that server apart. `OwnPortHTTPServer` leaves the option off on Windows,
+  as `socket.create_server()` does: Windows binds over the old server's connections in TIME_WAIT
+  without it (run.cmd's restart 5 s after a crash), and without it a socket that did not set
+  `SO_EXCLUSIVEADDRUSE` is still not joined by one that sets `SO_REUSEADDR` (WSAEACCES), so the
+  server that comes second fails with "address in use" and says so (`main()`: "Cannot listen on
+  ..."). `test_own_port.py` holds all three on Windows. The popup names a server it finds there
+  that is not this computer's own "Other server" (the native host's `other`, above).
 - YouTube answers some addresses (the owner's, since September 2026) with "Sign in to confirm
   you're not a bot" for every video until the download carries a signed-in browser's cookies.
-  The popup's Start button passes no options, so the browser is `config.json`'s
-  `cookies_from_browser` (setup, `--save-cookies-from-browser`), the default of every start.
+  The popup's Start button passes no cookie option (no Start server option names one), so the
+  browser is `config.json`'s `cookies_from_browser` (setup, `--save-cookies-from-browser`), the
+  default of every start.
   Firefox is the one to offer on Windows: Chrome and Edge encrypt their cookies there so that
   yt-dlp decrypts none. The Docker image never takes the configured browser (`in_container()`,
   which is `SHISUKO_CONTAINER` only); toolbox and distrobox do, since they share the home folder

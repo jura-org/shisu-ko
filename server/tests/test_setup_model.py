@@ -309,7 +309,7 @@ def run_main_quietly(monkeypatch, *argv):
     monkeypatch.setattr(sys, "argv", ["server.py", *argv])
     monkeypatch.setattr(server, "hold_instance_lock", lambda port: pytest.fail("the instance lock was taken"))
     monkeypatch.setattr(server, "load_model", lambda *a, **k: pytest.fail("a model was loaded"))
-    monkeypatch.setattr(server, "ThreadingHTTPServer", lambda *a, **k: pytest.fail("the server listened"))
+    monkeypatch.setattr(server, "OwnPortHTTPServer", lambda *a, **k: pytest.fail("the server listened"))
     try:
         server.main()
     except SystemExit as stop:
@@ -592,7 +592,7 @@ def test_download_mode_runs_before_the_lock_and_never_loads(monkeypatch, tmp_pat
     # run_main() fails the test from hold_instance_lock() and load_model(); the server must also
     # not listen: ThreadingHTTPServer is replaced by something that fails too.
     fake_hub(monkeypatch, tmp_path)
-    monkeypatch.setattr(server, "ThreadingHTTPServer", lambda *a, **k: pytest.fail("the server listened"))
+    monkeypatch.setattr(server, "OwnPortHTTPServer", lambda *a, **k: pytest.fail("the server listened"))
     assert run_main(monkeypatch, "--download-model", "small") == 0
 
 

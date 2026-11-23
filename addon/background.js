@@ -8,7 +8,9 @@
  *     to the note Yomitan made, and takes the viewer's own mine through /sync. With no Anki to
  *     write to, the viewer's mine saves the line's audio and a frame to Downloads (saveMine).
  *  4. Start the server for the popup: an extension cannot spawn a process, so the request goes
- *     to the "shisuko" native host (server/native_host.py), which runs the project's launcher.
+ *     to the "shisuko" native host (server/native_host.py), which runs the project's launcher
+ *     with the viewer's Start server options (start-options.js). The same host tells the popup
+ *     whether a server that run.cmd / run.sh did not start is this computer's own (launcherStatus).
  *  5. Updates: read the newest release from the server's /health (the server asks GitHub once a
  *     day; the extension makes no request beyond the viewer's machine), tell the viewer (toolbar
  *     badge, one system notification, the popup's banner) and, on request, ask the server to
@@ -45,6 +47,13 @@ const START_KEY = "startServer";
 const LAUNCHER_HINT = "Run server\\setup.cmd (Windows) or bash server/setup.sh once, or start the server by hand once: run.cmd / run.sh register the launcher";
 const NATIVE_PERMISSION_HINT = "Allow Shisu-ko to talk to its launcher when the browser asks";
 const UPDATE_RUNNING_HINT = "The launcher restarts the server itself once update.py is done";
+const START_OPTIONS_HINT = "Fix them under Start server options, or empty the field";
+// A launcher from before the options refuses a message carrying them; the button's own start
+// with the field empty runs run.cmd / run.sh, whose update brings the newer launcher.
+const OLD_LAUNCHER_HINT = "Start it once with the Start server options field empty: that start updates the launcher, and the options work from the next one";
+// The launcher saw /health answer while nobody held this computer's instance lock: the server on
+// 127.0.0.1:8790 is someone else's, and the launcher's own would only find the port taken.
+const OTHER_SERVER_HINT = "Stop that server first (an old copy, or the Docker container: docker/down.cmd), then start this one";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -210,13 +219,15 @@ async function apiRequest(path, body) {
     } catch (err) {
       return { ok: false, error: "Server returned a non-JSON response" };
     }
+    // Any answer of the server's, a tab's /sync as much as the popup's /health: the server the
+    // launch waited for is up. Left to the popup's poll alone, a server that came up while the
+    // popup was closed and stopped again kept a reopened popup on "Starting server" for the rest
+    // of the window.
+    forgetStart();
     if (!res.ok) {
       return { ok: false, error: (data && data.error) || `HTTP ${res.status}`, data };
     }
-    if (path === "/health") {
-      forgetStart(); // the popup's poll: the server the launch waited for is up
-      await noteHealth(data);
-    }
+    if (path === "/health") await noteHealth(data);
     return { ok: true, data };
   } catch (err) {
     const timedOut = err && err.name === "AbortError";
@@ -285,6 +296,30 @@ function forgetStart() {
   if (lastStart) rememberStart(null);
 }
 
+// One message to the native host, raced against NATIVE_TIMEOUT_MS: {answer}, the host's answer
+// object, or {failed}, a refusal for the popup ({ok: false, error, hint}) when there is no
+// permission, no host, no answer or no object. Never rejects.
+async function askLauncher(message) {
+  // Looked up at call time, not at load: Firefox adds the method once the permission is granted.
+  const send = browser.runtime.sendNativeMessage;
+  if (typeof send !== "function") return { failed: { ok: false, error: "permission missing", hint: NATIVE_PERMISSION_HINT } };
+  const timedOut = Symbol("timeout");
+  let timer = null;
+  const noAnswer = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(timedOut), NATIVE_TIMEOUT_MS);
+  });
+  try {
+    const answer = await Promise.race([send.call(browser.runtime, NATIVE_HOST, message), noAnswer]);
+    if (answer === timedOut) return { failed: { ok: false, error: "the launcher did not answer" } };
+    if (!answer || typeof answer !== "object") return { failed: { ok: false, error: "the launcher gave no answer" } };
+    return { answer };
+  } catch (err) {
+    return { failed: nativeError(err) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Ask the native host to start the server, once: a request while a launch is under way is answered
 // from that launch, without asking again, and requests that overlap share one answer. Resolves
 // {ok: true, started|already, loading, log, deadline} or {ok: false, error, hint}; it never rejects,
@@ -307,38 +342,47 @@ async function requestStart() {
   // second time, two update.py runs on one folder. The popup hides the button for this; a popup
   // that has not heard of the record yet is refused here.
   if (await pendingUpdate()) return { ok: false, error: "an update is under way", hint: UPDATE_RUNNING_HINT };
-  // Looked up at call time, not at load: Firefox adds the method once the permission is granted.
-  const send = browser.runtime.sendNativeMessage;
-  if (typeof send !== "function") return { ok: false, error: "permission missing", hint: NATIVE_PERMISSION_HINT };
-  const timedOut = Symbol("timeout");
-  let timer = null;
-  const noAnswer = new Promise((resolve) => {
-    timer = setTimeout(() => resolve(timedOut), NATIVE_TIMEOUT_MS);
-  });
-  try {
-    const answer = await Promise.race([send.call(browser.runtime, NATIVE_HOST, { cmd: "start" }), noAnswer]);
-    if (answer === timedOut) return { ok: false, error: "the launcher did not answer" };
-    if (!answer || typeof answer !== "object") return { ok: false, error: "the launcher gave no answer" };
-    if (!answer.ok) return { ok: false, error: String(answer.error || "the launcher refused") };
-    const result = {
-      ok: true,
-      started: !!answer.started,
-      already: !!answer.already,
-      // The host's `starting`: a server launched (by an earlier click, or by hand) that holds its
-      // instance lock but does not listen yet, its model still loading or downloading. Not an
-      // `already` the popup may blame on the server URL, and not `starting`, which is the popup's
-      // word for a launch under way (startStatus below).
-      loading: !!answer.starting,
-      log: typeof answer.log === "string" && answer.log ? answer.log : null,
-      deadline: Date.now() + START_WINDOW_MS,
-    };
-    await rememberStart(result);
-    return result;
-  } catch (err) {
-    return nativeError(err);
-  } finally {
-    clearTimeout(timer);
+  // The viewer's Start server options (start-options.js), refused here in the popup's words when
+  // one is not on the list; the host checks them again. None sends the bare request every
+  // launcher understands, the ones from before the options included.
+  const parsed = parseStartOptions((await getSettings()).startOptions);
+  if (!parsed.ok) return { ok: false, error: `Start server options: ${parsed.error}`, hint: START_OPTIONS_HINT };
+  const message = parsed.options.length ? { cmd: "start", options: parsed.options } : { cmd: "start" };
+  const { answer, failed } = await askLauncher(message);
+  if (failed) return failed;
+  if (!answer.ok) {
+    if (answer.other) return { ok: false, error: String(answer.error || "another server answers"), hint: OTHER_SERVER_HINT };
+    if (message.options && answer.error === "unknown command") {
+      return { ok: false, error: "the launcher is older than the Start server options", hint: OLD_LAUNCHER_HINT };
+    }
+    return { ok: false, error: String(answer.error || "the launcher refused") };
   }
+  const result = {
+    ok: true,
+    started: !!answer.started,
+    already: !!answer.already,
+    // The host's `starting`: a server launched (by an earlier click, or by hand) that holds its
+    // instance lock but does not listen yet, its model still loading or downloading. Not an
+    // `already` the popup may blame on the server URL, and not `starting`, which is the popup's
+    // word for a launch under way (startStatus below).
+    loading: !!answer.starting,
+    log: typeof answer.log === "string" && answer.log ? answer.log : null,
+    deadline: Date.now() + START_WINDOW_MS,
+  };
+  await rememberStart(result);
+  return result;
+}
+
+// The popup's question about a server that run.cmd / run.sh did not start (/health's `launcher`
+// not true): is it this computer's own, or someone else's on its address (an old copy without the
+// instance lock, the Docker container through WSL)? The host's `other` says so: /health answers
+// while nobody holds this computer's lock. Never a prompt: without the Start button's permission
+// there is no sendNativeMessage, and the answer is {ok: false}.
+async function launcherStatus() {
+  const { answer, failed } = await askLauncher({ cmd: "status" });
+  if (failed) return failed;
+  if (!answer.ok) return { ok: false, error: String(answer.error || "the launcher refused") };
+  return { ok: true, running: !!answer.running, starting: !!answer.starting, other: !!answer.other };
 }
 
 // The popup's question on opening: is a start under way? With the launch's details, a reopened
@@ -1032,6 +1076,8 @@ browser.runtime.onMessage.addListener((msg, sender) => {
       return startServer();
     case "startServerStatus":
       return startStatus();
+    case "launcherStatus":
+      return launcherStatus();
     case "updateStatus":
       return updateStatus(msg);
     case "updateServer":

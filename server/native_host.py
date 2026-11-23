@@ -4,21 +4,31 @@
 A WebExtension cannot start a program. Firefox and Chrome can hand a message to a
 native-messaging host registered on the machine, so the extension sends {"cmd": "start"} to the
 host named "shisuko" and this file starts the launcher next to it, server/run.cmd or
-server/run.sh. The message never carries a path, a program or arguments: the only thing the host
-can run is that launcher, and the only other thing it answers is whether the server is up.
+server/run.sh. The message never carries a path or a program: the only thing the host can run is
+that launcher, and the only other thing it answers is whether the server is up. The one thing a
+message may add is "options", server options from a fixed list (START_OPTIONS), each followed by
+a value its own rule allows (a number in a range, or one word of a set), never free text; they go
+on the launcher's command line, which hands them to server.py.
 
 Protocol (the browsers' own: 4-byte little-endian length, then UTF-8 JSON, one request per
 message, answered in order until stdin closes):
-  {"cmd": "status"} -> {"ok": true, "running": bool, "version": "...", "root": "..."}
-  {"cmd": "start"}  -> {"ok": true, "already": true}
+  {"cmd": "status"} -> {"ok": true, "running": bool, "starting": bool, "other": bool,
+                        "version": "...", "root": "..."}
+  {"cmd": "start"} or {"cmd": "start", "options": ["--lyrics", "off", ...]}
+                    -> {"ok": true, "already": true}
                     |  {"ok": true, "already": true, "starting": true}   (launched, still loading)
                     |  {"ok": true, "started": true, "log": path or null}
+                    |  {"ok": false, "other": true, "error": "..."}      (someone else's server answers)
                     |  {"ok": false, "error": "..."}
   anything else     -> {"ok": false, "error": "unknown command"}
 
 "Running" is a /health answer. A server that is loading its model does not answer yet, so
 server.py holds a lock file in the data directory from before the load until it exits, and a
-second "start" in that time is told "already" instead of launching a second server.
+second "start" in that time is told "already" instead of launching a second server. The same
+lock tells this computer's own server from another one: a /health answer while nobody holds the
+lock comes from a server that is not this data folder's (an old copy without the lock, the Docker
+container through WSL, a server started with another SHISUKO_HOME), and "other" says so. Starting
+the launcher then would only meet the port taken, so "start" says why instead.
 
 The browser passes arguments of its own when it starts the host (Firefox: the manifest path
 and the extension id; Chrome: the extension's origin); they are ignored. Registration
@@ -167,7 +177,7 @@ def try_lock(path: Path):
 
     The open file keeps the lock; closing it, or the process ending however it ends, releases it.
     An errno outside LOCK_HELD_ERRNOS (the file cannot be locked at all) raises, like a file
-    that cannot be opened, and server_starting() then answers False as it does for that.
+    that cannot be opened, and lock_state() then answers UNKNOWN as it does for that.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(path, "a+b")
@@ -185,28 +195,117 @@ def try_lock(path: Path):
     return handle
 
 
-def server_starting(environ=os.environ) -> bool:
-    """True while a server holds the instance lock but /health is still silent: it is loading.
+HELD, FREE, UNKNOWN = "held", "free", "unknown"
 
-    server.py takes the lock before start_app() and keeps it until it exits, so between a launch
-    and the first /health answer (seconds; 10-40 s on a GPU where the model loads at the start,
-    with --model-idle-minutes 0 or the AMD engine, minutes for a first download) this tells a
-    starting server from none. A lock that cannot be tried (an unwritable data
-    directory, a filesystem without locks) counts as not starting, which is what the answer
-    used to be.
+
+def lock_state(environ=os.environ) -> str:
+    """Whether a server of this data folder holds the instance lock: HELD, FREE or UNKNOWN.
+
+    server.py takes the lock before start_app() and keeps it until it exits. With /health still
+    silent, HELD is a server that is starting (seconds; 10-40 s on a GPU where the model loads at
+    the start, with --model-idle-minutes 0 or the AMD engine, minutes for a first download); with
+    /health answering, FREE is a server that is not this data folder's. A lock that cannot be
+    tried (an unwritable data directory, a filesystem without locks) is UNKNOWN, which claims
+    neither: no server starting, and an answering server taken for this computer's own, which is
+    what the answers were before the lock told them apart.
     """
     try:
         handle = try_lock(data_dir(environ=environ) / LOCK_NAME)
     except OSError:
-        return False
+        return UNKNOWN
     if handle is None:
-        return True
+        return HELD
     handle.close()
-    return False
+    return FREE
 
 
-def launch(root: Path = ROOT, environ=os.environ) -> dict:
-    """Start the checkout's own launcher, detached so it outlives this host. Raises on failure."""
+# --- start options -----------------------------------------------------------------------------
+
+# The server options the Start button may pass: option -> what follows it. None: nothing. A list:
+# one of those words, spelled exactly so. A dict: a number from "min" to "max" ("int": a whole
+# one), written as digits with at most one decimal point. addon/start-options.js holds the same
+# table for the popup's hint and the background's check (SHISUKO_START_OPTIONS); this copy decides,
+# and test_native_host.py keeps the two equal. Left out on purpose: --host and --port (the button's
+# server is the one on 127.0.0.1:8790, which the popup and lock_state() look at), --model (the
+# popup's model field picks the model; only the operator's --model may name a folder), and
+# whatever takes an address, a path, a program, a browser's cookies, code from the network or
+# free text (--anki-url, --cookies, --cookies-from-browser, --save-cookies-from-browser,
+# --js-runtime, --allow-remote-ejs, --initial-prompt, --language), and the ones that exit instead
+# of serving (--check, --default-model, --download-model, --setup-cookies, --probe-gpu).
+START_OPTIONS: dict[str, Any] = {
+    "--device": ["auto", "cuda", "mlx", "cpu"],
+    "--compute-type": ["auto", "float16", "float32", "bfloat16", "int8", "int8_float16",
+                       "int8_float32", "int8_bfloat16", "int16"],
+    "--beam-size": {"min": 1, "max": 16, "int": True},
+    "--language-patience": {"min": 0, "max": 3600},
+    "--lyrics": ["auto", "off"],
+    "--human-subtitles": ["auto", "off"],
+    "--sentence-ends": ["auto", "off"],
+    "--anki-sync": ["auto", "off"],
+    "--mine": ["auto", "off"],
+    "--mine-picture": ["on", "off"],
+    "--window": {"min": 1, "max": 600},
+    "--first-window": {"min": 1, "max": 600},
+    "--lookahead": {"min": 0, "max": 86400},
+    "--max-cue-chars": {"min": 1, "max": 200, "int": True},
+    "--max-cue-seconds": {"min": 0, "max": 60},
+    "--min-cue-seconds": {"min": 0, "max": 60},
+    "--idle-minutes": {"min": 0, "max": 10080, "int": True},
+    "--model-idle-minutes": {"min": 0, "max": 10080},
+    "--retry-after": {"min": 0, "max": 3600},
+    "--client-timeout": {"min": 0, "max": 86400},
+    "--cpu-threads": {"min": 0, "max": 256, "int": True},
+    "--update-check": ["on", "off"],
+    "--log-level": ["DEBUG", "INFO", "WARNING", "ERROR"],
+    "--no-update": None,
+}
+MAX_OPTION_TOKENS = 64  # a few dozen options at most; a longer list is not one a viewer typed
+NUMBER_RE = re.compile(r"[0-9]{1,6}(\.[0-9]{1,3})?")  # ASCII digits only: \d takes any script's
+WHOLE_RE = re.compile(r"[0-9]{1,6}")
+
+
+def check_options(options: Any) -> list[str]:
+    """The Start button's options, checked token by token; raises ValueError naming the first wrong one.
+
+    What comes back is exactly what came in: option names and values from START_OPTIONS' rules,
+    none holding a space or anything cmd.exe or a shell reads (a value is digits and a point, or a
+    word of a fixed set), so they can go on the launcher's command line as they are.
+    """
+    if not isinstance(options, list) or len(options) > MAX_OPTION_TOKENS:
+        raise ValueError("the options are not a list of a few words")
+    tokens = list(options)
+    i = 0
+    while i < len(tokens):
+        name = tokens[i]
+        if not isinstance(name, str) or name not in START_OPTIONS:
+            shown = name[:40] if isinstance(name, str) else type(name).__name__
+            raise ValueError(f"{shown} is not an option the Start button passes")
+        rule = START_OPTIONS[name]
+        i += 1
+        if rule is None:
+            continue
+        value = tokens[i] if i < len(tokens) else None
+        if not isinstance(value, str):
+            raise ValueError(f"{name} needs a value")
+        if isinstance(rule, list):
+            if value not in rule:
+                raise ValueError(f"{name} takes {' or '.join(rule)}")
+        else:
+            pattern = WHOLE_RE if rule.get("int") else NUMBER_RE
+            if not pattern.fullmatch(value) or not rule["min"] <= float(value) <= rule["max"]:
+                kind = "a whole number" if rule.get("int") else "a number"
+                raise ValueError(f"{name} takes {kind} from {rule['min']} to {rule['max']}")
+        i += 1
+    return tokens
+
+
+def launch(root: Path = ROOT, environ=os.environ, options: tuple[str, ...] = ()) -> dict:
+    """Start the checkout's own launcher, detached so it outlives this host. Raises on failure.
+
+    `options` are check_options()'s: the launcher hands them to update.py and server.py (%* in
+    run.cmd, "$@" in run.sh), and each of them is a name or a value no command line reads into.
+    """
+    options = tuple(options)
     server_dir = root / "server"
     if WINDOWS:
         run_cmd = server_dir / "run.cmd"
@@ -218,7 +317,7 @@ def launch(root: Path = ROOT, environ=os.environ) -> dict:
         # would then report success with nothing started. Firefox keeps its native hosts in a
         # job object; a child that stays in the job dies with the host, so break away when the
         # job allows it (it does), and fall back to a plain detached start otherwise.
-        argv = ["cmd.exe", "/c", "start", "Shisu-ko server", ".\\run.cmd"]
+        argv = ["cmd.exe", "/c", "start", "Shisu-ko server", ".\\run.cmd", *options]
         flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
         streams = dict(cwd=str(server_dir), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
@@ -237,33 +336,48 @@ def launch(root: Path = ROOT, environ=os.environ) -> dict:
     # it needs bash anyway.
     # A new session: Firefox ends the host after the answer, and the server must not go with it.
     with open(log_path, "ab") as log:
-        subprocess.Popen(["bash", str(run_sh)], cwd=str(server_dir), start_new_session=True,
+        subprocess.Popen(["bash", str(run_sh), *options], cwd=str(server_dir), start_new_session=True,
                          stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, close_fds=True)
     return {"ok": True, "started": True, "log": str(log_path)}
 
 
+OTHER_SERVER_ERROR = f"another server answers on 127.0.0.1:{PORT}, not this computer's own"
+UNKNOWN_COMMAND = {"ok": False, "error": "unknown command"}
+
+
 def handle(request: Any, running: Callable[[], bool] = server_running,
-           launch: Callable[[Path], dict] = launch, root: Path = ROOT,
-           starting: Callable[[], bool] = server_starting) -> dict:
-    """Answer one request. Only a bare {"cmd": ...} object is a request; nothing else is read."""
-    if not isinstance(request, dict) or set(request) != {"cmd"} or not isinstance(request["cmd"], str):
-        return {"ok": False, "error": "unknown command"}
-    cmd = request["cmd"]
-    if cmd == "status":
-        return {"ok": True, "running": bool(running()), "version": VERSION, "root": str(root)}
-    if cmd == "start":
+           launch: Callable[..., dict] = launch, root: Path = ROOT,
+           lock: Callable[[], str] = lock_state) -> dict:
+    """Answer one request: {"cmd": "status"}, or {"cmd": "start"} with "options" or without; nothing else is read."""
+    if not isinstance(request, dict) or not isinstance(request.get("cmd"), str):
+        return dict(UNKNOWN_COMMAND)
+    cmd, keys = request["cmd"], set(request)
+    if cmd == "status" and keys == {"cmd"}:
+        up = bool(running())
+        state = lock()
+        return {"ok": True, "running": up, "starting": not up and state == HELD, "other": up and state == FREE,
+                "version": VERSION, "root": str(root)}
+    if cmd == "start" and keys <= {"cmd", "options"}:
+        try:
+            options = check_options(request.get("options", []))
+        except ValueError as exc:
+            return {"ok": False, "error": one_line(exc)}
         if running():
+            if lock() == FREE:
+                # Not this data folder's server (an old copy, the Docker container through WSL):
+                # the launcher's server would find the port taken and stop, so say so instead.
+                return {"ok": False, "other": True, "error": OTHER_SERVER_ERROR}
             return {"ok": True, "already": True}
-        if starting():
+        if lock() == HELD:
             # Launched but not listening yet: a second launcher would load the model a second
             # time and then fail on the port. Already running, as far as the popup is concerned,
             # so it keeps waiting for /health instead of offering the button again.
             return {"ok": True, "already": True, "starting": True}
         try:
-            return launch(root)
+            return launch(root, options=tuple(options))
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": one_line(exc)}
-    return {"ok": False, "error": "unknown command"}
+    return dict(UNKNOWN_COMMAND)
 
 
 def serve(stdin, stdout) -> int:
@@ -280,7 +394,7 @@ def serve(stdin, stdout) -> int:
         if request is EOF:
             return 0
         # Looked up here, not in handle()'s defaults, so a test can stand in for all three.
-        write_message(stdout, handle(request, running=server_running, launch=launch, starting=server_starting))
+        write_message(stdout, handle(request, running=server_running, launch=launch, lock=lock_state))
 
 
 # --- registration ------------------------------------------------------------------------------
