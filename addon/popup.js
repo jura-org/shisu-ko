@@ -348,6 +348,59 @@ function renderModelField() {
   renderModelHint();
 }
 
+// ------------------------------------------------------------------ start server options
+
+// What the Start server button will pass, said under its field while it is typed: the words the
+// launcher is sent, or the first one it would refuse (parseStartOptions() in start-options.js;
+// server/native_host.py checks them again before run.cmd / run.sh sees one).
+const START_OPTIONS_NONE = "None: the Start server button starts the server with its defaults";
+const START_OPTIONS_FIX = "Fix them under Start server options, or empty the field";
+
+function renderStartOptionsHint() {
+  const hint = document.getElementById("start-options-hint");
+  const parsed = parseStartOptions(document.getElementById("startOptions").value);
+  if (!parsed.ok) setHint(hint, parsed.error, "error");
+  else if (parsed.options.length === 0) setHint(hint, START_OPTIONS_NONE, "");
+  else setHint(hint, `The Start server button passes ${parsed.options.join(" ")} to the next server it starts; one already running keeps its own`, "");
+}
+
+// ------------------------------------------------------------------ someone else's server
+
+// A server that run.cmd / run.sh did not start (/health's `launcher` not true) on the launcher's
+// own address may not be this computer's at all: an old copy, or the Docker container through
+// WSL, whose relay once held 127.0.0.1:8790 with the viewer's server off, so the popup said
+// "Server online", hid the Start button and left a browser restart as the only way out. The
+// launcher tells this computer's own server from another by its instance lock (native_host.py,
+// `other`). It is asked once per server seen, only where the button is, and only once its
+// permission is granted: the background has no sendNativeMessage before that and never prompts.
+const LAUNCHER_ADDRESSES = new Set(["http://127.0.0.1:8790", "http://localhost:8790"]);
+let otherServer = { key: null, other: false }; // the server asked about, and the launcher's verdict
+
+function onLauncherAddress() {
+  const url = String(document.getElementById("serverUrl").value || SHISUKO_DEFAULT_SETTINGS.serverUrl);
+  return LAUNCHER_ADDRESSES.has(url.trim().replace(/\/+$/, "").toLowerCase());
+}
+
+async function checkOtherServer() {
+  if (!health || health.launcher === true || !START_AVAILABLE || !onLauncherAddress()) {
+    otherServer = { key: null, other: false };
+    return;
+  }
+  const key = JSON.stringify([health.version, health.launcher, health.model, health.device]);
+  if (otherServer.key === key) return;
+  const asked = { key, other: false };
+  otherServer = asked;
+  const res = await browser.runtime.sendMessage({ type: "launcherStatus" }).catch(() => null);
+  if (otherServer !== asked) return; // another server, or none, since the question
+  asked.other = !!(res && typeof res === "object" && res.ok === true && res.other === true);
+  if (asked.other) renderStatus();
+}
+
+function otherServerText(h) {
+  const who = typeof h.version === "string" && h.version ? `Shisu-ko ${h.version}` : "A server";
+  return `${who} answers here, not this computer's own: an old copy or the Docker container. Stop it, then start yours`;
+}
+
 // ------------------------------------------------------------------ word colours
 
 const DECK_NONE_HINT = "Automatic: no card mined yet — mine one, or choose a deck";
@@ -536,6 +589,7 @@ function onStorageChanged(changes, area) {
   }
   updateOutputs();
   renderModelHint();
+  if (landed.has("startOptions")) renderStartOptionsHint();
   // The word colours edited in the other copy of this form: the deck list and the hint follow the
   // rules of an edit made here (see onChange), less the save, which is that copy's. A feature
   // that landed checked was turned on; one that landed unchecked asks nothing, whether or not the
@@ -569,6 +623,11 @@ function renderStatus() {
     word = "Updating server";
     cls = "badge";
     evidence = `Restarting with ${updateFlow.to || "the newest release"}…`;
+  } else if (health && otherServer.other) {
+    // Online, but not the viewer's: the launcher found nobody holding this computer's lock.
+    word = "Other server";
+    cls = "badge bad";
+    evidence = otherServerText(health);
   } else if (health && health.model_loading) {
     word = "Loading model";
     cls = "badge";
@@ -647,6 +706,10 @@ async function checkServer(first) {
     failStart(startFlow.already && !startFlow.loading ? START_ELSEWHERE_HINT : startNotUpHint(startFlow.log));
   }
   if (updateFlow.state === "updating") judgeUpdate();
+  // Whose server this is, asked of the launcher once per server that run.cmd / run.sh did not
+  // start. Before the paint: a server other than the one judged drops the old verdict at once
+  // (the call is synchronous up to its question), and the answer paints again for someone else's.
+  checkOtherServer();
   renderStatus();
   // The banner follows behind. Most ticks ask nothing (the server's answer is the same), and
   // paint nothing more.
@@ -699,7 +762,16 @@ function requestNativeMessaging() {
 // host; the popup only watches /health from there on.
 async function startServerFromPopup() {
   if (START_BUSY.has(startFlow.state) || UPDATE_BUSY.has(updateFlow.state)) return;
+  // Options the launcher would refuse are refused here, before the browser asks for anything.
+  const parsed = parseStartOptions(document.getElementById("startOptions").value);
+  if (!parsed.ok) {
+    failStart(`Start server options: ${parsed.error}. ${START_OPTIONS_FIX}`);
+    return;
+  }
   const request = requestNativeMessaging();
+  // The background reads the options from the settings, and an edit of them is saved on a timer:
+  // the change event this very click fired (the field gave the focus to the button) goes now.
+  const saved = flushSave();
   startFlow.state = "requesting";
   renderStatus();
   const granted = await request;
@@ -707,6 +779,7 @@ async function startServerFromPopup() {
     failStart(START_PERMISSION_HINT);
     return;
   }
+  await saved;
   startFlow.state = "starting";
   renderStatus();
   const res = await browser.runtime.sendMessage({ type: "startServer" }).catch((err) => ({ ok: false, error: String((err && err.message) || err) }));
@@ -1001,6 +1074,11 @@ async function init() {
   }
   // The name hint answers while typing, before the change event saves anything.
   document.getElementById("model").addEventListener("input", renderModelHint);
+  // So does the Start server options' hint. The section is there only where the button is.
+  document.getElementById("startOptions").addEventListener("input", renderStartOptionsHint);
+  document.getElementById("start-options-section").classList.toggle("hidden", !START_AVAILABLE);
+  setText(document.getElementById("start-options-list"), `Options: ${Object.keys(SHISUKO_START_OPTIONS).join(" ")}. docs/server.md says what each does.`);
+  renderStartOptionsHint();
   document.getElementById("start-server").addEventListener("click", startServerFromPopup);
   document.getElementById("update-now").addEventListener("click", updateServerFromPopup);
   document.getElementById("update-later").addEventListener("click", snoozeUpdateFromPopup);

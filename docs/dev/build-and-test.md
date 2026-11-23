@@ -10,7 +10,7 @@ and how the server tests keep away from the real data folder.
 it never maintains a second application copy. `npm run watch` rebuilds after edits; reload the
 unpacked extension in `chrome://extensions` and reload the YouTube tab. The build writes
 versioned Firefox and Chrome ZIPs and excludes `addon/tests`, dotfiles, and development metadata.
-Chrome's `service-worker.js` loads `browser-api.js`, `settings.js` and
+Chrome's `service-worker.js` loads `browser-api.js`, `settings.js`, `start-options.js` and
 `background.js` in that order with classic `importScripts`, so settings globals retain the same
 behavior as Firefox; `addon/tests/settings.test.js` and `scripts/tests/build.test.mjs` hold that
 order. Chrome refuses an extension whose `commands` suggest more than four shortcuts, so
@@ -241,9 +241,17 @@ The beam search Shisu-ko adds to mlx-whisper is covered on the same fakes: the d
 cache reordering that skips the cross-attention half, and the fall back to greedy decoding when the
 patch cannot be applied.
 `test_native_host.py` drives the native host behind the Start button: the message framing, the
-two commands and every malformed request, the launch on each platform with a recorded `Popen`,
+two commands and every malformed request, the lock's three states and the `other` answer for a
+server that is not this computer's own, the Start server options (every refusal before
+`/health` is asked, that `server.py` takes every option with each value its rule allows, that no
+allowed word holds anything a command line reads, and that `addon/start-options.js` holds the
+same table), the launch on each platform with a recorded `Popen`,
 the instance lock shared with `server.py`, registration for every browser into a temporary home
 with a fake registry, the host over a real pipe, and the wrapper and launcher scripts.
+`test_own_port.py` holds that the server binds without `SO_REUSEADDR` on Windows only, and on
+Windows itself that it refuses a port another listener holds, that nothing can join its own,
+and that a restart still binds over the old server's TIME_WAIT. `start-options.test.js` runs
+the extension's copy of the options' parser.
 `test_update_endpoint.py` drives `POST /update` over a real socket: the launcher variable and
 the two no-update switches, the 409s, the answer followed by the exit with code 4 through
 `main()`, the origin rule that admits the extension and no page, and the launchers' `:update`
@@ -255,8 +263,10 @@ name sent with every sync, the restart on a new session token, the model status 
 messages and the font stack; `popup-copies.test.js` keeps the popup's copies of the font and
 model-name rules equal to those in `content.js` and `server.py`. `background.test.js` covers
 the `startServer` message: the native host's answers, the timeout, the mapping of the browser's
-errors to hints, and the launch record that outlives the event page; `popup.test.js` runs the
-popup's start flow against a fake document, from the button to the 90 s deadline and its hints.
+errors to hints, the options it sends or refuses, the `launcherStatus` question, and the launch
+record that outlives the event page and ends with any answer of the server's; `popup.test.js`
+runs the popup's start flow against a fake document, from the button to the 90 s deadline and
+its hints, the Start server options' hint and click, and the "Other server" line.
 The update check is covered on both sides too: `server/tests/test_update_check.py` holds the
 server's request (two headers, no token or cookie), the day's cache, the backoff, the off switch
 and `/health`'s `latest`; `background.test.js` feeds `/health` answers carrying `latest` to the

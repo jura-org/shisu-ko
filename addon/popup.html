@@ -277,6 +277,23 @@
       </div>
     </details>
 
+    <!-- Server options the Start server button passes to run.cmd / run.sh (the startOptions
+         setting). The list is fixed: SHISUKO_START_OPTIONS in start-options.js, START_OPTIONS in
+         server/native_host.py, which checks every option again. popup.js says under the field
+         what the button will pass, or what it refuses, and shows the section only where the
+         button is (START_AVAILABLE). -->
+    <details id="start-options-section">
+      <summary>Start server options</summary>
+      <div class="drawer">
+        <label class="row field">
+          <span class="lead">Options <span class="soft">for the Start server button</span></span>
+          <input type="text" id="startOptions" spellcheck="false" placeholder="e.g. --lyrics off --beam-size 1">
+        </label>
+        <p class="hint" id="start-options-hint"></p>
+        <p class="hint" id="start-options-list"></p>
+      </div>
+    </details>
+
     <details>
       <summary>Anki, clips and server</summary>
       <div class="drawer">
@@ -329,6 +346,7 @@
 
   <script src="browser-api.js"></script>
   <script src="settings.js"></script>
+  <script src="start-options.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

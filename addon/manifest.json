@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Shisu-ko",
-  "version": "0.28.0",
+  "version": "0.29.0",
   "description": "Live Japanese subtitles for YouTube from a local Whisper server, scannable with Yomitan, mined into Anki with screenshot and audio.",
   "homepage_url": "https://github.com/Multysquid/shisu-ko",
   "browser_specific_settings": {
@@ -35,6 +35,7 @@
     "scripts": [
       "browser-api.js",
       "settings.js",
+      "start-options.js",
       "background.js"
     ]
   },

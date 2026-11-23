@@ -68,13 +68,18 @@ permission, Firefox to "exchange messages with programs other than Firefox", Chr
 "communicate with cooperating native applications"; allow it, and the button launches
 `server\run.cmd` in a window of its own (Windows) or `server/run.sh` in the background with its
 output in `~/.shisu-ko/server.log` (Linux/macOS), then waits for the server to answer.
-The button passes no options: the server starts with its defaults (the model chosen at setup,
-else large-v3, or large-v3-turbo on an
+Out of the box the button passes no options: the server starts with its defaults (the model
+chosen at setup, else large-v3, or large-v3-turbo on an
 Apple GPU; the GPU when there is one; the YouTube cookies of the browser chosen at setup, if
 any, see [YouTube sign-in](server.md#youtube-sign-in)), exactly as a bare `run.cmd` / `run.sh` start
-would. The popup's model field switches the model from the first video on; anything else you
-usually append to `run.cmd` / `run.sh` (`--device cpu`, `--js-runtime`, ...) needs a start by
-hand, see [Server options](server.md#server-options). In Chrome the
+would. Options you want on every start go in the popup's **Start server options** field, for
+example `--device cpu` or `--lyrics off --beam-size 1`: the button passes them to `run.cmd` /
+`run.sh` the next time it starts the server (one already running keeps its own), and the line
+under the field says what it will pass. Only options from a fixed list are taken (see
+[Server options](server.md#server-options)); the line names any word it refuses, and so does the
+status line when you click. The popup's model field switches the model from the first video on;
+the few options the list leaves out (`--port`, `--js-runtime`, `--cookies`, ...) still need a
+start by hand. In Chrome the
 button is there for the [Chrome Web Store](https://chromewebstore.google.com/detail/shisu-ko/ecenifonpkaiccmmknpbllbebbfigjnm)
 install only (see [Install the extension](../README.md#2-install-the-extension)): the launcher's manifest
 has to name the extension's id, and an unpacked build (`dist/chrome`, the release zip) gets an

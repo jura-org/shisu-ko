@@ -370,6 +370,113 @@ test("a server that answers /health ends the launch, so the next request reaches
   assert.equal(host.calls.length, 2);
 });
 
+// A tab's /sync proves the server up as much as the popup's /health: a server that came up while
+// the popup was closed and stopped again must not keep a reopened popup on "Starting server".
+test("any answer of the server's ends the launch, a tab's /sync included", async () => {
+  const host = nativeHost({ ok: true, started: true });
+  const fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ status: "ready", cues: [] }) });
+  const { sandbox, dispatch, session } = loadBackground({ sendNativeMessage: host.sendNativeMessage, fetch });
+  await sandbox.startServer();
+  await dispatch({ type: "api", path: "/sync", body: { video_id: "abcdefghijk", t: 1 } }, 7);
+  assert.deepEqual(plain(await sandbox.startStatus()), { starting: false });
+  assert.equal((await session.get("startServer")).startServer, null);
+  // An error the server itself answered is its answer too; a port that answers no JSON is not.
+  await sandbox.startServer();
+  const refused = loadBackground({
+    sendNativeMessage: host.sendNativeMessage,
+    fetch: async () => ({ ok: false, status: 400, text: async () => JSON.stringify({ error: "bad video id" }) }),
+  });
+  await refused.sandbox.startServer();
+  await refused.sandbox.apiRequest("/sync", {});
+  assert.deepEqual(plain(await refused.sandbox.startStatus()), { starting: false });
+  const stranger = loadBackground({ sendNativeMessage: host.sendNativeMessage, fetch: async () => ({ ok: true, status: 200, text: async () => "<html>" }) });
+  await stranger.sandbox.startServer();
+  await stranger.sandbox.apiRequest("/health");
+  assert.equal((await stranger.sandbox.startStatus()).starting, true);
+});
+
+// ------------------------------------------------------------------ Start server options
+
+test("startServer sends the viewer's Start server options to the host, checked and spelled as the list does", async () => {
+  const host = nativeHost({ ok: true, started: true });
+  const storage = makeMemoryStorage({ settings: { startOptions: "  --lyrics OFF --beam-size=1\n--no-update --log-level debug " } });
+  const { sandbox } = loadBackground({ sendNativeMessage: host.sendNativeMessage, storage });
+  launched(await sandbox.startServer(), { ok: true, started: true, already: false, loading: false, log: null });
+  assert.deepEqual(plain(host.calls), [{ application: "shisuko", message: {
+    cmd: "start", options: ["--lyrics", "off", "--beam-size", "1", "--no-update", "--log-level", "DEBUG"] } }]);
+});
+
+test("startServer without options sends the bare request every launcher understands", async () => {
+  for (const startOptions of ["", "   ", undefined]) {
+    const host = nativeHost({ ok: true, started: true });
+    const storage = makeMemoryStorage({ settings: startOptions === undefined ? {} : { startOptions } });
+    const { sandbox } = loadBackground({ sendNativeMessage: host.sendNativeMessage, storage });
+    await sandbox.startServer();
+    assert.deepEqual(plain(host.calls[0].message), { cmd: "start" }, JSON.stringify(startOptions));
+  }
+});
+
+test("startServer refuses options off the list without asking the host", async () => {
+  for (const [startOptions, error] of [
+    ["--host 0.0.0.0", "--host is not an option the Start button passes"],
+    ["--model large-v3", "--model is not an option the Start button passes"],
+    ["--beam-size 0", "--beam-size takes a whole number from 1 to 16"],
+    ["--lyrics", "--lyrics needs a value"],
+    ["--no-update=yes", "--no-update takes no value"],
+  ]) {
+    const host = nativeHost({ ok: true, started: true });
+    const storage = makeMemoryStorage({ settings: { startOptions } });
+    const { sandbox, dispatch } = loadBackground({ sendNativeMessage: host.sendNativeMessage, storage });
+    const res = await sandbox.startServer();
+    assert.deepEqual(plain(res), { ok: false, error: `Start server options: ${error}`, hint: "Fix them under Start server options, or empty the field" });
+    assert.equal(host.calls.length, 0, startOptions);
+    assert.deepEqual(plain(await dispatch({ type: "startServerStatus" })), { starting: false });
+  }
+});
+
+test("a launcher from before the options is told apart from one that refused them", async () => {
+  const old = nativeHost({ ok: false, error: "unknown command" });
+  const storage = makeMemoryStorage({ settings: { startOptions: "--lyrics off" } });
+  const { sandbox } = loadBackground({ sendNativeMessage: old.sendNativeMessage, storage });
+  const res = await sandbox.startServer();
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "the launcher is older than the Start server options");
+  assert.match(res.hint, /field empty/);
+  // The host's own refusal of an option names it, and passes through.
+  const strict = nativeHost({ ok: false, error: "--lyrics takes auto or off" });
+  const other = loadBackground({ sendNativeMessage: strict.sendNativeMessage, storage: makeMemoryStorage({ settings: { startOptions: "--lyrics off" } }) });
+  assert.deepEqual(plain(await other.sandbox.startServer()), { ok: false, error: "--lyrics takes auto or off" });
+});
+
+// ------------------------------------------------------------------ someone else's server
+
+test("startServer names another server on the launcher's port and remembers no launch", async () => {
+  const host = nativeHost({ ok: false, other: true, error: "another server answers on 127.0.0.1:8790, not this computer's own" });
+  const { sandbox, dispatch } = loadBackground({ sendNativeMessage: host.sendNativeMessage });
+  const res = await sandbox.startServer();
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "another server answers on 127.0.0.1:8790, not this computer's own");
+  assert.match(res.hint, /Docker container/);
+  assert.deepEqual(plain(await dispatch({ type: "startServerStatus" })), { starting: false });
+});
+
+test("launcherStatus asks the host whose server answers, and never without the permission", async () => {
+  const host = nativeHost({ ok: true, running: true, starting: false, other: true, version: "0.29.0", root: "/x" });
+  const { dispatch } = loadBackground({ sendNativeMessage: host.sendNativeMessage });
+  assert.deepEqual(plain(await dispatch({ type: "launcherStatus" })), { ok: true, running: true, starting: false, other: true });
+  assert.deepEqual(plain(host.calls), [{ application: "shisuko", message: { cmd: "status" } }]);
+  // A launcher from before the lock check says nothing of `other`: this computer's own, as before.
+  const old = nativeHost({ ok: true, running: true, version: "0.28.0", root: "/x" });
+  assert.equal((await loadBackground({ sendNativeMessage: old.sendNativeMessage }).dispatch({ type: "launcherStatus" })).other, false);
+  // No permission: no sendNativeMessage, and so no prompt and no host.
+  const bare = await loadBackground().dispatch({ type: "launcherStatus" });
+  assert.equal(bare.ok, false);
+  assert.equal(bare.error, "permission missing");
+  // A host that fails answers no verdict.
+  const broken = nativeHost(new Error("No such native application shisuko"));
+  assert.equal((await loadBackground({ sendNativeMessage: broken.sendNativeMessage }).dispatch({ type: "launcherStatus" })).ok, false);
+});
+
 test("requests that overlap share the host's one answer", async () => {
   let answer = null;
   const host = nativeHost(() => new Promise((resolve) => { answer = resolve; }));

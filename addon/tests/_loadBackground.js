@@ -11,6 +11,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const SETTINGS_PATH = path.join(__dirname, "..", "settings.js");
+const START_OPTIONS_PATH = path.join(__dirname, "..", "start-options.js");
 const SOURCE_PATH = path.join(__dirname, "..", "background.js");
 
 function makeMemoryStorage(initial) {
@@ -158,6 +159,7 @@ function loadBackground(overrides = {}) {
   // settings.js defines SHISUKO_DEFAULT_SETTINGS in the shared global lexical scope, exactly as the
   // manifest loads it before background.js in Firefox.
   new vm.Script(fs.readFileSync(SETTINGS_PATH, "utf8"), { filename: SETTINGS_PATH }).runInContext(sandbox);
+  new vm.Script(fs.readFileSync(START_OPTIONS_PATH, "utf8"), { filename: START_OPTIONS_PATH }).runInContext(sandbox);
   new vm.Script(source, { filename: SOURCE_PATH }).runInContext(sandbox);
   // Top-level `const`/`let` (DEFAULT_SETTINGS, REQUEST_TIMEOUT_MS, START_WINDOW_MS) live in the global
   // *lexical* environment, not as globalThis properties, but that environment is shared across
