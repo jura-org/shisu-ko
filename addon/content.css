@@ -24,6 +24,12 @@
   display: none !important;
 }
 
+.shisuko-hide-drag-grip .shisuko-drag,
+.shisuko-hide-mining-buttons .shisuko-mine,
+.shisuko-hide-mining-buttons .shisuko-line-mine {
+  display: none;
+}
+
 /* Subtitle.
    The --shisuko-* custom properties are set on .shisuko-root by applySettings() in content.js;
    the fallbacks here are the defaults, so the overlay looks right before any of them is set. */

@@ -34,6 +34,8 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   subTextColor: "#ffffff",
   subBackgroundOpacity: 72, // % alpha of the black box behind the text
   subOutline: false, // draw a black outline instead of relying on the box
+  showSubtitleGrip: true,
+  showMiningButtons: true,
   transcriptSide: "right", // "right" | "left"
   // transcription
   // The Whisper model the server should use: a faster-whisper size (large-v3, large-v3-turbo,

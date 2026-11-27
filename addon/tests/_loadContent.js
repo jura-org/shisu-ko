@@ -24,7 +24,7 @@ const EXPORTS =
   " startTimeFromUrl, findPlayer, discover, mineCurrent," +
   " renderText, refreshWordMarks, pollWordIndex, wordColoursOn, syncTick, transcriptLine, mineCue," +
   " knownList, rebuildWordIndex, segmentAt, entryWordFor, knownTarget, markKnown," +
-  " dockLayout, dockTargets, nearestDock, placeSubtitle, isPageElement };\n";
+  " dockLayout, dockTargets, nearestDock, placeSubtitle, isPageElement, applyStyleSettings };\n";
 
 function instrument(source) {
   const open = source.indexOf(OPEN);
