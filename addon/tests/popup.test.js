@@ -1183,7 +1183,7 @@ test("Reset style takes an edit still on its way with it, and runs the check it 
   assert.equal(popup.el("subPosition").value, 11);
   assert.equal(popup.el("subPositionOut").textContent, "11%");
   assert.deepEqual(saves(), [
-    { subDock: "video-bottom", subPosition: 11, subFont: "default", subFontFamily: "", subTextColor: "#ffffff", subBackgroundOpacity: 72, subOutline: false, transcriptSide: "right", serverUrl: "http://127.0.0.1:8791" },
+    { subDock: "video-bottom", subPosition: 11, subFont: "default", subFontFamily: "", subTextColor: "#ffffff", subBackgroundOpacity: 72, subOutline: false, showSubtitleGrip: true, showMiningButtons: true, transcriptSide: "right", serverUrl: "http://127.0.0.1:8791" },
   ]);
   assert.equal(state.settings.serverUrl, "http://127.0.0.1:8791");
   assert.equal(state.settings.subFont, "default");

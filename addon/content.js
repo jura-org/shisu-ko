@@ -515,6 +515,8 @@
     style.setProperty("--shisuko-sub-bg", `rgba(0, 0, 0, ${alpha})`);
     style.setProperty("--shisuko-sub-bg-hover", `rgba(0, 0, 0, ${Math.min(1, alpha + HOVER_ALPHA_STEP)})`);
     style.setProperty("--shisuko-sub-shadow", s.subOutline ? OUTLINE_SHADOW : PLAIN_SHADOW);
+    root.classList.toggle("shisuko-hide-drag-grip", s.showSubtitleGrip === false);
+    root.classList.toggle("shisuko-hide-mining-buttons", s.showMiningButtons === false);
     root.classList.toggle("shisuko-transcript-left", oneOf(s.transcriptSide, TRANSCRIPT_SIDES, DEFAULT_SETTINGS.transcriptSide) === "left");
   }
 

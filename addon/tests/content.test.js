@@ -638,6 +638,18 @@ test("updateStatus keeps a failed session in front of a model load, even with pr
 
 const GOTHIC = '"Noto Sans JP", "Noto Sans CJK JP", "Yu Gothic UI", "Yu Gothic", "Meiryo", "Hiragino Sans", sans-serif';
 
+test("the grip and the mining buttons can be hidden independently", () => {
+  const { api: { applyStyleSettings } } = loadContent();
+  const hidden = new Map();
+  const root = { style: { setProperty() {} }, classList: { toggle: (k, v) => hidden.set(k, v) } };
+  applyStyleSettings(root, { showSubtitleGrip: false, showMiningButtons: true });
+  assert.equal(hidden.get("shisuko-hide-drag-grip"), true);
+  assert.equal(hidden.get("shisuko-hide-mining-buttons"), false);
+  applyStyleSettings(root, { showSubtitleGrip: true, showMiningButtons: false });
+  assert.equal(hidden.get("shisuko-hide-drag-grip"), false);
+  assert.equal(hidden.get("shisuko-hide-mining-buttons"), true);
+});
+
 test("fontStack puts an installed family in front of the preset's stack", () => {
   const { api } = loadContent();
   assert.equal(api.fontStack("default", "Yu Gothic UI"), `"Yu Gothic UI", ${GOTHIC}`);
