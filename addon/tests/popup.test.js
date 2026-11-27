@@ -30,10 +30,13 @@ function cssDeclarations(selector) {
 // off the markup, the members the form, the status line and the hints touch, and the listeners
 // init() registers, which a test fires with dispatch(). An id popup.js asks for that the markup
 // lacks gets a bare element, so no test trips over a missing member. A select's options are its
-// children: renderDeckOptions builds them with createElement and replaceChildren.
+// children: renderDeckOptions builds them with createElement and replaceChildren, and so does
+// renderStartOptionsList the (?) list's rows. getAttribute / setAttribute keep the markup's
+// attributes (aria-expanded among them) and what the popup sets.
 function fakeElement(tag = "div", attrs = {}) {
   const listeners = new Map();
   const styles = new Map();
+  const attributes = new Map(Object.entries(attrs));
   let text = "";
   const el = {
     tagName: tag.toUpperCase(),
@@ -84,13 +87,15 @@ function fakeElement(tag = "div", attrs = {}) {
   el.replaceChildren = (...children) => {
     el.options = children;
   };
+  el.getAttribute = (name) => (attributes.has(name) ? attributes.get(name) : null);
+  el.setAttribute = (name, value) => attributes.set(name, String(value));
   return el;
 }
 
 function elementsFromHtml() {
   const elements = new Map();
-  for (const [, tag, attrText] of HTML.matchAll(/<(input|select|textarea|button|output|p|span|div|datalist)\b([^>]*)>/g)) {
-    const attrs = Object.fromEntries([...attrText.matchAll(/(\w+)="([^"]*)"/g)].map((m) => [m[1], m[2]]));
+  for (const [, tag, attrText] of HTML.matchAll(/<(input|select|textarea|button|output|p|span|div|datalist|dl)\b([^>]*)>/g)) {
+    const attrs = Object.fromEntries([...attrText.matchAll(/([\w-]+)="([^"]*)"/g)].map((m) => [m[1], m[2]]));
     if (attrs.id) elements.set(attrs.id, fakeElement(tag, attrs));
   }
   return elements;
@@ -172,7 +177,8 @@ function loadPopup(answer, runtimeURL = "moz-extension://test/", opts = {}) {
       " START_AVAILABLE, ON_FIREFOX, CHROME_STORE_ID, START_PERMISSION_HINT," +
       " updateFlow, refreshUpdate, updateServerFromPopup, snoozeUpdateFromPopup, openReleasePage, relativeTime, renderStatus," +
       " UPDATE_LOST_HINT, stillOldHint, init, resetStyle, onChange, renderDeckOptions, refreshDecks, DECK_NONE_HINT, HEALTH_REFRESH_MS, DECKS_RETRY_MS," +
-      " renderStartOptionsHint, START_OPTIONS_NONE, otherServerText })"
+      " renderStartOptionsHint, START_OPTIONS_NONE, otherServerText, renderStartOptionsList, toggleStartOptionsList, startOptionValues," +
+      " SHISUKO_START_OPTIONS, SHISUKO_START_OPTION_HELP })"
   ).runInContext(sandbox);
   // What the background's storage.local write of the settings looks like from the popup.
   const fireStorage = (settings) => {
@@ -2146,6 +2152,88 @@ test("the Start server options are there only where the button is", async () => 
     assert.equal(popup.el("start-options-section").hidden, hidden, url);
     assert.equal(popup.el("startOptions").value, "--no-update");
     assert.match(popup.el("start-options-hint").textContent, /passes --no-update/);
-    assert.match(popup.el("start-options-list").textContent, /^Options: --device --compute-type .* --no-update\. docs\/server\.md says what each does\.$/);
+    // The (?) list is in the same section: built, and closed until the (?) is clicked.
+    assert.equal(popup.el("start-options-table").options.length, 2 * Object.keys(popup.SHISUKO_START_OPTIONS).length, url);
+    assert.equal(popup.el("start-options-list").hidden, true, url);
   }
+});
+
+// The rows of the (?) list as text: [option, what follows it or "", what it does] per option.
+function listRows(popup) {
+  const children = popup.el("start-options-table").options;
+  const rows = [];
+  for (let i = 0; i < children.length; i += 2) {
+    const [term, what] = [children[i], children[i + 1]];
+    assert.equal(term.tagName, "DT");
+    assert.equal(what.tagName, "DD");
+    const [code, values] = term.options;
+    assert.equal(code.tagName, "CODE");
+    if (values) assert.equal(values.className, "soft");
+    rows.push([code.textContent, values ? values.textContent : "", what.textContent]);
+  }
+  return rows;
+}
+
+test("the (?) beside the field opens and closes the list of every option the button takes", async () => {
+  const popup = loadPopup((msg) => {
+    if (msg.type === "getSettings") return { ...DEFAULTS };
+    if (msg.type === "startServerStatus") return { starting: false };
+    return offline;
+  });
+  await popup.init();
+  const button = popup.el("start-options-help");
+  const list = popup.el("start-options-list");
+  assert.equal(button.tagName, "BUTTON");
+  assert.equal(button.type, "button");
+  assert.equal(button.getAttribute("aria-controls"), "start-options-list");
+  assert.equal(button.getAttribute("aria-expanded"), "false");
+  assert.equal(list.hidden, true);
+  button.dispatch("click");
+  assert.equal(button.getAttribute("aria-expanded"), "true");
+  assert.equal(list.hidden, false);
+  // Every option of the table, in its order, and nothing else; each with its help line.
+  const rows = listRows(popup);
+  assert.deepEqual(rows.map(([name]) => name), Object.keys(popup.SHISUKO_START_OPTIONS));
+  for (const [name, values, what] of rows) {
+    assert.equal(values, popup.startOptionValues(popup.SHISUKO_START_OPTIONS[name]), name);
+    assert.equal(what, popup.SHISUKO_START_OPTION_HELP[name], name);
+    assert.ok(what.length > 0, name);
+  }
+  assert.ok(rows.some(([name]) => name === "--lookahead"));
+  assert.ok(rows.some(([name]) => name === "--language-patience"));
+  assert.ok(rows.some(([name]) => name === "--model-idle-minutes"));
+  button.dispatch("click");
+  assert.equal(button.getAttribute("aria-expanded"), "false");
+  assert.equal(list.hidden, true);
+});
+
+test("the (?) list says what follows each option: one of its words, a range, or nothing", () => {
+  const popup = loadPopup(() => offline);
+  assert.equal(popup.startOptionValues(["auto", "cuda", "mlx", "cpu"]), "auto | cuda | mlx | cpu");
+  assert.equal(popup.startOptionValues({ min: 1, max: 16, int: true }), "1–16");
+  assert.equal(popup.startOptionValues({ min: 0, max: 86400 }), "0–86400");
+  assert.equal(popup.startOptionValues(null), "");
+  popup.renderStartOptionsList();
+  const rows = new Map(listRows(popup).map(([name, values, what]) => [name, { values, what }]));
+  assert.equal(rows.get("--device").values, "auto | cuda | mlx | cpu");
+  assert.equal(rows.get("--lookahead").values, "0–86400");
+  assert.equal(rows.get("--model-idle-minutes").values, "0–10080");
+  assert.equal(rows.get("--language-patience").values, "0–3600");
+  assert.equal(rows.get("--no-update").values, "");
+  // A flag gets its name alone: no empty span beside it.
+  const flag = popup.el("start-options-table").options.find((child) => child.tagName === "DT" && child.options[0].textContent === "--no-update");
+  assert.equal(flag.options.length, 1);
+});
+
+test("the (?) list is closed by .hidden: none of its own rules sets a display", () => {
+  // .hidden is a single class like .optlist; a later display on the list would win over it.
+  for (const block of CSS.split("}")) {
+    const brace = block.lastIndexOf("{");
+    if (brace < 0) continue;
+    const selectors = block.slice(0, brace).split(",").map((s) => s.trim());
+    if (selectors.some((s) => s === ".optlist" || s === "#start-options-list")) assert.doesNotMatch(block.slice(brace + 1), /\bdisplay\s*:/);
+  }
+  assert.match(HTML, /<div id="start-options-list" class="optlist hidden">/);
+  // The label names its field and holds no control: the (?) shares the field's row, outside it.
+  assert.match(HTML, /<label class="lead" for="startOptions">[^<]*<span class="soft">[^<]*<\/span><\/label>/);
 });

@@ -331,6 +331,36 @@ def test_the_extension_checks_the_same_options():
     assert f"MAX_OPTION_TOKENS = {nh.MAX_OPTION_TOKENS};" in text
 
 
+def test_the_popup_list_names_the_default_server_py_has_for_every_option():
+    """The (?) list beside the popup's field (SHISUKO_START_OPTION_HELP in addon/start-options.js)
+    has one line per option of the table, and each names the default parse_args() gives it: a set's
+    as "word (default)", a number's as "(default N)", --lookahead's for both kinds of device."""
+    from _serverlib import load_server
+
+    server = load_server()
+    text = (ROOT / "addon" / "start-options.js").read_text(encoding="utf-8")
+    match = re.search(r"const SHISUKO_START_OPTION_HELP = Object\.freeze\((\{.*?\})\);", text, re.S)
+    assert match, "SHISUKO_START_OPTION_HELP is a JSON object literal in addon/start-options.js"
+    lines = json.loads(match.group(1))
+    assert list(lines) == list(nh.START_OPTIONS)
+    defaults = vars(server.parse_args([]))
+    for name, rule in nh.START_OPTIONS.items():
+        line, value = lines[name], defaults[name[2:].replace("-", "_")]
+        if rule is None:
+            assert value is False and "(default" not in line, name
+        elif isinstance(rule, list):
+            # --anki-sync and --mine stay None until main() settles them: auto, except in the Docker
+            # image without --anki-url, which the Start button never starts.
+            word = "auto" if value is None else value
+            assert word in rule and f"{word} (default)" in line, (name, line)
+        elif name == "--lookahead":
+            assert value is None, "the lookahead's default is the device's"
+            assert (f"(default {server.CUDA_LOOKAHEAD:g} on an NVIDIA GPU, "
+                    f"{server.SLOW_LOOKAHEAD:g} on the Apple GPU or the CPU)") in line, line
+        else:
+            assert re.search(rf"\(default {re.escape(f'{value:g}')}(?![\d.])", line), (name, value, line)
+
+
 @pytest.mark.parametrize("request_", [
     {"cmd": "stop"},
     {"cmd": "start", "path": "C:\\evil.exe"},

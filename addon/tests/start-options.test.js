@@ -16,10 +16,10 @@ function load() {
   const sandbox = {};
   vm.createContext(sandbox);
   new vm.Script(fs.readFileSync(SOURCE, "utf8"), { filename: SOURCE }).runInContext(sandbox);
-  return new vm.Script("({ SHISUKO_START_OPTIONS, SHISUKO_START_MAX_OPTION_TOKENS, parseStartOptions })").runInContext(sandbox);
+  return new vm.Script("({ SHISUKO_START_OPTIONS, SHISUKO_START_OPTION_HELP, SHISUKO_START_MAX_OPTION_TOKENS, parseStartOptions })").runInContext(sandbox);
 }
 
-const { SHISUKO_START_OPTIONS, SHISUKO_START_MAX_OPTION_TOKENS, parseStartOptions } = load();
+const { SHISUKO_START_OPTIONS, SHISUKO_START_OPTION_HELP, SHISUKO_START_MAX_OPTION_TOKENS, parseStartOptions } = load();
 const plain = (value) => JSON.parse(JSON.stringify(value));
 const parse = (text) => plain(parseStartOptions(text));
 
@@ -94,4 +94,29 @@ test("every word the parser can pass is one no command line reads into", () => {
       assert.ok(rule.min <= rule.max, name);
     }
   }
+});
+
+test("every option has one line for the popup's (?) list, in the table's order, and nothing else has one", () => {
+  // test_native_host.py holds the defaults the lines name to server.py's; here their shape.
+  assert.ok(Object.isFrozen(SHISUKO_START_OPTION_HELP));
+  assert.deepEqual(Object.keys(SHISUKO_START_OPTION_HELP), Object.keys(SHISUKO_START_OPTIONS));
+  for (const [name, rule] of Object.entries(SHISUKO_START_OPTIONS)) {
+    const line = SHISUKO_START_OPTION_HELP[name];
+    assert.equal(typeof line, "string", name);
+    assert.ok(line.length > 20 && line.length <= 220, `${name}: ${line.length} characters`);
+    assert.equal(line, line.trim(), name);
+    assert.doesNotMatch(line, /[<>\n]|\.$/, name); // plain text, one line, no full stop at the end (like the hints)
+    if (rule === null) assert.doesNotMatch(line, /\(default/, name);
+    else if (Array.isArray(rule)) assert.ok(rule.some((word) => line.includes(`${word} (default)`)), `${name} names its default as "word (default)"`);
+    else assert.match(line, /\(default \d/, name);
+  }
+});
+
+test("the three options a viewer asked for are on the list, with lines that say what they do", () => {
+  for (const name of ["--lookahead", "--language-patience", "--model-idle-minutes"]) {
+    assert.ok(Object.hasOwn(SHISUKO_START_OPTIONS, name), name);
+    assert.ok(SHISUKO_START_OPTION_HELP[name].length > 0, name);
+  }
+  assert.deepEqual(parse("--lookahead 600 --language-patience 0 --model-idle-minutes 10"),
+    { ok: true, options: ["--lookahead", "600", "--language-patience", "0", "--model-idle-minutes", "10"] });
 });

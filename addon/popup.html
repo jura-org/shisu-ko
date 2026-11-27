@@ -281,16 +281,24 @@
          setting). The list is fixed: SHISUKO_START_OPTIONS in start-options.js, START_OPTIONS in
          server/native_host.py, which checks every option again. popup.js says under the field
          what the button will pass, or what it refuses, and shows the section only where the
-         button is (START_AVAILABLE). -->
+         button is (START_AVAILABLE). The (?) beside the field opens the list of every option the
+         button takes, which popup.js builds from the tables in start-options.js
+         (renderStartOptionsList()). The label names its field by `for` and holds no control, so
+         the button can share the field's row: a label may hold no control but its own. -->
     <details id="start-options-section">
       <summary>Start server options</summary>
       <div class="drawer">
-        <label class="row field">
-          <span class="lead">Options <span class="soft">for the Start server button</span></span>
+        <div class="row field with-help">
+          <label class="lead" for="startOptions">Options <span class="soft">for the Start server button</span></label>
           <input type="text" id="startOptions" spellcheck="false" placeholder="e.g. --lyrics off --beam-size 1">
-        </label>
+          <button type="button" id="start-options-help" class="help" aria-expanded="false" aria-controls="start-options-list" aria-label="Every option the Start server button takes" title="Every option the Start server button takes">?</button>
+        </div>
         <p class="hint" id="start-options-hint"></p>
-        <p class="hint" id="start-options-list"></p>
+        <div id="start-options-list" class="optlist hidden">
+          <p class="hint">Every option the Start server button takes, and what follows it. Separate them with spaces; <code>--name=value</code> works too.</p>
+          <dl id="start-options-table"></dl>
+          <p class="hint">Not taken from the browser: <code>--model</code> (the model field picks it), <code>--port</code>, <code>--host</code> and the options that name a path, an address, a program, cookies or free text. Start the server by hand for those; docs/server.md lists them all.</p>
+        </div>
       </div>
     </details>
 

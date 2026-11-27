@@ -1,9 +1,10 @@
 "use strict";
 
 /*
- * The server options the popup's "Start server" button may pass, and their check. Loaded before
- * background.js (manifest.json, service-worker.js) and popup.js (popup.html); the setting that
- * holds them is `startOptions` (settings.js), what the viewer typed.
+ * The server options the popup's "Start server" button may pass, their check, and a line on what
+ * each does for the popup's (?) list. Loaded before background.js (manifest.json,
+ * service-worker.js) and popup.js (popup.html); the setting that holds them is `startOptions`
+ * (settings.js), what the viewer typed.
  *
  * server/native_host.py holds the same table (START_OPTIONS) and checks every option again before
  * the launcher sees one: the host decides. This copy gives the popup its hint and the background a
@@ -44,6 +45,39 @@ const SHISUKO_START_OPTIONS = Object.freeze({
   "--update-check": ["on", "off"],
   "--log-level": ["DEBUG", "INFO", "WARNING", "ERROR"],
   "--no-update": null
+});
+
+// What each option does, for the list the (?) beside the popup's field opens
+// (renderStartOptionsList() in popup.js): one line per option of the table above, in its order,
+// and nothing else, naming server.py's default as "word (default)" for a set or "(default N)" for
+// a number. start-options.test.js holds the keys to the table's; test_native_host.py reads this
+// as JSON too and holds every default to server.py's parse_args(), so it stays a plain object
+// literal: quoted keys, no comment inside, no trailing comma.
+const SHISUKO_START_OPTION_HELP = Object.freeze({
+  "--device": "Where the model runs. auto (default): an NVIDIA GPU, else the Apple GPU, else the CPU",
+  "--compute-type": "The precision the model runs in. auto (default) picks one for the device: int8_float16 on an NVIDIA GPU with under 4.5 GB free, which halves the memory Whisper takes",
+  "--beam-size": "How many beams Whisper searches (default 5). 1 decodes greedily: faster, and wrong on a homophone more often",
+  "--language-patience": "Seconds of speech in another language before a video's subtitles stop (default 60). 0: the language is never checked and every video is transcribed",
+  "--lyrics": "auto (default): songs and speech over music get subtitles too, under stricter checks. off: a stretch the speech detector hears no speech in stays blank",
+  "--human-subtitles": "auto (default): a Japanese track the video's creator uploaded gives the lines their text, timed by Whisper. off: Whisper alone",
+  "--sentence-ends": "auto (default): add the sentence mark Whisper left out where a sentence ending (よね, です, か) meets a pause, so a line ends with its sentence. off: Whisper's own punctuation alone",
+  "--anki-sync": "auto (default): sync Anki with AnkiWeb a minute after new notes appear. off: never",
+  "--mine": "auto (default): a card Yomitan makes from a line gets the line's audio and picture, and Alt+Shift+M fills the newest card. off: nothing is written to Anki, and Alt+Shift+M saves to Downloads",
+  "--mine-picture": "on (default): a mined card gets a frame of the video at its line. off: the audio alone",
+  "--window": "Seconds of audio transcribed per step (default 30). Shorter reacts faster to a seek",
+  "--first-window": "Seconds of the first step after a seek, shorter so that subtitles appear quickly (default 20)",
+  "--lookahead": "Seconds to transcribe ahead of the playhead (default 180 on an NVIDIA GPU, 900 on the Apple GPU or the CPU). 0: the whole video",
+  "--max-cue-chars": "Characters in a line before it is split (default 30; 26 is Netflix's Japanese limit)",
+  "--max-cue-seconds": "The longest a line stays up, in seconds (default 7)",
+  "--min-cue-seconds": "The shortest line, in seconds; shorter ones are extended or merged (default 0.8)",
+  "--idle-minutes": "Minutes before the audio of a video no tab syncs any more is let go (default 30)",
+  "--model-idle-minutes": "Minutes with nothing to transcribe before the model leaves memory; it loads again when a video needs it (default 1). 0: load it at the start and keep it",
+  "--retry-after": "The longest wait, in seconds, before a failed audio download is tried again, and the wait before a model that failed to load is (default 30)",
+  "--client-timeout": "Seconds without a sync from a video's tab before transcribing ahead for it stops (default 30). 0: never stop",
+  "--cpu-threads": "Threads for decoding on the CPU (default 0: the library's own choice)",
+  "--update-check": "on (default): ask GitHub once a day, anonymously, whether there is a newer release. off: never",
+  "--log-level": "How much the server logs. INFO (default); DEBUG says more, WARNING and ERROR less",
+  "--no-update": "Start without updating Shisu-ko first; the popup's Update button is refused too"
 });
 
 // More words than this are not options a viewer typed (native_host.py has the same limit).
