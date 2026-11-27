@@ -140,9 +140,10 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   `--js-runtime`, `--allow-remote-ejs`, `--initial-prompt`, `--language`) and the options that
   exit instead of serving stay off the list. `addon/start-options.js` holds the same table as a
   JSON object literal (`SHISUKO_START_OPTIONS`) with the parser the popup's hint and the
-  background share (`parseStartOptions()`); `test_native_host.py` reads it and keeps the two
-  equal, and checks that `server.py`'s `parse_args()` takes every option with every value its
-  rule allows. A request without options is the bare `{cmd: "start"}`, which a launcher from
+  background share (`parseStartOptions()`), and one help line per option for the popup's (?)
+  list (`SHISUKO_START_OPTION_HELP`); `test_native_host.py` reads both, keeps the two tables
+  equal, checks that `server.py`'s `parse_args()` takes every option with every value its rule
+  allows, and that each help line names the default `parse_args()` gives it. A request without options is the bare `{cmd: "start"}`, which a launcher from
   before the options still understands; one with them gets "unknown command" from such a
   launcher, which the background words as `OLD_LAUNCHER_HINT`. The instance lock also tells
   this computer's own server from another (`lock_state()`: `held`, `free`, or `unknown` for a lock

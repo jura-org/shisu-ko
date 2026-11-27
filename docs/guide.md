@@ -287,8 +287,9 @@ on that line launches it (Firefox and the Chrome Web Store install, see
 [Start the server](install.md#the-start-server-button)) with the options in **Start server
 options**, a drawer of its own: empty, the server starts with its defaults; `--lyrics off
 --beam-size 1` or `--device cpu` there go to every start the button makes, and the line under
-the field says what it will pass, or which word the launcher would refuse (the list is in
-[Server options](server.md#server-options)). The model field below takes effect once the server
+the field says what it will pass, or which word the launcher would refuse. The **?** beside the
+field opens the list of every option it takes, with the values each allows, its default and what
+it does (more in [Server options](server.md#server-options)). The model field below takes effect once the server
 is up. When another server answers on the Start button's address, one that is not this
 computer's own (an old copy, or a Docker container), the status line says **Other server** and
 who it is instead of "Server online": stop that one, and the button is back. The same page opens

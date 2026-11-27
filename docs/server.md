@@ -16,10 +16,12 @@ Append options to `run.cmd` / `run.sh` (with Nix, after `--`:
 checkout), or put them in the `command:` line of `compose.yaml`. The popup's **Start server**
 button runs `run.cmd` / `run.sh` with the options in the popup's **Start server options** field
 (empty by default, so it starts the defaults below; the model can still be switched from the
-popup afterwards). That field takes the options of the table below except `--model` (use the
-popup's model field), `--port`, `--cookies-from-browser`, `--save-cookies-from-browser`,
-`--cookies`, `--anki-url`, `--initial-prompt`, `--js-runtime`, `--allow-remote-ejs`, `--check`,
-`--default-model` and `--download-model`, and `--language`, `--host` and `--setup-cookies` from
+popup afterwards), and the **?** beside the field lists every option it takes, with the values
+each allows, its default and what it does. That field takes the options of the table below
+except `--model` (use the popup's model field), `--port`, `--cookies-from-browser`,
+`--save-cookies-from-browser`, `--cookies`, `--anki-url`, `--initial-prompt`, `--js-runtime`,
+`--allow-remote-ejs`, `--check`, `--default-model` and `--download-model`, and `--language`,
+`--host` and `--setup-cookies` from
 `server.py --help`: those take an address, a path, a program, a browser's cookies, code from the
 network or free text, or exit instead of serving, and the launcher refuses them from the
 browser. Each value must be a number in a sensible range or one of the option's words, as in

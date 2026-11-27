@@ -1,6 +1,6 @@
-0.7.0 was the last version on this listing; 0.8.0 to 0.14.0 came out on GitHub only (https://github.com/Multysquid/shisu-ko/releases has every release's full notes). What changed since 0.7.0:
+0.7.0 was the last version on this listing; 0.8.0 to 0.14.0 came out on GitHub only (https://github.com/Multysquid/shisu-ko/releases has the full notes). What changed since 0.7.0:
 
-- 0.29.0: options for the popup's Start server button; a server on its address that is not yours (an old copy, Docker) shows as "Other server". In Firefox, word colours find a verb fused to the next word (腐った肉).
+- 0.29.0: Start server options in the popup, listed by a (?); a server on port 8790 that is not yours (an old copy, Docker) shows as "Other server". In Firefox, word colours find a verb fused to the next word (腐った肉).
 - 0.28.0: the server loads its model only when a video needs it and frees it once the video is done.
 - 0.27.1, 0.27.2: kotoba-whisper and Kitsune models run again; vertical subtitles stand digits, ? and ! upright.
 - 0.27.0: the phone portal keeps your watch history: a finished video leaves Up next for Watched.

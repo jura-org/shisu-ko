@@ -634,9 +634,13 @@ and the options that exit (see `START_OPTIONS`' comment). `addon/start-options.j
 same table as a JSON literal and `parseStartOptions(text)`: the setting `startOptions` (what the
 viewer typed) split on whitespace, `--name=value` read as `--name value`, a word of a set typed
 in another case put in the set's spelling, `{ok, options}` or `{ok: false, error}` with the
-host's own wording. `test_native_host.py` keeps the two tables equal, checks that `server.py`'s
-`parse_args()` takes every option with each value its rule allows, and that no allowed word
-holds anything a command line reads.
+host's own wording. Beside them, `SHISUKO_START_OPTION_HELP` gives each option one line for the
+popup's (?) list: what it does, with its default as "word (default)" for a set or "(default N)"
+for a number. `test_native_host.py` keeps the two tables equal, checks that `server.py`'s
+`parse_args()` takes every option with each value its rule allows, that no allowed word holds
+anything a command line reads, and that every help line names the default `parse_args()` gives
+(`--lookahead`'s for both kinds of device); `start-options.test.js` holds one line per option,
+in the table's order.
 `launch()` on Windows runs `cmd.exe /c start "Shisu-ko server" .\run.cmd [options]` with `cwd=server/`
 (cmd.exe splits a full path holding `&` or `(` even when quoted), `DETACHED_PROCESS |
 CREATE_NEW_PROCESS_GROUP` and first `CREATE_BREAKAWAY_FROM_JOB`, retrying without it on
@@ -730,7 +734,12 @@ asked) and flushes a pending save (`flushSave()`, sent before the first `await` 
 the grant) before it sends `startServer`: the field's change event fires as it gives the focus
 to the button, and the background reads the options from the settings. The field's hint
 (`renderStartOptionsHint()`) says on every keystroke what the button will pass or what it
-refuses; the section shows only where the button does (`START_AVAILABLE`).
+refuses; the section shows only where the button does (`START_AVAILABLE`). The (?) beside the
+field (`start-options-help`, a button outside the field's label, which names its input by `for`)
+opens and closes `start-options-list` (`toggleStartOptionsList()`, with `aria-expanded`; `init()`
+closes it): every option of `SHISUKO_START_OPTIONS` in its order, what follows it (`a | b`, a
+range `min–max`, nothing for a flag; `startOptionValues()`) and its help line, built once with
+`createElement` and `textContent` (`renderStartOptionsList()`).
 
 Someone else's server: a `/health` answer at the launcher's address (`http://127.0.0.1:8790` or
 `http://localhost:8790`, `onLauncherAddress()`) from a server whose `launcher` is not `true` (an

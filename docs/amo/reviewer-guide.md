@@ -104,8 +104,9 @@ The demo recording in the README shows the expected behaviour: https://github.co
    button returns. Clicking it again is harmless: the host sees the server's lock file and
    answers that it is already starting, so nothing is launched twice and the popup waits again. The model can be changed in the popup's "Transcription model" field,
    for example to "base", without restarting. Declining the permission only puts a hint on the
-   status line. To try the options, stop the server again, expand "Start server options" and
-   enter "--lyrics off --beam-size 1": the line under the field says what the button will pass,
+   status line. To try the options, stop the server again, expand "Start server options" (the
+   "?" beside the field lists every option it takes, built from start-options.js with
+   textContent) and enter "--lyrics off --beam-size 1": the line under the field says what the button will pass,
    and the next click starts run.sh with exactly those words. "--host 0.0.0.0" (or any option
    off the list, or a value off its rule) is refused under the field and on the status line,
    and the browser is not even asked for the permission.
