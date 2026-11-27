@@ -506,9 +506,11 @@
     const font = oneOf(s.subFont, Object.keys(SUB_FONTS), DEFAULT_SETTINGS.subFont);
     const alpha = clampNumber(s.subBackgroundOpacity, 0, 100, DEFAULT_SETTINGS.subBackgroundOpacity) / 100;
     const style = root.style;
-    style.setProperty("--shisuko-sub-bottom", `${bottom}%`);
-    // The controls have faded out, so the box drops by the same amount it does at the default.
-    style.setProperty("--shisuko-sub-bottom-autohide", `${Math.max(SUB_POSITION_MIN, bottom - AUTOHIDE_DROP)}%`);
+    // Keep a control-bar's clearance even on a short player when the fixed position is on.
+    const fixed = s.subFixedBottom === true;
+    const offset = fixed ? `max(${bottom}%, 60px)` : `${bottom}%`;
+    style.setProperty("--shisuko-sub-bottom", offset);
+    style.setProperty("--shisuko-sub-bottom-autohide", fixed ? offset : `${Math.max(SUB_POSITION_MIN, bottom - AUTOHIDE_DROP)}%`);
     style.setProperty("--shisuko-sub-font", fontStack(font, s.subFontFamily));
     style.setProperty("--shisuko-sub-weight", font === "gothic-bold" ? "700" : "400");
     style.setProperty("--shisuko-sub-color", hexColor(s.subTextColor, DEFAULT_SETTINGS.subTextColor));

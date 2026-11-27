@@ -337,14 +337,15 @@ box, an outline, and the transcript docked left:
 | Style setting | Meaning |
 |---|---|
 | Place | Where the subtitle sits: bottom or top of the video, bottom of the window, or left or right of the video in vertical text, like a book. Dragging the grip (⠿) at the box's edge does the same: the docks light up, and the release snaps to the nearest. A side too narrow for two columns (theater mode, a small window) puts the column inside the video at that edge. Fullscreen shows only the video, so there the window's bottom becomes the video's and the sides go inside; leaving fullscreen puts them back |
-| Height above the bottom | For the bottom of the video: 2-40% of the player height; it still drops when YouTube's controls fade out |
+| Height above the bottom | For the bottom of the video: 2-40% of the player height |
+| Keep bottom subtitles above the controls | Holds the bottom position when YouTube hides its controls, with at least 60 px of clearance |
 | Font | Gothic (the default stack), Gothic bold, Rounded or Mincho, for the subtitle and the transcript |
 | Font family | Any font installed on this computer, by name. It goes in front of the preset's stack, so the preset stays the fallback and still decides the weight. The popup previews the result and says whether the name resolved; Firefox cannot list installed fonts, hence the suggestions instead of a menu |
 | Text colour | Colour of the subtitle text |
 | Background | Opacity of the black box behind the text, 0-100% |
 | Outline the text | Black outline instead of the box; readable over bright video with the background turned down |
 | Transcript panel side | Docks the panel right or left; the subtitle moves out of its way |
-| Reset style | Restores the eight settings above and nothing else |
+| Reset style | Restores the subtitle style settings above |
 
 The **Transcription model** drawer picks the model the server runs. The field takes a
 Kitsune-Transcribe model (`kitsune-0.6b`, `kitsune-0.3b-int8`, ...; see
