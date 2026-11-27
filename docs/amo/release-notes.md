@@ -1,5 +1,6 @@
 0.7.0 was the last version on this listing; 0.8.0 to 0.14.0 came out on GitHub only (https://github.com/Multysquid/shisu-ko/releases has every release's full notes). What changed since 0.7.0:
 
+- 0.29.2: recover mining pictures from HLS segments.
 - 0.29.0: options for the popup's Start server button; a server on its address that is not yours (an old copy, Docker) shows as "Other server".
 - 0.28.0: the server loads its model only when a video needs it and frees it once the video is done.
 - 0.27.1, 0.27.2: kotoba-whisper and Kitsune models run again; vertical subtitles stand digits, ? and ! upright.

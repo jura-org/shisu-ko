@@ -102,7 +102,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 try:
     import msvcrt  # Windows: byte-range locks for the instance lock
@@ -113,7 +113,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.29.0"
+VERSION = "0.29.2"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -4858,6 +4858,9 @@ def mine_request(value) -> dict:
 # every minute.
 
 FRAME_FORMAT = "bestvideo[height<=720][vcodec^=avc1]/bestvideo[height<=720]/best[height<=720]"
+FRAME_HLS_FORMAT = "bestvideo[protocol=m3u8_native][height<=720][vcodec^=avc1]"
+FRAME_HLS_MAX_BYTES = 16 * 1024 * 1024
+FRAME_REMOTE_TIMEOUT = 8.0
 FRAME_STREAM_TTL = 4 * 3600.0  # googlevideo URLs live about 6 h
 FRAME_FRESH = 120.0  # a stream URL this young is not re-resolved when it fails to open
 # A resolve that raised (YouTube's bot check, the network) is tried again after this; a verdict
@@ -4895,31 +4898,74 @@ def encode_jpeg(frame) -> bytes:
     return data
 
 
-def frame_jpeg(source: str, t: float) -> bytes:
-    """A JPEG of the first frame at or after `t` seconds of `source`, a stream URL or a file."""
+def frame_jpeg(source, t: float, *, relative: bool = False) -> bytes:
+    """A JPEG at `t`; for an HLS segment, measure from its first decoded frame."""
     try:
         import av
     except ImportError:
         raise FrameUnavailable("PyAV is not installed in this Python") from None
     try:
-        container = av.open(source, timeout=30, options={"request_size": str(FRAME_REQUEST_SIZE)})
+        remote = isinstance(source, str) and source.startswith(("http://", "https://"))
+        timeout = FRAME_REMOTE_TIMEOUT if remote else 30
+        container = av.open(source, timeout=timeout, options={"request_size": str(FRAME_REQUEST_SIZE)})
     except Exception as exc:  # noqa: BLE001 - av.error.* and OSError alike: the stream did not open
-        raise FrameUnavailable(f"the video stream did not open ({exc})") from None
+        raise FrameUnavailable(f"the video stream did not open ({type(exc).__name__})") from None
     with container:
         stream = container.streams.video[0]
         base = stream.time_base
-        if t > 1:
+        if not relative and t > 1:
             container.seek(int(t / base), stream=stream)
         last = None
+        origin = None if relative else 0.0
         for frame in container.decode(stream):
             if frame.pts is None:
                 continue
             last = frame
-            if float(frame.pts * base) >= t - 0.001:
+            timestamp = float(frame.pts * base)
+            if origin is None:
+                origin = timestamp
+            if timestamp - origin >= t - 0.001:
                 return encode_jpeg(frame)
         if last is not None:
             return encode_jpeg(last)
     raise FrameUnavailable("no video frame at that time")
+
+
+def hls_frame_segments(url: str, text: str) -> list:
+    """The cumulative end and URL of each segment in a plain on-demand media playlist."""
+    lines = text.splitlines()
+    unsupported = ("#EXT-X-KEY:", "#EXT-X-MAP:", "#EXT-X-BYTERANGE:", "#EXT-X-DISCONTINUITY")
+    if not lines or lines[0] != "#EXTM3U" or "#EXT-X-ENDLIST" not in lines:
+        raise FrameUnavailable("no on-demand HLS media playlist")
+    segments, end, duration = [], 0.0, None
+    for line in lines[1:]:
+        if line.startswith(unsupported):
+            raise FrameUnavailable("unsupported HLS segments")
+        if line.startswith("#EXTINF:"):
+            duration = float(line[8:].partition(",")[0])
+        elif line and not line.startswith("#"):
+            segment_url = urljoin(url, line)
+            if duration is None or not math.isfinite(duration) or duration <= 0 or urlsplit(segment_url).scheme != "https":
+                raise FrameUnavailable("invalid HLS segment")
+            end += duration
+            segments.append((end, segment_url))
+            duration = None
+    if not segments:
+        raise FrameUnavailable("empty HLS media playlist")
+    return segments
+
+
+@dataclass
+class HlsFrameSource:
+    headers: dict
+    segments: list
+
+    def segment_at(self, t: float) -> tuple:
+        start = 0.0
+        for end, url in self.segments:
+            if t < end or end == self.segments[-1][0]:
+                return url, max(0.0, t - start)
+            start = end
 
 
 class FrameGrabber:
@@ -4935,27 +4981,44 @@ class FrameGrabber:
         self.lock = threading.Lock()
         self.streams: dict = {}  # video_id -> (url or None, resolved at, why it failed, kept for)
 
-    def resolve_stream(self, video_id: str) -> str:
+    def resolve_stream(self, video_id: str, hls: bool = False):
         import yt_dlp
 
-        opts = dict(self.fetcher.ytdlp_options(video_id), format=FRAME_FORMAT)
+        opts = dict(self.fetcher.ytdlp_options(video_id), format=FRAME_HLS_FORMAT if hls else FRAME_FORMAT)
         opts.pop("progress_hooks", None)
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
-        if info.get("is_live"):
-            raise FrameUnavailable("a live stream")
-        if info.get("has_drm"):
-            raise FrameUnavailable("the video is DRM-protected")
-        url = info.get("url")
-        if not url:
-            raise FrameUnavailable("no video stream up to 720p")
-        return url
+            if info.get("is_live"):
+                raise FrameUnavailable("a live stream")
+            if info.get("has_drm"):
+                raise FrameUnavailable("the video is DRM-protected")
+            url = info.get("url")
+            if not url:
+                raise FrameUnavailable("no video stream up to 720p")
+            if not hls:
+                return url
+            if info.get("protocol") != "m3u8_native":
+                raise FrameUnavailable("no HLS video stream")
+            headers = info.get("http_headers", {})
+            playlist = self.read_hls(ydl, url, headers).decode("utf-8-sig")
+            return HlsFrameSource(headers, hls_frame_segments(url, playlist))
 
-    def stream(self, video_id: str, fresh: bool = False) -> str:
+    @staticmethod
+    def read_hls(ydl, url, headers):
+        from yt_dlp.networking import Request
+
+        with ydl.urlopen(Request(url, headers=headers)) as response:
+            data = response.read(FRAME_HLS_MAX_BYTES + 1)
+        if len(data) > FRAME_HLS_MAX_BYTES:
+            raise FrameUnavailable("HLS response too large")
+        return data
+
+    def stream(self, video_id: str, fresh: bool = False, hls: bool = False):
         with self.lock:
             now = self.clock()
             cached = self.streams.get(video_id)
-            if cached and not fresh and now - cached[1] < cached[3]:
+            if cached and not fresh and now - cached[1] < cached[3] and (
+                    not hls or isinstance(cached[0], HlsFrameSource) or cached[0] is None):
                 if cached[0] is None:
                     raise FrameUnavailable(cached[2])
                 return cached[0]
@@ -4963,28 +5026,47 @@ class FrameGrabber:
             for vid in [v for v, entry in self.streams.items() if now - entry[1] >= entry[3]]:
                 del self.streams[vid]
             try:
-                url = self.resolve(video_id)
+                url = self.resolve_stream(video_id, hls=True) if hls else self.resolve(video_id)
             except FrameUnavailable as exc:
-                self.streams[video_id] = (None, now, str(exc), FRAME_STREAM_TTL)
+                self.streams[video_id] = (None, now, str(exc), FRAME_RETRY if hls else FRAME_STREAM_TTL)
                 raise
             except Exception as exc:  # noqa: BLE001 - yt-dlp raises its own types; all mean no picture
-                reason = f"the stream did not resolve ({str(exc)[:160]})"
+                reason = f"the stream did not resolve ({type(exc).__name__})"
                 self.streams[video_id] = (None, now, reason, FRAME_RETRY)
                 raise FrameUnavailable(reason) from None
             self.streams[video_id] = (url, now, None, FRAME_STREAM_TTL)
             return url
 
     def grab(self, video_id: str, t: float) -> bytes:
-        url = self.stream(video_id)
+        source = self.stream(video_id)
         try:
-            return self.decode(url, t)
+            return self.decode_source(source, t)
         except FrameUnavailable:
             with self.lock:
                 age = self.clock() - self.streams.get(video_id, (None, 0.0))[1]
-            if age < FRAME_FRESH:
+            if age >= FRAME_FRESH:
+                try:
+                    return self.decode_source(self.stream(video_id, fresh=True, hls=isinstance(source, HlsFrameSource)), t)
+                except FrameUnavailable:
+                    if self.fetcher is None or isinstance(source, HlsFrameSource):
+                        raise
+            if self.fetcher is None or isinstance(source, HlsFrameSource):
                 raise
-        # An old URL that no longer opens has expired: one fresh resolve, then that answer stands.
-        return self.decode(self.stream(video_id, fresh=True), t)
+        return self.decode_source(self.stream(video_id, hls=True), t)
+
+    def decode_source(self, source, t):
+        if not isinstance(source, HlsFrameSource):
+            return self.decode(source, t)
+
+        from yt_dlp import YoutubeDL
+
+        url, offset = source.segment_at(t)
+        try:
+            with YoutubeDL({"quiet": True, "socket_timeout": FRAME_REMOTE_TIMEOUT}) as ydl:
+                data = self.read_hls(ydl, url, source.headers)
+            return frame_jpeg(io.BytesIO(data), offset, relative=True)
+        except Exception as exc:  # noqa: BLE001 - the frame is optional, and URLs must stay out of logs
+            raise FrameUnavailable(f"HLS frame unavailable ({type(exc).__name__})") from None
 
 
 # --------------------------------------------------------------------------- mining: media made ahead

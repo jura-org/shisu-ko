@@ -283,7 +283,11 @@ FFmpeg before 8 ignores the option and is slow again. A URL is kept per video fo
 (4 h). A verdict (`FrameUnavailable`: DRM via `has_drm`, a live stream, no stream up to 720p) is
 kept as long, so it costs one resolve, not one per card; any other failure (YouTube's bot check, the
 network) is kept for `FRAME_RETRY` (10 min) and then tried again. A kept URL that no longer opens
-and is older than `FRAME_FRESH` (120 s) has expired: one fresh resolve, and that answer stands. A
+and is older than `FRAME_FRESH` (120 s) gets one fresh resolve. The remote reader times out after
+`FRAME_REMOTE_TIMEOUT` so an unreachable stream cannot hold the fallback for 30 s. If the direct stream still fails,
+the grabber tries the H.264 HLS media playlist. It selects the segment by the sum of earlier
+segment durations and decodes relative to that segment's first frame. The playlist is cached in
+the same slot, so subsequent frames can use it without another direct-stream attempt. A
 live stream gets no picture: its past frames are not there to seek to. `--mine-picture off` builds
 the miner without a grabber, and nothing is resolved.
 
