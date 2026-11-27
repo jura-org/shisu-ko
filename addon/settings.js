@@ -27,6 +27,7 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   // Fullscreen keeps every dock inside the video without changing the setting.
   subDock: "video-bottom",
   subPosition: 11, // % of the player height between the bottom edge and the subtitle box (video-bottom)
+  subFixedBottom: false,
   subFont: "default", // "default" | "rounded" | "mincho" | "gothic-bold"
   // A font family installed on this computer, put in front of the preset's stack; the preset
   // stays the fallback and still decides the weight. Empty means the preset alone.

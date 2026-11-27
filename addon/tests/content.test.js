@@ -638,6 +638,18 @@ test("updateStatus keeps a failed session in front of a model load, even with pr
 
 const GOTHIC = '"Noto Sans JP", "Noto Sans CJK JP", "Yu Gothic UI", "Yu Gothic", "Meiryo", "Hiragino Sans", sans-serif';
 
+test("fixed bottom subtitles use the same offset with and without the controls", () => {
+  const { api: { applyStyleSettings } } = loadContent();
+  const properties = new Map();
+  const root = { style: { setProperty: (k, v) => properties.set(k, v) }, classList: { toggle() {} } };
+  applyStyleSettings(root, { subPosition: 11, subFixedBottom: true });
+  assert.equal(properties.get("--shisuko-sub-bottom"), "max(11%, 60px)");
+  assert.equal(properties.get("--shisuko-sub-bottom-autohide"), properties.get("--shisuko-sub-bottom"));
+  applyStyleSettings(root, { subPosition: 11 });
+  assert.equal(properties.get("--shisuko-sub-bottom"), "11%");
+  assert.equal(properties.get("--shisuko-sub-bottom-autohide"), "4%");
+});
+
 test("fontStack puts an installed family in front of the preset's stack", () => {
   const { api } = loadContent();
   assert.equal(api.fontStack("default", "Yu Gothic UI"), `"Yu Gothic UI", ${GOTHIC}`);
