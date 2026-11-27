@@ -304,10 +304,11 @@ def test_anki_settings_fill_the_defaults_and_refuse_what_is_not_a_field_name():
     got = server.anki_settings({"picture": " picture ", "audio": "sentenceAudio", "sentence": "Sentence",
                                 "word": "Expression", "auto": False, "pad_ms": 350, "format": "wav", "future": 1})
     assert got == {"auto": False, "picture": "picture", "audio": "sentenceAudio", "sentence": "Sentence",
-                   "word": "Expression", "pad_ms": 350, "format": "wav"}
+                   "word": "Expression", "pad_ms": 350, "format": "wav", "context": False}
+    assert server.anki_settings({"context": True})["context"] is True
     for bad in ({"picture": "a" * 65}, {"picture": 'x"y'}, {"audio": "{{Audio}}"}, {"word": "a:b"},
                 {"sentence": "<b>"}, {"picture": "a\nb"}, {"picture": 5}, {"auto": "yes"}, {"pad_ms": -1},
-                {"pad_ms": 99999}, {"pad_ms": True}, {"format": "ogg"}, [], "Picture"):
+                {"pad_ms": 99999}, {"pad_ms": True}, {"format": "ogg"}, {"context": 1}, [], "Picture"):
         with pytest.raises(ValueError):
             server.anki_settings(bad)
 
@@ -416,6 +417,44 @@ def test_a_new_note_gets_the_audio_and_picture_of_its_line(rig):
     assert fields["Sentence"]["value"] == "これは<b>テスト</b>字幕です。"  # a filled field is never touched
     assert rig.anki.media[f"shisuko_{VIDEO.lower()}_13000.mp3"]  # base64 of the clip
     assert [e["seq"] for e in s.mined] == [0] and s.mined[0]["note"] == nid
+
+
+def test_context_expands_audio_and_sentence_but_keeps_the_selected_image(rig):
+    s = rig.session(settings={"context": True})
+    rig.miner.observe(s)
+    rig.miner.premine.run_once(wait=0)
+    nid = fresh_id()
+    rig.anki.add(nid, note_fields(Sentence=LINES[1]["text"]))
+    assert rig.miner.attach_new(nid)["ok"]
+    assert rig.clips == [(VIDEO, 12.8, 15.2, "mp3"), (VIDEO, 9.8, 18.2, "mp3")]
+    assert rig.grabs == [(f"stream-{VIDEO}", 13.75)]
+    fields = rig.anki.notes[nid]
+    assert fields["Sentence"]["value"] == "<br>".join(server.escape_html(c["text"]) for c in LINES)
+    assert fields["SentenceAudio"]["value"] == f"[sound:shisuko_{VIDEO.lower()}_13000-context-9800-18200.mp3]"
+
+
+def test_context_stops_across_a_pause_or_speaker_seam():
+    center = LINES[1]
+    before, after = server.mining_neighbors([dict(LINES[0], end=10.5), center, LINES[2]], center)
+    assert before is None and after == LINES[2]
+    before, after = server.mining_neighbors([LINES[0], center, dict(LINES[2], text="Two\nspeakers")], center)
+    assert before == LINES[0] and after is None
+
+
+def test_context_preserves_a_sentence_edited_while_the_clip_is_cut(rig):
+    rig.session(settings={"context": True})
+    nid = fresh_id()
+    rig.anki.add(nid, note_fields(Sentence=LINES[1]["text"]))
+    reads = []
+
+    def edit_on_second_read():
+        reads.append(1)
+        if len(reads) == 2:
+            rig.anki.notes[nid]["Sentence"]["value"] = "Own sentence"
+
+    rig.anki.on_update = edit_on_second_read
+    assert rig.miner.attach_new(nid)["ok"]
+    assert rig.anki.updates[-1]["fields"].keys() == {"Picture"}
 
 
 def test_only_empty_fields_are_filled(rig):

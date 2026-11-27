@@ -3448,6 +3448,8 @@ test("ankiForSync sends the popup's field names and clip settings, trimmed and c
   });
   assert.equal(api.ankiForSync({ clipPaddingMs: "junk", clipFormat: "ogg" }).pad_ms, 0);
   assert.equal(api.ankiForSync({ clipFormat: "ogg" }).format, "mp3");
+  assert.equal(api.ankiForSync({ includeMiningContext: true }).context, true);
+  assert.equal(api.ankiForSync({ includeMiningContext: false }).context, undefined);
 });
 
 test("a mine rides /sync until the log answers it, and the answer is toasted", async () => {

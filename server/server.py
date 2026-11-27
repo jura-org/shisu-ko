@@ -113,7 +113,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.29.0"
+VERSION = "0.29.2"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -4801,7 +4801,7 @@ def missing_fields_error(what: str, missing: list, fields: dict) -> str:
 # at most 64 characters with none of the ones Anki refuses in a field name ("{}:) and no markup.
 ANKI_FIELD_NAME_RE = re.compile(r'[^\x00-\x1f\x7f"{}:<>]{0,64}')
 ANKI_SETTINGS_DEFAULT = {"auto": True, "picture": "Picture", "audio": "SentenceAudio", "sentence": "",
-                         "word": "", "pad_ms": 200, "format": "mp3"}
+                         "word": "", "pad_ms": 200, "format": "mp3", "context": False}
 ANKI_PAD_MAX_MS = 2000
 MINE_NONCE_RE = re.compile(r"[A-Za-z0-9_-]{1,40}")
 
@@ -4822,6 +4822,10 @@ def anki_settings(value) -> dict:
         if not isinstance(value["auto"], bool):
             raise ValueError("anki.auto must be true or false")
         out["auto"] = value["auto"]
+    if "context" in value:
+        if not isinstance(value["context"], bool):
+            raise ValueError("anki.context must be true or false")
+        out["context"] = value["context"]
     if "pad_ms" in value:
         pad = value["pad_ms"]
         if isinstance(pad, bool) or not isinstance(pad, (int, float)) or not 0 <= pad <= ANKI_PAD_MAX_MS:
@@ -5020,6 +5024,24 @@ def clip_span(cue: dict, pad_ms: int) -> tuple:
     pad = pad_ms / 1000.0
     start = max(0.0, float(cue["start"]) - pad)
     return start, max(start + 0.3, float(cue["end"]) + pad)
+
+
+def mining_neighbors(cues: list, cue: dict) -> tuple:
+    """One cue on each side, stopping at a long pause or a two-speaker seam."""
+    if "\n" in cue["text"]:
+        return None, None
+    ordered = sorted(cues, key=lambda item: item["start"])
+    try:
+        index = ordered.index(cue)
+    except ValueError:  # the matched cue was rebuilt before we acquired the session lock
+        return None, None
+    before = ordered[index - 1] if index else None
+    after = ordered[index + 1] if index + 1 < len(ordered) else None
+    if before and ("\n" in before["text"] or cue["start"] - before["end"] > 1.5):
+        before = None
+    if after and ("\n" in after["text"] or after["start"] - cue["end"] > 1.5):
+        after = None
+    return before, after
 
 
 class Premine:
@@ -5370,6 +5392,27 @@ class Miner:
             return key, escape_html(text) if settings["sentence"] else None
         return key, grow_sentence(have, text)
 
+    def mining_context(self, s: Session, settings: dict, cue: dict, fields: dict, sentence_key, sentence):
+        if not settings.get("context") or not sentence_key:
+            return None
+        have = field_value(fields, sentence_key)
+        if sentence is None and not (have and match_normalize(have) == match_normalize(cue["text"])):
+            return None  # neither an empty configured field nor a recognised piece of this cue
+        with s.lock:
+            before, after = mining_neighbors(s.cues, cue)
+        if before is None and after is None:
+            return None
+        start = min(cue["start"], before["start"]) if before else cue["start"]
+        end = max(cue["end"], after["end"]) if after else cue["end"]
+        span = dict(start=start, end=end)
+        padded_start, padded_end = clip_span(span, settings["pad_ms"])
+        if padded_end - padded_start > MAX_CLIP_SECONDS:
+            return None
+        text = "<br>".join(filter(None, (escape_html(before["text"]) if before else "", sentence or have,
+                                         escape_html(after["text"]) if after else "")))
+        suffix = f"-context-{round(padded_start * 1000)}-{round(padded_end * 1000)}"
+        return span, text, suffix
+
     def attach(self, s: Session, settings: dict, cue: dict, note_id: int, fields: dict, auto: bool,
                nonce: Optional[str] = None) -> dict:
         what = "new" if auto else "newest"
@@ -5383,13 +5426,21 @@ class Miner:
         base = f"shisuko_{s.video_id}_{int(round(float(cue['start']) * 1000))}"
         update, notes = {}, []
         ready = self.premine.take(s, cue, settings)
+        contextual = False
         if audio_key:
-            clip = ready["clip"] or self.clip(s, cue, settings)
+            context = self.mining_context(s, settings, cue, fields, sentence_key, sentence)
+            clip = self.clip(s, context[0], settings) if context else None
+            suffix = ""
+            if clip is not None:
+                _, sentence, suffix = context
+                contextual = True
+            else:
+                clip = ready["clip"] or self.clip(s, cue, settings)
             if clip is None:
                 notes.append("no audio")
             else:
                 data, _, ext = clip
-                update[audio_key] = f"[sound:{escape_html(self.store(f'{base}.{ext}', data))}]"
+                update[audio_key] = f"[sound:{escape_html(self.store(f'{base}{suffix}.{ext}', data))}]"
         if picture_key:
             picture = ready["picture"] or self.picture(s, cue)
             if picture is None:
@@ -5405,12 +5456,15 @@ class Miner:
         if latest is None:
             return self.outcome(s, nonce, "no_note", f"The {what} card is no longer in Anki; nothing attached", note_id)
         update = {key: value for key, value in update.items() if field_value(latest["fields"], key) == field_value(fields, key)}
+        if contextual and not (audio_key in update and sentence_key in update):
+            update.pop(audio_key, None)
+            update.pop(sentence_key, None)
         if not update:
             return self.outcome(s, nonce, "error", f"Nothing to attach to the {what} card"
                                 + (f" ({'; '.join(notes)})" if notes else ""), note_id)
         self.call("updateNoteFields", {"note": {"id": note_id, "fields": update}}, ANKI_REQUEST_TIMEOUT)
         if sentence_key in update and field_value(fields, sentence_key):
-            notes.insert(0, "sentence extended to the whole line")
+            notes.insert(0, "neighboring subtitles included" if contextual else "sentence extended to the whole line")
         message = f"Added {' + '.join(update)} to the {what} Anki card" + (f" ({'; '.join(notes)})" if notes else "")
         log.info("[%s] anki mine: %s (note %d, line at %.2f s)", s.video_id, message, note_id, float(cue["start"]))
         return self.outcome(s, nonce, "attached", message, note_id)

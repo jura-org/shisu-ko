@@ -58,6 +58,7 @@ const SHISUKO_DEFAULT_SETTINGS = Object.freeze({
   // first field.
   ankiWordField: "",
   clipPaddingMs: 200,
+  includeMiningContext: false,
   clipFormat: "mp3",
   // The note field holding Yomitan's pitch accent ({pitch-accent-categories}, {pitch-accent-positions}
   // or {pitch-accents}); empty means the first field whose name contains "pitch" or "accent".

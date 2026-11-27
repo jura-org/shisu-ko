@@ -58,8 +58,9 @@ beside it) pauses the same way, and leaving it for the page around it resumes th
 
 The server mines, not the extension. A card gets two things for its line: an MP3 clip of that
 line's audio, cut from the original track with a little padding on both sides, and a picture of
-the video a moment into the line. The line on screen is the whole of it: the clip covers exactly
-the seconds of that one subtitle, never the lines around it.
+the video a moment into the line. By default the clip covers just that subtitle. In **Anki, clips and
+server**, **Include neighboring subtitles in mined text and audio** can add the previous and next
+subtitles within 1.5 seconds. The picture still comes from the selected subtitle.
 
 **Anki.** Normally you never trigger mining at all:
 
