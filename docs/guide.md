@@ -108,7 +108,8 @@ note's first field is read.
 
 **The picture.** The server takes it from YouTube's own stream, not from the browser: it resolves
 an H.264 stream of 720p at most through yt-dlp, with the same cookies as the audio download, once
-per video, and keeps it 4 hours; PyAV decodes the frame. A DRM-protected video, or one yt-dlp
+per video, and keeps it 4 hours. If the stream will not open, the server tries the short HLS
+segment at that timestamp. PyAV decodes the frame. A DRM-protected video, or one yt-dlp
 cannot resolve, gets the audio alone; a resolve that failed for any reason but DRM is tried again
 after 10 minutes. Before 0.22.0 the browser drew the frame, which failed on
 DRM videos as well; now a video the browser could draw but yt-dlp cannot resolve gets no picture

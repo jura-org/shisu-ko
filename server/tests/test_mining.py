@@ -866,6 +866,59 @@ def synthetic_video(path, seconds=2, fps=10):
             out.mux(packet)
 
 
+def test_a_failed_direct_stream_uses_the_hls_segment_at_the_cue(tmp_path, monkeypatch):
+    av = pytest.importorskip("av")
+    path = tmp_path / "segment.ts"
+    synthetic_video(path)
+    formats, requests, opened = [], [], []
+    manifest = b"#EXTM3U\n#EXTINF:5,\na.ts\n#EXTINF:5,\nb.ts\n#EXT-X-ENDLIST\n"
+
+    class YDL:
+        def __init__(self, opts):
+            self.hls = opts.get("format") == server.FRAME_HLS_FORMAT
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, url, download):
+            formats.append(self.hls)
+            if not self.hls:
+                return {"url": "https://media.example/direct.mp4"}
+            return {"url": "https://media.example/v/playlist.m3u8", "protocol": "m3u8_native",
+                    "http_headers": {"User-Agent": "fixture"}}
+
+        def urlopen(self, request):
+            requests.append(request.url)
+            assert request.headers["User-Agent"] == "fixture"
+            return io.BytesIO(manifest if request.url.endswith(".m3u8") else path.read_bytes())
+
+    monkeypatch.setattr(pytest.importorskip("yt_dlp"), "YoutubeDL", YDL)
+
+    def direct(url, t):
+        opened.append(url)
+        raise server.FrameUnavailable("HTTP 403")
+
+    frames = server.FrameGrabber(SimpleNamespace(ytdlp_options=lambda _: {}), decode=direct)
+    jpeg = frames.grab(VIDEO, 6.0)
+    with av.open(io.BytesIO(jpeg)) as image:
+        level = next(image.decode(video=0)).to_ndarray(format="gray").mean()
+    assert 80 <= level <= 125  # one second into the second segment
+    frames.grab(VIDEO, 1.0)
+    assert formats == [False, True]
+    assert opened == ["https://media.example/direct.mp4"]
+    assert requests == ["https://media.example/v/playlist.m3u8", "https://media.example/v/b.ts",
+                        "https://media.example/v/a.ts"]
+
+
+@pytest.mark.parametrize("tag", ["#EXT-X-KEY:METHOD=AES-128", "#EXT-X-DISCONTINUITY", "#EXT-X-MAP:URI=init.mp4"])
+def test_the_hls_fallback_skips_unsupported_segments(tag):
+    with pytest.raises(server.FrameUnavailable, match="unsupported HLS"):
+        server.hls_frame_segments("https://example.org/list.m3u8", f"#EXTM3U\n{tag}\n#EXT-X-ENDLIST")
+
+
 def test_frame_jpeg_decodes_the_frame_at_the_time(tmp_path):
     av = pytest.importorskip("av")
     path = tmp_path / "v.ts"
