@@ -208,10 +208,14 @@ attached to to `DeckIndexes.note_mined()`, which learns the note's deck (see `wo
 
 ### What a mined card gets
 
-The cue that was on screen, and nothing more. The clip runs from that cue's `start` to its `end`,
+By default the mine uses the cue that was on screen. The clip runs from that cue's `start` to its `end`,
 padded by `pad_ms` (`Miner.clip()`), and the picture is taken at `frame_time(start, end)`, a
 little into the line. A mine by hand names the cue by id; an automatic attach takes the cue the
 matcher picked. Cues are never rejoined by `seg`.
+
+With `anki.context` on, the server may add one nearby cue on either side across a gap of at most
+1.5 seconds, stopping at a speaker seam. The expanded clip is cut on demand and written together
+with the expanded sentence, using the selected cue's picture from the normal premine cache.
 
 They used to be, on the premise that a Whisper segment is a sentence. It is not, and there is no
 second signal to fall back on. Whisper punctuates a fluent narrator barely at all (7 marks in
@@ -220,7 +224,7 @@ second signal to fall back on. Whisper punctuates a fluent narrator barely at al
 and a clause that was never displayed. The VAD is a worse witness, not a better one: Silero cuts
 at 300 ms of silence, a breath, and that narrator ran 14.26 s across three cues between breaths.
 
-Yomitan's sentence grows to the cue, never past it (`grow_sentence()`, the port of 0.21.1's
+Without context enabled, Yomitan's sentence grows to the cue (`grow_sentence()`, the port of 0.21.1's
 `extendSentenceField()`; `test_mining.py` holds its old cases). Yomitan cuts the sentence it puts
 on a card out of the line on screen at 。！？, so a cue holding two sentences gives the card one
 of them. When the card's sentence, normalised as the matcher does, is a strict piece of the cue,

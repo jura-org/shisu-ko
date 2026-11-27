@@ -2367,6 +2367,7 @@
       word: String(s.ankiWordField || "").trim(),
       pad_ms: Math.max(0, Math.min(2000, Math.round(Number(s.clipPaddingMs) || 0))),
       format: s.clipFormat === "wav" ? "wav" : "mp3",
+      ...(s.includeMiningContext === true ? { context: true } : {}),
     };
   }
 

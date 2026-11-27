@@ -208,10 +208,11 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   `anki_sync: {state, last, error}`. The extension's `enabled` has no say in it. Detail:
   `docs/dev/server-runtime.md`, "How the Anki sync after mining works".
 - The server attaches; the extension never writes to Anki. `Miner` in `server.py` gives a note
-  Yomitan made its line's audio and picture, in empty fields only. The one write into a filled
-  field is `grow_sentence()`: a sentence that is a fragment of the matched cue (Yomitan cuts at
+  Yomitan made its line's audio and picture, in empty fields only. Normally a filled sentence field
+  can only grow through `grow_sentence()`: a fragment of the matched cue (Yomitan cuts at
   。！？) becomes the cue's row, escaped, with Yomitan's `<b>` kept and never past the newline
-  seam; any other text stays. A field that changed between the first read and the write is never
+  seam; any other text stays. With `anki.context` on, nearby cues can extend a matched sentence
+  and its new audio together. A field that changed between the first read and the write is never
   written. The viewer's own mine reaches it as `/sync`'s `mine`. `addon/tests/settings.test.js` holds that no file in `addon/` names `updateNoteFields`,
   `storeMediaFile` or `addNote`, and that `browser.downloads` is used by `saveMine()` alone: the
   no-Anki fallback, which saves the line's `/clip` audio and the frame the tab drew at the mine to
