@@ -152,8 +152,9 @@ AGENTS.md states each rule in a line or two; this is the full text of each, with
   server with another `SHISUKO_HOME`), `status` says `other` and `start` refuses with
   `OTHER_SERVER_ERROR` instead of launching a server that would find the port taken. The popup
   asks `status` (`launcherStatus`) only where the button is, at the launcher's address, for a
-  server whose `/health` lacks `launcher: true` (run.cmd and run.sh always set it), once per
-  server seen, and only with the permission granted: without it the background has no
+  server whose `/health` lacks `launcher: true` (a server run.cmd or run.sh started has it,
+  unless started with `--no-update` or `SHISUKO_NO_UPDATE`, which say `false` like a start by
+  hand), once per server seen, and only with the permission granted: without it the background has no
   `sendNativeMessage` and nothing prompts. The host registers only under the user's own
   profile, never system-wide:
   for Firefox (`HKCU\Software\Mozilla\NativeMessagingHosts`, `~/.mozilla/native-messaging-hosts`,

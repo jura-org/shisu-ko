@@ -23,7 +23,9 @@ sends each card's word, state and pitch accent back with the cues. The text stay
 inside inline spans that carry only two data attributes.
 
 Nothing is sent to us or to any third party. The extension only ever contacts youtube.com (as a
-content script) and the local server; it makes no remote request at all. The update check is
+content script), the local server and, once the viewer allows it for the Start server button,
+the native-messaging host "shisuko" that the server's setup registers (nativeMessaging, under
+PERMISSIONS); it makes no remote request at all. The update check is
 the server's (one anonymous GET of GitHub's public API a day, see PERMISSIONS), reported to the
 extension in /health. It contains no remote code, no
 minified or generated code, no third-party libraries and no build step: the uploaded zip is the
@@ -270,12 +272,14 @@ DATA COLLECTION DECLARATION
 The manifest declares data_collection_permissions: none. The extension collects nothing and
 transmits nothing about the user off the device: its peers besides youtube.com are two
 programs on the same computer that the user installed for this purpose (the companion server
-and Anki), and what they receive (the id and playback position of the video being watched, and
-the Anki field names and clip settings the server mines with; the extension sends Anki nothing)
-is the add-on's stated primary function; what the server sends back for the word colours (one
-deck's words, card states and pitch accents) stays on the device, in memory. The extension
-makes no remote request; the server's anonymous release check against GitHub's public API,
-described under PERMISSIONS, carries no data about the user, the browser or the videos
+and, once the viewer allows it for the Start server button, its native-messaging host
+"shisuko"), and what they receive (the server: the id and playback position of the video being
+watched, and the Anki field names and clip settings it mines with; the host: the start request,
+with Start server options from a fixed list, and the status question; the extension sends Anki
+nothing) serves the add-on's stated primary function; what the server sends back for the word
+colours (one deck's words, card states and pitch accents) stays on the device, in memory. The
+extension makes no remote request; the server's anonymous release check against GitHub's public
+API, described under PERMISSIONS, carries no data about the user, the browser or the videos
 watched. The privacy policy on the listing describes this in full.
 
 CONTACT
