@@ -113,7 +113,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
-VERSION = "0.29.0"
+VERSION = "0.29.1"
 # Exit codes run.cmd / run.sh act on: 0 stops the loop, 2 is a startup error that must not be retried
 # (finish(); a failed --download-model ends on it too), 3 asks for a plain restart (hard_exit(): a
 # broken GPU context, no model left, a model switch with the AMD engine on Windows, an AMD engine
@@ -2807,13 +2807,14 @@ def save_cookies_command(prefix=None, windows=None) -> str:
 
     run.cmd / run.sh start setup's venv, which a Nix install has not (run.sh refuses there): its
     Python is the Nix store's (sys.prefix; a venv's is the venv's own folder, wherever its Python
-    came from), and `nix run . --` hands the option to server.py. Each text names only its own
-    install's command, which also keeps the viewer's line within the overlay's 160 characters.
+    came from), and `nix run github:Multysquid/shisu-ko --` hands the option to server.py from
+    any folder (`nix run . --` only inside a checkout). Each text names only its own install's
+    command, which also keeps the viewer's line within the overlay's 160 characters.
     """
     prefix = sys.prefix if prefix is None else prefix
     windows = os.name == "nt" if windows is None else windows
     if prefix.startswith("/nix/store/"):
-        launcher = "nix run . --"
+        launcher = "nix run github:Multysquid/shisu-ko --"
     else:
         launcher = "run.cmd" if windows else "run.sh"
     return f"{launcher} --save-cookies-from-browser firefox"
@@ -9534,7 +9535,10 @@ def parse_args(argv=None):
     p.add_argument("--setup-cookies", action="store_true", help="ask whether to send Firefox's YouTube cookies; used by setup")
     p.add_argument("--cookies", default="", help="path to a Netscape-format cookies.txt for yt-dlp (use this inside Docker, e.g. /data/cookies.txt)")
     p.add_argument("--js-runtime", default="auto", help="JS runtime for yt-dlp: auto, node, deno, bun, or name:path")
-    p.add_argument("--allow-remote-ejs", action="store_true", help="let yt-dlp fetch updated challenge-solver scripts from GitHub")
+    p.add_argument("--allow-remote-ejs", action="store_true",
+                   help="let yt-dlp fetch its YouTube challenge-solver script from GitHub when the yt-dlp-ejs package is "
+                        "missing or does not match, in the version the installed yt-dlp expects; no substitute for "
+                        "updating yt-dlp")
     p.add_argument("--log-level", default="INFO")
     p.add_argument("--check", action="store_true", help="print environment diagnostics and exit")
     p.add_argument("--default-model", action="store_true",

@@ -74,7 +74,7 @@ echo
 # Inside the if, set -e leaves the verdict to us: a failed download ends setup with a word on it.
 if ! "${VENV}/bin/python" "${HERE}/server.py" --download-model "$MODEL"; then
   echo "The model could not be downloaded. Check the connection and run setup.sh again,"
-  echo "or start ./run.sh: the server then downloads $MODEL itself, without a progress bar."
+  echo "or start the server (bash server/run.sh): it then downloads $MODEL itself, without a progress bar."
   exit 1
 fi
 # An AMD graphics card can run the server through CTranslate2's ROCm build (experimental).
@@ -85,4 +85,4 @@ echo
 "${VENV}/bin/python" "${HERE}/amd_setup.py" || true
 echo
 echo "Setup is complete: the $MODEL model is downloaded and everything is ready."
-echo "Close this window and start ./run.sh."
+echo "Start the server with: bash server/run.sh"
