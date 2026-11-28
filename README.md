@@ -105,8 +105,8 @@ the line's audio and a picture of the video. See [Sentence mining](docs/guide.md
 
 - **The Start server button.** Setup registers a small launcher with your browsers. While the
   server is off, the popup shows a **Start server** button. It starts the server with the options
-  in the popup's **Start server options** field, none by default; see
-  [the server options](docs/server.md#server-options).
+  in the popup's **Start server options** field, none by default; the **?** beside the field
+  lists every option it takes, and [the server options](docs/server.md#server-options) say more.
 - **Stopping.** Close the server's window, or press Ctrl+C in it. On Linux and macOS, a server the
   button started has no window.
 

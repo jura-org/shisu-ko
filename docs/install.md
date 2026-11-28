@@ -75,7 +75,8 @@ any, see [YouTube sign-in](server.md#youtube-sign-in)), exactly as a bare `run.c
 would. Options you want on every start go in the popup's **Start server options** field, for
 example `--device cpu` or `--lyrics off --beam-size 1`: the button passes them to `run.cmd` /
 `run.sh` the next time it starts the server (one already running keeps its own), and the line
-under the field says what it will pass. Only options from a fixed list are taken (see
+under the field says what it will pass. Only options from a fixed list are taken: the **?**
+beside the field lists them, each with the values it takes, its default and what it does (more in
 [Server options](server.md#server-options)); the line names any word it refuses, and so does the
 status line when you click. The popup's model field switches the model from the first video on;
 the few options the list leaves out (`--port`, `--js-runtime`, `--cookies`, ...) still need a

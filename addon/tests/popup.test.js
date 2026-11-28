@@ -30,10 +30,17 @@ function cssDeclarations(selector) {
 // off the markup, the members the form, the status line and the hints touch, and the listeners
 // init() registers, which a test fires with dispatch(). An id popup.js asks for that the markup
 // lacks gets a bare element, so no test trips over a missing member. A select's options are its
-// children: renderDeckOptions builds them with createElement and replaceChildren.
+// children: renderDeckOptions builds them with createElement and replaceChildren, and so does
+// renderStartOptionsList the (?) list's rows. getAttribute / setAttribute keep the markup's
+// attributes (aria-expanded among them) and what the popup sets. classList keeps the markup's
+// classes and what toggle / add / remove make of them, the classes the stylesheet reads (.hidden
+// hides); `hidden` follows classList.toggle("hidden", force) alone, and className holds only what
+// the popup assigns to it.
 function fakeElement(tag = "div", attrs = {}) {
   const listeners = new Map();
   const styles = new Map();
+  const attributes = new Map(Object.entries(attrs));
+  const classes = new Set((attrs.class || "").split(/\s+/).filter(Boolean));
   let text = "";
   const el = {
     tagName: tag.toUpperCase(),
@@ -72,9 +79,14 @@ function fakeElement(tag = "div", attrs = {}) {
     toggle: (name, force) => {
       el.toggles++;
       if (name === "hidden") el.hidden = !!force;
+      const on = force === undefined ? !classes.has(name) : !!force;
+      if (on) classes.add(name);
+      else classes.delete(name);
+      return on;
     },
-    add: () => {},
-    remove: () => {},
+    add: (...names) => names.forEach((name) => classes.add(name)),
+    remove: (...names) => names.forEach((name) => classes.delete(name)),
+    contains: (name) => classes.has(name),
   };
   el.addEventListener = (name, fn) => listeners.set(name, [...(listeners.get(name) || []), fn]);
   el.dispatch = (name) => {
@@ -84,13 +96,15 @@ function fakeElement(tag = "div", attrs = {}) {
   el.replaceChildren = (...children) => {
     el.options = children;
   };
+  el.getAttribute = (name) => (attributes.has(name) ? attributes.get(name) : null);
+  el.setAttribute = (name, value) => attributes.set(name, String(value));
   return el;
 }
 
 function elementsFromHtml() {
   const elements = new Map();
-  for (const [, tag, attrText] of HTML.matchAll(/<(input|select|textarea|button|output|p|span|div|datalist)\b([^>]*)>/g)) {
-    const attrs = Object.fromEntries([...attrText.matchAll(/(\w+)="([^"]*)"/g)].map((m) => [m[1], m[2]]));
+  for (const [, tag, attrText] of HTML.matchAll(/<(input|select|textarea|button|output|p|span|div|datalist|dl)\b([^>]*)>/g)) {
+    const attrs = Object.fromEntries([...attrText.matchAll(/([\w-]+)="([^"]*)"/g)].map((m) => [m[1], m[2]]));
     if (attrs.id) elements.set(attrs.id, fakeElement(tag, attrs));
   }
   return elements;
@@ -172,7 +186,8 @@ function loadPopup(answer, runtimeURL = "moz-extension://test/", opts = {}) {
       " START_AVAILABLE, ON_FIREFOX, CHROME_STORE_ID, START_PERMISSION_HINT," +
       " updateFlow, refreshUpdate, updateServerFromPopup, snoozeUpdateFromPopup, openReleasePage, relativeTime, renderStatus," +
       " UPDATE_LOST_HINT, stillOldHint, init, resetStyle, onChange, renderDeckOptions, refreshDecks, DECK_NONE_HINT, HEALTH_REFRESH_MS, DECKS_RETRY_MS," +
-      " renderStartOptionsHint, START_OPTIONS_NONE, otherServerText })"
+      " renderStartOptionsHint, START_OPTIONS_NONE, otherServerText, renderStartOptionsList, toggleStartOptionsList, startOptionValues," +
+      " setHelpLine, SHISUKO_START_OPTIONS, SHISUKO_START_OPTION_HELP })"
   ).runInContext(sandbox);
   // What the background's storage.local write of the settings looks like from the popup.
   const fireStorage = (settings) => {
@@ -2146,6 +2161,181 @@ test("the Start server options are there only where the button is", async () => 
     assert.equal(popup.el("start-options-section").hidden, hidden, url);
     assert.equal(popup.el("startOptions").value, "--no-update");
     assert.match(popup.el("start-options-hint").textContent, /passes --no-update/);
-    assert.match(popup.el("start-options-list").textContent, /^Options: --device --compute-type .* --no-update\. docs\/server\.md says what each does\.$/);
+    // The (?) list is in the same section: built, and closed until the (?) is clicked.
+    assert.equal(popup.el("start-options-table").options.length, 2 * Object.keys(popup.SHISUKO_START_OPTIONS).length, url);
+    assert.equal(popup.el("start-options-list").classList.contains("hidden"), true, url);
   }
+  // The field, the (?) and its list sit in the section init() hides where there is no button:
+  // nothing else hides the (?), and the fake document above holds no nesting to show it.
+  const at = HTML.indexOf('<details id="start-options-section">');
+  const section = HTML.slice(at, HTML.indexOf("</details>", at));
+  for (const id of ["startOptions", "start-options-help", "start-options-hint", "start-options-list", "start-options-table"]) {
+    assert.ok(at > 0 && section.includes(`id="${id}"`), `${id} is in the Start server options section`);
+    assert.equal(HTML.split(`id="${id}"`).length, 2, `${id} appears once`);
+  }
+});
+
+// An element's text as a real DOM's textContent gives it, and as a copy, a braille display or a
+// screen reader's line reads it: its children's text joined, with nothing for a margin between.
+// The fake holds an element's children in `options` and its own text in textContent.
+const textOf = (node) => (node.options.length ? node.options.map(textOf).join("") : node.textContent);
+
+// The rows of the (?) list as text: [option, what follows it or "", what it does] per option.
+// What follows an option is its span's text after the space that parts the two; what it does is
+// its dd's text, whether the dd holds it alone or in spans (a line with Japanese in it).
+function listRows(popup) {
+  const children = popup.el("start-options-table").options;
+  const rows = [];
+  for (let i = 0; i < children.length; i += 2) {
+    const [term, what] = [children[i], children[i + 1]];
+    assert.equal(term.tagName, "DT");
+    assert.equal(what.tagName, "DD");
+    const [code, values] = term.options;
+    assert.equal(code.tagName, "CODE");
+    if (values) assert.equal(values.className, "soft");
+    rows.push([code.textContent, values ? values.textContent.replace(/^ /, "") : "", textOf(what)]);
+  }
+  return rows;
+}
+
+test("the (?) beside the field opens and closes the list of every option the button takes", async () => {
+  const popup = loadPopup((msg) => {
+    if (msg.type === "getSettings") return { ...DEFAULTS };
+    if (msg.type === "startServerStatus") return { starting: false };
+    return offline;
+  });
+  await popup.init();
+  const button = popup.el("start-options-help");
+  const list = popup.el("start-options-list");
+  assert.equal(button.tagName, "BUTTON");
+  assert.equal(button.type, "button");
+  assert.equal(button.getAttribute("aria-controls"), "start-options-list");
+  assert.equal(button.getAttribute("aria-expanded"), "false");
+  // The class the markup gives the list is what hides it (.hidden in popup.css): the click takes
+  // that off. The list's `hidden` property would not: the class would keep it display: none.
+  assert.equal(list.classList.contains("hidden"), true);
+  button.dispatch("click");
+  assert.equal(button.getAttribute("aria-expanded"), "true");
+  assert.equal(list.classList.contains("hidden"), false);
+  // Every option of the table, in its order, and nothing else; each with its help line.
+  const rows = listRows(popup);
+  assert.deepEqual(rows.map(([name]) => name), Object.keys(popup.SHISUKO_START_OPTIONS));
+  for (const [name, values, what] of rows) {
+    assert.equal(values, popup.startOptionValues(popup.SHISUKO_START_OPTIONS[name]), name);
+    assert.equal(what, popup.SHISUKO_START_OPTION_HELP[name], name);
+    assert.ok(what.length > 0, name);
+  }
+  assert.ok(rows.some(([name]) => name === "--lookahead"));
+  assert.ok(rows.some(([name]) => name === "--language-patience"));
+  assert.ok(rows.some(([name]) => name === "--model-idle-minutes"));
+  button.dispatch("click");
+  assert.equal(button.getAttribute("aria-expanded"), "false");
+  assert.equal(list.classList.contains("hidden"), true);
+});
+
+test("the (?) list says what follows each option: one of its words, a range, or nothing", () => {
+  const popup = loadPopup(() => offline);
+  assert.equal(popup.startOptionValues(["auto", "cuda", "mlx", "cpu"]), "auto | cuda | mlx | cpu");
+  assert.equal(popup.startOptionValues({ min: 1, max: 16, int: true }), "1–16");
+  assert.equal(popup.startOptionValues({ min: 0, max: 86400 }), "0–86400");
+  assert.equal(popup.startOptionValues(null), "");
+  popup.renderStartOptionsList();
+  const rows = new Map(listRows(popup).map(([name, values, what]) => [name, { values, what }]));
+  assert.equal(rows.get("--device").values, "auto | cuda | mlx | cpu");
+  assert.equal(rows.get("--lookahead").values, "0–86400");
+  assert.equal(rows.get("--model-idle-minutes").values, "0–10080");
+  assert.equal(rows.get("--language-patience").values, "0–3600");
+  assert.equal(rows.get("--no-update").values, "");
+  // A flag gets its name alone: no empty span beside it.
+  const flag = popup.el("start-options-table").options.find((child) => child.tagName === "DT" && child.options[0].textContent === "--no-update");
+  assert.equal(flag.options.length, 1);
+});
+
+test("the (?) list parts each option from what follows it with a space in the text", () => {
+  // A margin alone parted them on the screen only: the row's text, what a copy, a braille display
+  // and a screen reader get, read "--deviceauto | cuda | mlx | cpu" and "--mine-pictureon | off".
+  const popup = loadPopup(() => offline);
+  popup.renderStartOptionsList();
+  const terms = popup.el("start-options-table").options.filter((child) => child.tagName === "DT");
+  const texts = new Map(terms.map((term) => [term.options[0].textContent, textOf(term)]));
+  assert.deepEqual([...texts.keys()], Object.keys(popup.SHISUKO_START_OPTIONS));
+  for (const [name, text] of texts) {
+    const values = popup.startOptionValues(popup.SHISUKO_START_OPTIONS[name]);
+    assert.equal(text, values ? `${name} ${values}` : name, name);
+  }
+  assert.equal(texts.get("--device"), "--device auto | cuda | mlx | cpu");
+  assert.equal(texts.get("--mine-picture"), "--mine-picture on | off");
+  assert.equal(texts.get("--no-update"), "--no-update");
+});
+
+// A dd's parts as [tag, lang, text]: "" for a part without a lang.
+const helpParts = (dd) => dd.options.map((part) => [part.tagName, part.lang || "", part.textContent]);
+
+test("a help line's Japanese goes in spans of its own marked lang=\"ja\", the rest in spans beside them", () => {
+  const popup = loadPopup(() => offline);
+  const line = "where a sentence ending (よね, です, か) meets a pause";
+  const dd = popup.document.createElement("dd");
+  popup.setHelpLine(dd, line);
+  assert.deepEqual(helpParts(dd), [
+    ["SPAN", "", "where a sentence ending ("],
+    ["SPAN", "ja", "よね"],
+    ["SPAN", "", ", "],
+    ["SPAN", "ja", "です"],
+    ["SPAN", "", ", "],
+    ["SPAN", "ja", "か"],
+    ["SPAN", "", ") meets a pause"],
+  ]);
+  assert.equal(textOf(dd), line);
+  // Japanese at either end leaves no empty span, and the long mark stays with its word.
+  const ends = popup.document.createElement("dd");
+  popup.setHelpLine(ends, "カタカナー or 漢字");
+  assert.deepEqual(helpParts(ends), [["SPAN", "ja", "カタカナー"], ["SPAN", "", " or "], ["SPAN", "ja", "漢字"]]);
+  // A line with no Japanese is the dd's text alone, as it was.
+  const plain = popup.document.createElement("dd");
+  popup.setHelpLine(plain, "How much the server logs");
+  assert.deepEqual(plain.options, []);
+  assert.equal(plain.textContent, "How much the server logs");
+});
+
+test("the (?) list marks the Japanese in its help lines as Japanese, and nothing else", () => {
+  // The popup is English without saying so, and a screen reader reads a run of Japanese nothing
+  // marks (the endings the --sentence-ends line names) with its English voice, which drops or
+  // misreads it.
+  const popup = loadPopup(() => offline);
+  popup.renderStartOptionsList();
+  const names = Object.keys(popup.SHISUKO_START_OPTIONS);
+  const lines = popup.el("start-options-table").options.filter((child) => child.tagName === "DD");
+  assert.equal(lines.length, names.length);
+  const KANA_OR_KANJI = /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u;
+  lines.forEach((dd, i) => {
+    const name = names[i];
+    const help = popup.SHISUKO_START_OPTION_HELP[name];
+    assert.equal(textOf(dd), help, name);
+    assert.notEqual(dd.lang, "ja", name);
+    // Every Japanese run of the line in a span of its own, and no Japanese anywhere else. A dd
+    // that holds its text alone is one part without a lang.
+    const parts = dd.options.length ? helpParts(dd) : [["", "", dd.textContent]];
+    const japanese = help.match(/[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}ー]+/gu) || [];
+    assert.deepEqual(parts.filter(([, lang]) => lang === "ja").map(([, , text]) => text), japanese, name);
+    for (const [tag, lang, text] of parts) {
+      if (dd.options.length) assert.equal(tag, "SPAN", name);
+      if (lang !== "ja") assert.doesNotMatch(text, KANA_OR_KANJI, name);
+    }
+  });
+});
+
+test("the (?) list is closed by .hidden: none of its own rules sets a display", () => {
+  // .hidden is a single class: a display on any rule whose subject is the list ties it (.optlist,
+  // later in the file) or beats it (#start-options-list, .drawer .optlist, div.optlist). The
+  // subject is a selector's last compound; .optlist dl and its like style what the list holds.
+  const list = /\.optlist(?![\w-])|#start-options-list(?![\w-])/;
+  for (const block of CSS.split("}")) {
+    const brace = block.lastIndexOf("{");
+    if (brace < 0) continue;
+    const subjects = block.slice(0, brace).split(",").map((s) => s.trim().split(/[\s>+~]+/).pop());
+    if (subjects.some((s) => list.test(s))) assert.doesNotMatch(block.slice(brace + 1), /\bdisplay\s*:/, block.slice(0, brace).trim());
+  }
+  assert.match(HTML, /<div id="start-options-list" class="optlist hidden">/);
+  // The label names its field and holds no control: the (?) shares the field's row, outside it.
+  assert.match(HTML, /<label class="lead" for="startOptions">[^<]*<span class="soft">[^<]*<\/span><\/label>/);
 });

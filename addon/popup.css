@@ -667,3 +667,60 @@ section .drawer {
   flex-direction: column;
   gap: 4px;
 }
+
+/* The Start server options' field and the (?) beside it, a box beside the box: the two share the
+   row under the label, so the button stretches to the field's own height in every browser. The
+   field gives up the column it spans elsewhere. */
+.row.field.with-help input {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.help {
+  grid-column: 2;
+  grid-row: 2;
+  min-width: 31px;
+  padding: 0 9px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--field);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.help:hover,
+.help[aria-expanded="true"] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* The list the (?) opens: each option in a monospace line with what follows it muted beside it,
+   and what it does under it, between a line on how to write them and one on what is left out.
+   No display of its own here, or .hidden above would lose to it. */
+.optlist dl {
+  margin: 8px 0;
+  font-size: var(--fs-cap);
+}
+
+.optlist dt {
+  margin-top: 8px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.optlist dt:first-child {
+  margin-top: 0;
+}
+
+/* An option's name never breaks after its two dashes. */
+.optlist code {
+  font: inherit;
+  white-space: nowrap;
+}
+
+.optlist dd {
+  margin: 1px 0 0;
+  color: var(--muted);
+}

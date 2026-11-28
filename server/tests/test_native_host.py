@@ -263,7 +263,7 @@ def test_start_hands_checked_options_to_the_launcher():
     (["--beam-size", "17"], "--beam-size takes a whole number from 1 to 16"),
     (["--beam-size", "1.5"], "--beam-size takes a whole number"),
     (["--beam-size", "-1"], "--beam-size takes a whole number"),
-    (["--window", "1e3"], "--window takes a number from 1 to 600"),
+    (["--window", "1e3"], "--window takes a number from 2 to 600"),
     (["--window", "\uff11\uff10"], "--window takes a number"),  # fullwidth digits: float() reads them, the rule does not
     (["--window", "10 & calc"], "--window takes a number"),
     (["--window", "nan"], "--window takes a number"),
@@ -329,6 +329,342 @@ def test_the_extension_checks_the_same_options():
     assert match, "SHISUKO_START_OPTIONS is a JSON object literal in addon/start-options.js"
     assert json.loads(match.group(1)) == nh.START_OPTIONS
     assert f"MAX_OPTION_TOKENS = {nh.MAX_OPTION_TOKENS};" in text
+
+
+def popup_help_lines() -> dict:
+    """The (?) list's line for each option: SHISUKO_START_OPTION_HELP in addon/start-options.js,
+    read as the JSON object literal it is written as."""
+    text = (ROOT / "addon" / "start-options.js").read_text(encoding="utf-8")
+    match = re.search(r"const SHISUKO_START_OPTION_HELP = Object\.freeze\((\{.*?\})\);", text, re.S)
+    assert match, "SHISUKO_START_OPTION_HELP is a JSON object literal in addon/start-options.js"
+    return json.loads(match.group(1))
+
+
+def load_update():
+    """server/update.py, the launcher's look for a newer version, by the name test_update.py gives it."""
+    name = "shisuko_update"
+    cached = sys.modules.get(name)
+    if cached is not None:
+        return cached
+    spec = importlib.util.spec_from_file_location(name, SERVER_DIR / "update.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_popup_list_names_the_default_server_py_has_for_every_option():
+    """The (?) list beside the popup's field (SHISUKO_START_OPTION_HELP in addon/start-options.js)
+    has one line per option of the table, and each names the default parse_args() gives it: a set's
+    as "word (default)", a number's as "(default N)", --lookahead's for each group of backends
+    default_lookahead_for() tells apart."""
+    from _serverlib import load_server
+
+    server = load_server()
+    lines = popup_help_lines()
+    assert list(lines) == list(nh.START_OPTIONS)
+    defaults = vars(server.parse_args([]))
+    for name, rule in nh.START_OPTIONS.items():
+        line, value = lines[name], defaults[name[2:].replace("-", "_")]
+        if rule is None:
+            assert value is False and "(default" not in line, name
+        elif isinstance(rule, list):
+            # --anki-sync and --mine stay None until main() settles them: auto, except in the Docker
+            # image without --anki-url, which the Start button never starts.
+            word = "auto" if value is None else value
+            assert word in rule and f"{word} (default)" in line, (name, line)
+        elif name == "--lookahead":
+            # App.settle_lookahead() asks default_lookahead_for() for the backend it runs on, and
+            # the AMD engine's card is "cuda" to the server as well (test_rocm.py); a Kitsune
+            # model never runs on that card (test_the_popup_list_says_where_a_kitsune_model_runs).
+            assert value is None, "the lookahead's default is the device's"
+            cuda, mlx, cpu = (server.default_lookahead_for(device) for device in ("cuda", "mlx", "cpu"))
+            assert mlx == cpu, "the line names the Apple GPU and the CPU together"
+            assert (f"(default {cuda:g} on an NVIDIA GPU or the AMD engine's GPU, "
+                    f"{mlx:g} on the Apple GPU or the CPU)") in line, line
+        else:
+            assert re.search(rf"\(default {re.escape(f'{value:g}')}(?![\d.])", line), (name, value, line)
+
+
+def test_the_popup_list_names_the_amd_engine_beside_every_nvidia_gpu():
+    """With the AMD engine the server's "cuda" device is the AMD card (load_model() in test_rocm.py):
+    --device auto runs a Whisper model there, the lookahead is the CUDA one, and on Linux
+    int8_float16 comes below LOW_VRAM_MB free (gpu_memory_mb()). So a (?) line that says what an
+    NVIDIA GPU gets says what the AMD engine gets too; a Kitsune model, which PyTorch runs on an
+    NVIDIA GPU or the CPU alone, is the device line's own exception
+    (test_the_popup_list_says_where_a_kitsune_model_runs)."""
+    nvidia = {name: line for name, line in popup_help_lines().items() if "NVIDIA" in line}
+    assert nvidia, "the device, precision and lookahead lines say what an NVIDIA GPU gets"
+    for name, line in nvidia.items():
+        assert "the AMD engine" in line, (name, line)
+
+
+def fake_torch(cuda: bool, bf16: bool = True):
+    """What kitsune_engine's pick_device() and pick_dtype() ask of PyTorch, with or without CUDA."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: cuda, is_bf16_supported=lambda: bf16),
+                           float16="float16", bfloat16="bfloat16", float32="float32")
+
+
+def test_the_popup_list_says_where_a_kitsune_model_runs(monkeypatch):
+    """load_model() hands a Kitsune name to load_kitsune_model() before resolve_device() is asked,
+    and kitsune_engine's pick_device() takes PyTorch's CUDA device or the CPU, whatever --device
+    says. PyTorch has CUDA from an NVIDIA GPU alone (kitsune_setup.py installs its CUDA build or its
+    CPU one), so on the Apple GPU and with the AMD engine the model runs on the CPU, with the CPU's
+    lookahead; and pick_dtype() gives it bfloat16, float16 or float32, never int8_float16. The
+    device, precision and lookahead lines say so."""
+    from _serverlib import load_server
+
+    server = load_server()
+    engine = server.kitsune_engine()
+    monkeypatch.setattr(server, "resolve_device", lambda device: pytest.fail("a Kitsune model never asks resolve_device()"))
+    monkeypatch.setattr(server, "load_kitsune_model", lambda args, name, path=None, strict=False: ("kitsune", args.device))
+    assert server.load_model(server.parse_args(["--device", "mlx"]), "kitsune-0.3b") == ("kitsune", "mlx")
+    monkeypatch.setitem(sys.modules, "torch", fake_torch(cuda=False))  # a Mac, or the AMD engine's machine
+    assert {engine.pick_device(device) for device in ("auto", "cuda", "mlx", "cpu")} == {"cpu"}
+    assert server.default_lookahead_for("cpu") == server.SLOW_LOOKAHEAD != server.CUDA_LOOKAHEAD
+    monkeypatch.setitem(sys.modules, "torch", fake_torch(cuda=True))  # an NVIDIA GPU
+    assert engine.pick_device("auto") == "cuda" and engine.pick_device("mlx") == "cpu"
+    for bf16 in (True, False):
+        monkeypatch.setitem(sys.modules, "torch", fake_torch(cuda=True, bf16=bf16))
+        for device in ("cuda", "cpu"):
+            for weights in ("bf16", "fp16"):
+                for compute in ("auto", "int8_float16", "int8"):
+                    assert engine.pick_dtype(compute, device, weights) in ("bfloat16", "float16", "float32")
+    lines = popup_help_lines()
+    assert "a Kitsune model runs on an NVIDIA GPU or the CPU only" in lines["--device"], lines["--device"]
+    assert "a Whisper model gets int8_float16" in lines["--compute-type"], lines["--compute-type"]
+    assert "on an NVIDIA GPU or the AMD engine's GPU," in lines["--lookahead"], lines["--lookahead"]
+
+
+def test_the_popup_list_says_a_kitsune_model_has_no_lyrics_path():
+    """choose_path() sends no window down the lyrics path for a model whose `sings` is False, which a
+    Kitsune model's is (its gates have none of Whisper's confidence figures): with it, --lyrics auto
+    leaves a song the speech detector hears nothing in as blank as off does (test_kitsune.py). The
+    option's line says so."""
+    from types import SimpleNamespace
+
+    from _serverlib import load_server
+
+    server = load_server()
+    kitsune = server.kitsune_engine().KitsuneModel
+    assert kitsune.sings is False
+    worker = SimpleNamespace(app=SimpleNamespace(args=SimpleNamespace(lyrics="auto"), model=kitsune.__new__(kitsune)))
+    s = server.Session(video_id="abcdefabcdef", url="u", status="ready", duration=60.0)
+    # Decided before the audio is looked at: a window without speech is no lyrics window either.
+    assert server.Transcriber.choose_path(worker, s, None, [], 0.0, 20.0) == (False, [])
+    line = popup_help_lines()["--lyrics"]
+    assert "under stricter checks (not with a Kitsune model)" in line, line
+
+
+def test_the_popup_list_says_how_long_the_model_stays_in_memory(monkeypatch):
+    """--model-idle-minutes frees the model after that long without a window, but never sooner than
+    two --window lengths after the last one (App.idle_limit()), and never on the AMD engine, which
+    loads it at the start and keeps it (model_on_demand()). The option's line says both."""
+    from types import SimpleNamespace
+
+    from _serverlib import load_server
+
+    server = load_server()
+    line = popup_help_lines()["--model-idle-minutes"]
+    app = SimpleNamespace(model_idle=60.0, args=SimpleNamespace(window=300.0))
+    assert server.App.idle_limit(app) == 600.0, "two windows of 300 s outlast one idle minute"
+    assert "never under two --window lengths" in line, line
+    args = server.parse_args(["--model-idle-minutes", "5"])
+    monkeypatch.setattr(server, "ROCM_ACTIVE", False)
+    assert server.model_on_demand(args)
+    monkeypatch.setattr(server, "ROCM_ACTIVE", True)
+    assert not server.model_on_demand(args), "the AMD engine loads its model at the start and keeps it"
+    assert "as the AMD engine always does" in line, line
+
+
+def test_the_popup_list_tells_the_two_looks_for_a_newer_version_apart():
+    """Two things ask whether there is a newer Shisu-ko, and the Start button's options reach both:
+    run.cmd / run.sh hand them to update.py, which --no-update alone skips, before server.py, whose
+    daily UpdateChecker --update-check off alone stops. So --update-check's line names --no-update
+    for the look at each start, and --no-update's says that it skips that look."""
+    from _serverlib import load_server
+
+    server = load_server()
+    update = load_update()
+    for launcher, passes in (("run.cmd", '"%~dp0update.py" %*'), ("run.sh", '"${HERE}/update.py" "$@"')):
+        assert passes in (SERVER_DIR / launcher).read_text(encoding="utf-8"), launcher
+    assert not update.skipped(["--update-check", "off"], environ={})
+    assert update.skipped(["--no-update"], environ={})
+    assert not server.resolve_update_check(server.parse_args(["--update-check", "off"]), environ={})
+    assert server.resolve_update_check(server.parse_args(["--no-update"]), environ={})
+    lines = popup_help_lines()
+    assert "unless --no-update" in lines["--update-check"], lines["--update-check"]
+    assert lines["--no-update"].startswith("Start without looking for a newer version"), lines["--no-update"]
+
+
+def test_the_popup_list_says_what_the_popup_offers_a_server_started_with_no_update(monkeypatch):
+    """Under run.cmd / run.sh too, App.update_blocker() gives --no-update as a reason, since the
+    launcher would restart the server without updating it, so /health's `launcher` is false, as for
+    a server they did not start: decideUpdate() in background.js calls that "cannot", and
+    renderUpdate() in popup.js offers no Update button for it, only a banner saying the server was
+    not started by run.cmd / run.sh. Nothing is offered, so nothing is refused; the option's line
+    says what the viewer sees, and changes with that banner."""
+    from types import SimpleNamespace
+
+    from _serverlib import load_server
+
+    server = load_server()
+    monkeypatch.setenv("SHISUKO_LAUNCHER", "1")
+    monkeypatch.delenv("SHISUKO_NO_UPDATE", raising=False)
+    assert server.App.update_blocker(SimpleNamespace(args=server.parse_args([]))) is None
+    assert "--no-update" in server.App.update_blocker(SimpleNamespace(args=server.parse_args(["--no-update"])))
+    assert '"launcher": self.update_blocker() is None,' in (SERVER_DIR / "server.py").read_text(encoding="utf-8")
+    background = (ROOT / "addon" / "background.js").read_text(encoding="utf-8")
+    assert 'else if (serverLauncher === false) decision.server = "cannot";' in background
+    popup = (ROOT / "addon" / "popup.js").read_text(encoding="utf-8")
+    cannot = re.search(r'\} else if \(decision\.server === "cannot"\) \{(.*?)\} else if', popup, re.S)
+    assert cannot, "renderUpdate() has a branch for a server that cannot update itself"
+    assert "showUpdate" not in cannot.group(1), cannot.group(1)
+    assert "was not started by run.cmd / run.sh" in cannot.group(1), cannot.group(1)
+    line = popup_help_lines()["--no-update"]
+    assert ("the popup then offers no Update button, and its banner says the server was not started by "
+            "run.cmd / run.sh") in line, line
+
+
+def test_the_popup_list_says_a_video_s_audio_goes_at_a_sync():
+    """--idle-minutes' audio goes in App.maybe_evict(), and only App.sync() calls it: while no tab
+    syncs, a video's audio stays however long ago its last sync was (a live stream's follower lets
+    its own go, in LiveFollower.run()). The option's line says so; a server that lets a video's
+    audio go by itself fails this, and the line can say less."""
+    import ast
+
+    tree = ast.parse((SERVER_DIR / "server.py").read_text(encoding="utf-8"))
+    parent = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+    def where(node) -> str:
+        names = []
+        while node in parent:
+            node = parent[node]
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.append(node.name)
+        return ".".join(reversed(names))
+
+    callers = {where(node) for node in ast.walk(tree) if isinstance(node, ast.Call)
+               and isinstance(node.func, ast.Attribute) and node.func.attr == "maybe_evict"}
+    assert callers == {"App.sync"}, callers
+    line = popup_help_lines()["--idle-minutes"]
+    assert "at the next sync of any video" in line and "a live stream's goes on its own" in line, line
+
+
+def test_the_popup_list_says_youtube_names_a_video_s_language_first():
+    """--language-patience counts the foreign speech the language watch hears, which needs a model
+    with a language head (Whisper's; a Kitsune model has none), and process() asks it only where
+    YouTube does not name --language: a video it names so never reaches the detector, and one it
+    names another language is refused before its audio whatever the number above 0, so raising it
+    keeps no such video and the watch is left the videos YouTube names nothing for
+    (test_declared_language.py). language_vote() pauses the subtitles and lifts the pause as soon
+    as the language is heard again; at 0 neither the watch nor the refusal runs. The option's line
+    says so."""
+    from _serverlib import load_server
+
+    server = load_server()
+    s = server.Session(video_id="abcdefabcdef", url="u")
+    assert not server.language_vote(s, "en", 60.0, "ja", 60.0) and s.language_paused
+    assert server.language_vote(s, "ja", 5.0, "ja", 60.0) and not s.language_paused, "Japanese heard again lifts the pause"
+    s = server.Session(video_id="abcdefabcdef", url="u")
+    assert server.language_vote(s, "en", 3600.0, "ja", 0.0) and not s.language_paused
+    line = popup_help_lines()["--language-patience"]
+    assert "Whisper hears" in line, line
+    assert "before subtitles pause, if YouTube names no language" in line, line
+    assert "a video YouTube itself names another language stops at once, whatever the number" in line, line
+    assert line.endswith("0: no check at all"), line
+
+
+def test_the_popup_list_says_where_the_creator_s_subtitles_give_a_line_its_text():
+    """assist_cues() puts a line of the creator's track in where it agrees with what Whisper heard
+    (HUMAN_MIN_SIMILARITY), timed by Whisper, or on the track's own times over audio Whisper wrote
+    nothing for; a line that disagrees leaves Whisper's text (test_human_subtitles.py). The
+    option's line says so."""
+    from _serverlib import load_server
+
+    assert 0 < load_server().HUMAN_MIN_SIMILARITY < 1
+    line = popup_help_lines()["--human-subtitles"]
+    assert "where Whisper heard the same (timed by Whisper) or nothing (on the track's times)" in line, line
+    assert "elsewhere Whisper's text stays" in line, line
+
+
+def test_the_popup_list_says_how_short_a_step_may_be():
+    """plan_window() decodes no span under 1.5 s: it marks it covered and moves on, a gap that short
+    being worth no Whisper call, and pick_work() writes that to the cue cache, which is forever.
+    With a --window or --first-window that short every such step is one of those, never
+    transcribed and blank for good (a step of exactly 1.5 now and then too, as start + 1.5 - start
+    can come out a hair under it). So both ranges start at 2, and the launcher refuses a shorter
+    step from the browser; a start by hand may still name one."""
+    import random
+    import threading
+    from types import SimpleNamespace
+
+    from _serverlib import load_server
+
+    server = load_server()
+
+    def plan(window, first_window, covered, t):
+        s = server.Session(video_id="abcdefabcdef", url="u", status="ready", audio=object(), duration=3600.0,
+                           want_t=t, covered=[list(span) for span in covered])
+        args = SimpleNamespace(window=window, first_window=first_window, lookahead=180.0)
+        return server.plan_window(s, args), s.covered
+
+    # Under 1.5 s, after a stretch Whisper has seen and at a seek: covered, with no window to decode.
+    assert plan(1.4, 20.0, [[0.0, 20.0]], 10.0) == (None, [[0.0, 20.0 + 1.4]])
+    assert plan(30.0, 1.2, [], 50.0) == (None, [[49.5, 49.5 + 1.2]])
+    # Exactly 1.5 is not enough everywhere; 2 is a window wherever it starts.
+    assert plan(1.5, 20.0, [[0.0, 0.8]], 0.5)[0] is None, "0.8 + 1.5 - 0.8 is under 1.5"
+    rng = random.Random(7)
+    for start in (round(rng.uniform(1.0, 3500.0), 2) for _ in range(500)):
+        assert plan(2.0, 20.0, [[0.0, start]], start - 1.0)[0] == (start, start + 2.0), start
+        span = plan(30.0, 2.0, [], start)[0]
+        assert span is not None and span[1] - span[0] >= 1.5, (start, span)
+    # pick_work() saves a stretch covered that way, as it saves every gap it tidies.
+    s = server.Session(video_id="abcdefabcdef", url="u", status="ready", audio=object(), duration=3600.0,
+                       want_t=10.0, covered=[[0.0, 20.0]])
+    saved = []
+    app = SimpleNamespace(args=SimpleNamespace(client_timeout=30.0, window=1.4, first_window=20.0, lookahead=180.0),
+                          lock=threading.Lock(), sessions={s.video_id: s},
+                          save_cache=lambda session: saved.append([list(span) for span in session.covered]))
+    assert server.App.pick_work(app) is None
+    assert saved == [[[0.0, 20.0 + 1.4]]], saved
+    for name in ("--window", "--first-window"):
+        assert nh.START_OPTIONS[name]["min"] >= 2, (name, "a step under 1.5 s is never transcribed")
+        with pytest.raises(ValueError, match="takes a number from 2 to 600"):
+            nh.check_options([name, "1.5"])
+
+
+def test_the_popup_list_gives_the_cue_sizes_as_where_lines_are_cut():
+    """--max-cue-chars and --max-cue-seconds are where build_cues() cuts a line Whisper heard, and
+    --min-cue-seconds what it grows a short one to where it can; none is a limit every line keeps.
+    The beat after the speech keeps a line up past --max-cue-seconds, a word Whisper split is
+    rejoined up to CueLimits' own cross_chars and cross_ceiling, a short line before another stays
+    short (down to hard_min_seconds), and a line of the creator's subtitles is split only past
+    max_lines rows of characters, and never by time (split_long_line()). The three lines say so."""
+    from _serverlib import load_server
+
+    server = load_server()
+    limits = server.cue_limits(server.parse_args([]))
+    assert limits.cross_chars > limits.max_chars and limits.cross_ceiling > limits.max_seconds
+    assert limits.hard_min_seconds < limits.min_seconds
+    assert limits.max_lines == 2, "the line says twice --max-cue-chars"
+    # Speech just short of --max-cue-seconds, then silence: one cue, up for longer than that.
+    words = [server.Word("はい", float(i), i + 0.95) for i in range(7)]
+    cues = server.build_cues(words, [[0.0, 6.95]], limits)
+    assert len(cues) == 1 and cues[0]["end"] - cues[0]["start"] > limits.max_seconds, cues
+    sentence = "あ" * 9 + "。"
+    rows = [0.0, 6.0, sentence * (limits.max_lines * limits.max_chars // len(sentence))]
+    assert server.split_long_line(rows, limits) == [rows], "two rows' worth of the creator's line stay whole"
+    assert len(server.split_long_line([0.0, 7.0, rows[2] + sentence], limits)) > 1
+    lasting = [0.0, 3 * limits.max_seconds, sentence * 2]
+    assert server.split_long_line(lasting, limits) == [lasting], "a creator's line lasting past --max-cue-seconds stays whole"
+    lines = popup_help_lines()
+    chars, longest, shortest = lines["--max-cue-chars"], lines["--max-cue-seconds"], lines["--min-cue-seconds"]
+    assert "A word Whisper split may be rejoined past it" in chars and "cut only past twice this" in chars, chars
+    assert "may keep it up longer" in longest and "not cut by time" in longest, longest
+    assert "extended or merged where there is room" in shortest, shortest
 
 
 @pytest.mark.parametrize("request_", [

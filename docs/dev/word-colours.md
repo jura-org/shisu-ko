@@ -120,14 +120,16 @@ and marks the words of every line. Everything in words.js is pure, without DOM.
   order, unmatched characters joined into one run with nulls; `opts.particles` and
   `opts.katakana` count the particles and the katakana words as known and `opts.names` draws the
   names `proper` (below); without `opts` the deck and the known words are all it colours, a name
-  being taken whole and left plain. Left to right; only a
+  being taken whole and left plain. `opts.kanaHeads` says whether `starts` come from a segmenter
+  that fuses a kana ending with the next kanji (the kana-head seam below; a Firefox cut marked in
+  Node); left out, `fusesKanaHeads()` asks the running one. Left to right; only a
   position in `starts` (an iterable, `wordStarts(text)` by default) is tried, a deck word only
   where the character is in `heads` (a null or empty index finds none, the names and options
   still apply); after a run `i` jumps to its end (no overlaps). At a position, in this order: a
   deck or known word (with its honorific prefix or quotative, below) unless a name from the same
   start is longer, a name, a katakana word (`opts.katakana`), a particle (`opts.particles`). The
-  boundaries it goes by are `boundsOf(text,
-  starts)`: `starts` plus the index after a て or で at a start that ICU fused with the く of the
+  boundaries it goes by are `boundsOf(text, starts, kanaHeads)`: `starts` plus the index after
+  a て or で at a start that ICU fused with the く of the
   auxiliary behind it (`TE_FORM`: 食|べ|てく|れ|た, 書|い|てく|れ|た, かけ|てく|れ|た; not
   読|んで|く|れ|た, which it cuts), where くれる begins and かけて ends; `starts` itself is never
   written (the content script keeps it per cue), the set is copied when there is something to
@@ -363,6 +365,40 @@ and marks the words of every line. Everything in words.js is pure, without DOM.
     follows must split into particles alone (`particleSplit()`), so no word ICU knows is cut
     (そうじ, ようやく). The adjective's form runs through the copula's past after そう (the tail
     `だっ`: 楽|しそう|だ|った is 楽しそうだった whole).
+  - The kanji a word's kana ending was fused with (`kanaHeadSeam()`, added by `boundsOf()` under
+    a segmenter that fuses, below): Firefox's segmenter (ICU4X) starts a segment with the end of
+    one word and the first kanji of the next (腐|った肉|ある, 行|った場|合, 掘|ったら落|ちて,
+    飛|び越|え), where Node's and Chrome's (ICU4C) cut before the kanji (腐|っ|た|肉), so the form
+    before never ended there and the kanji word never began. The kanji is a boundary when the
+    segment's hiragana head is two kana or more beginning with a kana no word begins with
+    (`NON_INITIAL`: っ, ん, the small kana, ゝ ゞ; った肉, ったら落), or one kana that is no
+    particle and no honorific prefix, after a kanji (飛|び越) or before a lone kanji that ends the
+    segment, with a word after it that is no particle (こ|れ以|上). Both segmenters keep words of
+    their dictionary whole in that shape, a head of hiragana and a kanji in one segment, and
+    Firefox 161 cuts them as Node 24 does (ちび|っ子|たち, 江戸|っ子, 出し|っ放し, ひ孫|が,
+    ふ頭|に, ぶ厚い, ど根性, い草); before those limits the seam split them on Firefox's cut: a
+    card for 子, 放す or 孫 coloured half of one, and 放す's form took the だ of 置きっ放しだった
+    (置|き|っ放し|だ|った). On the viewer's 30,431 cached rows cut by Firefox 160, Node had a
+    boundary there 243 times in 244 (not in 照|れ隠); the limits dropped 22 firings, 20 of them at
+    Node's boundary (酔|っ払, 乗|っ取, 吹|っ飛, しょ|っ辛, こ|れ乗) and two not (月初|っ端, Node's
+    月|初っ端; ったらぶ|っ飛). The other heads left alone are words or begin one, and Node keeps
+    them whole with the kanji as often as not: お and ご (217 of 802 cut), a particle (に関して,
+    と共に, を通して: 13 of 72), a longer kana word (この辺, もう一度, やり方: 71 of 272). With the
+    viewer's deck it brought 177 rows back to the colours Node gives them (757 characters; with
+    the particle option 153 rows, 829 characters); five rows went further from Node: four
+    compounds Firefox had already split after their first kanji, which a one-kanji card now
+    colours (った炭|酸, ず肝|臓, ったら歯|医者, った食|生活), and the one seam where Node has no
+    boundary (照|れ隠: the 照れる and 隠す cards colour 照れ and 隠しだ, 隠す's form running over
+    the copula). Firefox still differs from Node on 2,407 of those rows (4,873 with the particle
+    option), most of it particles fused with the next word's first kana (は|でき as はで|き,
+    が|いい as がい|い, は|とても as はと|て|も), which this seam does not touch. It runs only
+    where `starts` come from a segmenter that fuses, since ICU4C cuts before the kanji itself:
+    `markWords()`' `opts.kanaHeads` says so, or, left out, `fusesKanaHeads()`, which asks once
+    whether `kanaHeadSeam()` finds a head on the running segmenter's cut of a line of
+    `FUSED_HEAD_PROBES` (腐った肉あるよ。: Firefox 160's 腐|った肉|ある|よ|。, Node's
+    腐|っ|た|肉|ある|よ|。; 行った場合は, 飛び越えた). Chrome, Node and a phone browser on ICU4C
+    colour as before the seam; a fusing segmenter the probe missed would lose the words the seam
+    finds, and colour none wrongly.
   - `followOn()`: with the option, where a run ends inside a segment (a deck word boundedEnd() let
     end before particles, 広さ in Firefox's 広|さも|ある; a particle fused with the い of いる,
     人|がい|た), the particle or grammar word there is `learned` too.

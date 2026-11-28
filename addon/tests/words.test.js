@@ -1,7 +1,9 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const { test } = require("node:test");
+const vm = require("node:vm");
 const words = require("../words");
 
 const {
@@ -1922,6 +1924,122 @@ test("markWords finds the copula where Firefox's segmenter hides it", () => {
   assert.equal(markCut("そうじ|だ", []), "そうじ | だ(learned,null)");
   assert.equal(markCut("ようやく|だ", []), "ようやく | だ(learned,null)");
   assert.equal(markCut("大丈夫|そうだ", [], NAMES_ON), "大丈夫そうだ");
+});
+
+// A Firefox cut marked in Node: its starts come from a segmenter that fuses a kana ending with
+// the next kanji, which the running one does not, so the option says it.
+const FIREFOX = { ...PARTICLES_ON, kanaHeads: true };
+const FIREFOX_NAMES = { ...NAMES_ON, kanaHeads: true };
+
+test("markWords finds the words where Firefox's segmenter fused a kana ending with the next kanji", () => {
+  // The viewer's line, as Firefox 160 cuts it (Node: 腐|っ|た|肉|ある|よ|。): 腐った ended inside
+  // った肉 before a kanji, and 肉 began no segment, so neither was found.
+  const deck = ["腐る", "肉", "行く", "場合", "掘る", "落ちる", "飛ぶ", "越える", "以上"].map((word) => [word, "learned", null]);
+  assert.equal(
+    markCut("腐|った肉|ある|よ|。", deck, FIREFOX),
+    "腐った(learned,null) | 肉(learned,null) | ある(learned,null) | よ(learned,null) | 。",
+  );
+  assert.equal(markCut("腐|った肉|ある|よ|。", deck, FIREFOX_NAMES), "腐った(learned,null) | 肉(learned,null) | あるよ。");
+  // The kanji word begins there whether or not the deck holds the form before it; ある after a
+  // lone kanji of plain text stays plain, as in Node's cut.
+  assert.equal(markCut("腐|った肉|ある|よ|。", [["肉", "learned", null]], FIREFOX_NAMES), "腐った | 肉(learned,null) | あるよ。");
+  assert.equal(markCut("腐|った肉|ある|よ|。", [], FIREFOX), "腐った肉ある | よ(learned,null) | 。");
+  // A head of two kana or more that begins with っ, or one kana that is no particle and no
+  // honorific prefix, after a kanji (飛|び越) or before a lone kanji with a word after it
+  // (こ|れ以|上).
+  assert.equal(markCut("行|った場|合|は", deck, FIREFOX_NAMES), "行った(learned,null) | 場合(learned,null) | は");
+  assert.equal(markCut("掘|ったら落|ちて|くる", deck, FIREFOX_NAMES), "掘ったら(learned,null) | 落ちて(learned,null) | くる");
+  assert.equal(markCut("飛|び越|え|た", deck, FIREFOX_NAMES), "飛び(learned,null) | 越えた(learned,null)");
+  assert.equal(markCut("もうこ|れ以|上|は", deck, FIREFOX_NAMES), "もうこれ | 以上(learned,null) | は");
+  // Heads that are words or begin one stay whole with their kanji, as Node keeps them: the
+  // honorific prefix (お金), a particle (と共に, に関して), a longer kana word (この辺).
+  const inside = ["金", "共に", "関する", "辺"].map((word) => [word, "learned", null]);
+  assert.equal(markCut("お金|が|ない", inside, FIREFOX_NAMES), "お金がない");
+  assert.equal(markCut("森|と共に|行き|よう", inside, FIREFOX_NAMES), "森と共に行きよう");
+  assert.equal(markCut("それ|に関して|話す", inside, FIREFOX_NAMES), "それに関して話す");
+  assert.equal(markCut("この辺|です", inside, FIREFOX_NAMES), "この辺です");
+  // Without the option the cut is taken for the running segmenter's, and Node's fuses nothing:
+  // the line is marked as it was before the seam.
+  assert.equal(markCut("腐|った肉|ある|よ|。", deck, NAMES_ON), "腐った肉あるよ。");
+});
+
+test("markWords cuts no word of ICU's own at a kana head, on Node's cut or on Firefox's", () => {
+  // Node's ICU, like Chrome's, keeps these whole with their kanji (ちび|っ子|たち, 出し|っ放し|に,
+  // ひ孫|が, ぶ厚い|ステーキ, ふ頭|に), and there the seam does not run, so no card for 子, 放す or
+  // 孫 colours half of one.
+  const lines = [
+    ["ちびっ子たちが遊んでる", "子"],
+    ["いたずらっ子だね", "子"],
+    ["江戸っ子だね", "子"],
+    ["出しっ放しにしないで", "放す"],
+    ["ひ孫が生まれた", "孫"],
+    ["ぶ厚いステーキ", "厚い"],
+    ["ふ頭に着いた", "頭"],
+    ["ど根性ガエル", "根性"],
+    ["い草のにおい", "草"],
+  ];
+  for (const [line, word] of lines) {
+    assert.ok(!wordStarts(line).has(line.indexOf(word[0])), `ICU keeps ${word[0]} of ${line} inside a segment`);
+    assert.equal(markWith(line, [[word, "learned", null]]), line, line);
+  }
+  // With the particles the copula after っ放し stays whole and counts as one of them, never as
+  // 放す's だ (放しだ|った); ひ孫's 孫 is not found before its particle either.
+  assert.equal(markWith("置きっ放しだった", [["放す", "learned", null]], PARTICLES_ON), "置きっ放し | だった(learned,null)");
+  assert.equal(markWith("ひ孫が生まれた", [["孫", "learned", null]], PARTICLES_ON), "ひ孫 | が(learned,null) | 生まれた");
+  // Firefox 161 cuts those words the same way, and there the seam runs: っ alone before the
+  // kanji (っ子, っ放し; the っ端 of its 月初|っ端 too, where Node cuts 月|初っ端) and one kana
+  // neither after a kanji nor before a lone kanji with a word after it (ひ孫|が, ふ頭|に, ぶ厚い,
+  // ど根性, い草|のに) are no fused ending, and each line reads as with the seam off.
+  const firefox = [
+    ["ちび|っ子|たち|が|遊|んで|る", "子"],
+    ["いたずら|っ子|だ|ね", "子"],
+    ["江戸|っ子|だ|ね", "子"],
+    ["出し|っ放し|にし|ない|で", "放す"],
+    ["この|10|月初|っ端|から|ね|。", "端"],
+    ["ひ孫|が|生まれ|た", "孫"],
+    ["ぶ厚い|ステーキ", "厚い"],
+    ["ふ頭|に|着い|た", "頭"],
+    ["ど根性|ガエル", "根性"],
+    ["い草|のに|おい", "草"],
+  ];
+  for (const [cut, word] of firefox) {
+    assert.equal(markCut(cut, [[word, "learned", null]], FIREFOX_NAMES), cut.replace(/\|/g, ""), cut);
+  }
+  assert.equal(markCut("置|き|っ放し|だ|った", [["放す", "learned", null]], FIREFOX), "置きっ放し | だった(learned,null)");
+  assert.equal(markCut("つけ|っ放し|で|寝|た", [["放す", "learned", null]], FIREFOX), "つけっ放し | で(learned,null) | 寝た");
+  assert.equal(markCut("ひ孫|が|生まれ|た", [["孫", "learned", null]], FIREFOX), "ひ孫 | が(learned,null) | 生まれた");
+});
+
+// words.js loaded afresh in a context whose segmenter cuts each line of `cuts` ("a|b|c") as given
+// and every other line as Node's does.
+function wordsCutBy(cuts) {
+  const Real = Intl.Segmenter;
+  class Segmenter {
+    constructor(locale, options) {
+      this.real = new Real(locale, options);
+    }
+
+    segment(text) {
+      if (!Object.hasOwn(cuts, text)) return this.real.segment(text);
+      let index = 0;
+      return cuts[text].split("|").map((segment) => ({ segment, index: (index += segment.length) - segment.length }));
+    }
+  }
+  const file = require.resolve("../words");
+  const context = vm.createContext({ Intl: { Segmenter } });
+  vm.runInContext(fs.readFileSync(file, "utf8"), context, { filename: file });
+  return vm.runInContext("SHISUKO_WORDS", context);
+}
+
+test("markWords repairs the fused kana heads by itself under a segmenter that fuses them, as Firefox's does", () => {
+  const deck = ["腐る", "肉"].map((word) => [word, "learned", null]);
+  const marks = (W, opts) => shape(W.markWords("腐った肉あるよ。", W.buildIndex(deck), undefined, opts));
+  // Cut as Firefox 160 cuts the viewer's line, it is drawn as Node's cut draws it.
+  const firefox = wordsCutBy({ "腐った肉あるよ。": "腐|った肉|ある|よ|。" });
+  assert.equal(marks(firefox, NAMES_ON), "腐った(learned,null) | 肉(learned,null) | あるよ。");
+  assert.equal(marks(wordsCutBy({}), NAMES_ON), "腐った(learned,null) | 肉(learned,null) | あるよ。");
+  // The option still has the last word.
+  assert.equal(marks(firefox, { ...NAMES_ON, kanaHeads: false }), "腐った肉あるよ。");
 });
 
 test("markWords counts the grammar words as known with the particles, and never inside another word", () => {
