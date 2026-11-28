@@ -367,11 +367,35 @@ function renderStartOptionsHint() {
 // The list the (?) beside the field opens: every option the button takes, in the table's order,
 // with what follows it and what it does. It is built from SHISUKO_START_OPTIONS and
 // SHISUKO_START_OPTION_HELP (start-options.js), so it names exactly what parseStartOptions()
-// passes, and with createElement and textContent alone.
+// passes, and with createElement and textContent alone. A space in the text parts an option from
+// what follows it: a margin parts nothing in a copied row, on a braille display or in a screen
+// reader's line, which all read "--deviceauto | cuda | mlx | cpu" without it.
 function startOptionValues(rule) {
   if (rule === null) return "";
   if (Array.isArray(rule)) return rule.join(" | ");
   return `${rule.min}–${rule.max}`;
+}
+
+// A help line's Japanese (the sentence endings the --sentence-ends line names) is marked as
+// Japanese: the popup's own text is English, and a screen reader reads a run nothing marks with
+// the English voice, which drops or misreads it. A line holding Japanese becomes a span per run,
+// lang="ja" on the Japanese ones, so the list keeps to createElement and textContent; any other
+// line is its dd's text alone.
+const JAPANESE_RUN = /([\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}ー]+)/u;
+
+function setHelpLine(parent, text) {
+  const runs = text.split(JAPANESE_RUN);
+  if (runs.length === 1) {
+    parent.textContent = text;
+    return;
+  }
+  runs.forEach((run, i) => {
+    if (!run) return;
+    const part = document.createElement("span");
+    if (i % 2 === 1) part.lang = "ja"; // split() puts what the group caught at the odd places
+    part.textContent = run;
+    parent.appendChild(part);
+  });
 }
 
 function renderStartOptionsList() {
@@ -385,11 +409,11 @@ function renderStartOptionsList() {
     if (values) {
       const shown = document.createElement("span");
       shown.className = "soft";
-      shown.textContent = values;
+      shown.textContent = ` ${values}`;
       term.appendChild(shown);
     }
     const what = document.createElement("dd");
-    what.textContent = SHISUKO_START_OPTION_HELP[name] || "";
+    setHelpLine(what, SHISUKO_START_OPTION_HELP[name] || "");
     rows.push(term, what);
   }
   document.getElementById("start-options-table").replaceChildren(...rows);

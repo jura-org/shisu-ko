@@ -720,10 +720,6 @@ section .drawer {
   white-space: nowrap;
 }
 
-.optlist dt .soft {
-  margin-left: 6px;
-}
-
 .optlist dd {
   margin: 1px 0 0;
   color: var(--muted);

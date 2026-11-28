@@ -60,12 +60,12 @@ test("anything off the list is refused, naming the word", () => {
     "--beam-size 17": "--beam-size takes a whole number from 1 to 16",
     "--beam-size 1.5": "--beam-size takes a whole number from 1 to 16",
     "--beam-size -1": "--beam-size takes a whole number from 1 to 16",
-    "--window 1e3": "--window takes a number from 1 to 600",
-    "--window 0x10": "--window takes a number from 1 to 600",
-    "--window 10%": "--window takes a number from 1 to 600",
-    "--window １０": "--window takes a number from 1 to 600",
-    "--window Infinity": "--window takes a number from 1 to 600",
-    "--window 601": "--window takes a number from 1 to 600",
+    "--window 1e3": "--window takes a number from 2 to 600",
+    "--window 0x10": "--window takes a number from 2 to 600",
+    "--window 10%": "--window takes a number from 2 to 600",
+    "--window １０": "--window takes a number from 2 to 600",
+    "--window Infinity": "--window takes a number from 2 to 600",
+    "--window 601": "--window takes a number from 2 to 600",
   };
   for (const [text, error] of Object.entries(cases)) assert.deepEqual(parse(text), { ok: false, error }, text);
 });
@@ -97,7 +97,8 @@ test("every word the parser can pass is one no command line reads into", () => {
 });
 
 test("every option has one line for the popup's (?) list, in the table's order, and nothing else has one", () => {
-  // test_native_host.py holds the defaults the lines name to server.py's; here their shape.
+  // test_native_host.py holds the defaults the lines name, and the exceptions they state, to
+  // server.py's; here their shape.
   assert.ok(Object.isFrozen(SHISUKO_START_OPTION_HELP));
   assert.deepEqual(Object.keys(SHISUKO_START_OPTION_HELP), Object.keys(SHISUKO_START_OPTIONS));
   for (const [name, rule] of Object.entries(SHISUKO_START_OPTIONS)) {
