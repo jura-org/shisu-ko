@@ -1046,10 +1046,11 @@ const SHISUKO_WORDS = (() => {
 
   // The word boundaries the matcher goes by: `starts`, plus the index after a て or で that ICU
   // fused with the く of the auxiliary behind it (TE_FORM: 食|べ|てく|れ|た), where a word may
-  // begin and a bounded one end, and the copula's seams (copulaSeam()). `starts` itself is never
-  // written (the content script keeps it per cue): the set is copied when there is something to
-  // add.
-  function boundsOf(text, starts) {
+  // begin and a bounded one end, the copula's seams (copulaSeam()) and, when `kanaHeads` says
+  // `starts` come from a segmenter that fuses them (fusesKanaHeads()), the kanji a word's kana
+  // ending was fused with (kanaHeadSeam()). `starts` itself is never written (the content script
+  // keeps it per cue): the set is copied when there is something to add.
+  function boundsOf(text, starts, kanaHeads) {
     let bounds = starts;
     const add = (pos) => {
       if (bounds === starts) bounds = new Set(starts);
@@ -1058,8 +1059,66 @@ const SHISUKO_WORDS = (() => {
     for (const pos of starts) {
       if (TE_FORM.has(text[pos]) && text[pos + 1] === "く" && !starts.has(pos + 1)) add(pos + 1);
       for (const seam of copulaSeams(text, pos, starts)) add(seam);
+      const kanji = kanaHeads ? kanaHeadSeam(text, pos, starts) : -1;
+      if (kanji > 0) add(kanji);
     }
     return bounds;
+  }
+
+  // The kana no word begins with: っ, ん and the small kana, and the iteration marks.
+  const NON_INITIAL = new Set([..."っんぁぃぅぇぉゃゅょゎゝゞ"]);
+  const KANJI_HEAD = /^[\p{Script=Han}々]/u;
+
+  // Firefox's segmenter (ICU4X) fuses the kana that end one word with the kanji that begin the
+  // next (腐|った肉|ある, 行|った場|合, 掘|ったら落|ちて, 飛|び越|え, こ|れ以|上), where Node's and
+  // Chrome's ICU (ICU4C) cut before the kanji (腐|っ|た|肉): the form before never ends there and
+  // the kanji word after never begins. The index of that kanji, when the segment at `pos` opens
+  // with such a head of hiragana: two kana or more that begin with a kana of NON_INITIAL, or one
+  // kana that is no particle and no honorific prefix, after a kanji (飛|び越) or before a lone
+  // kanji that ends the segment, with a word after it that is no particle (こ|れ以|上); else -1.
+  // Both segmenters keep words of their dictionary whole in that shape, Firefox 161 as Node 24
+  // (ちび|っ子, 出し|っ放し, ひ孫|が, ふ頭|に, ぶ厚い, ど根性, い草): っ, ん or a small kana alone
+  // before the kanji, or one kana neither after a kanji nor before a lone one, is no fused ending.
+  // Measured on the viewer's 30,431 cached subtitle rows cut by Firefox 160: such a head was
+  // followed by Node's boundary 243 times in 244 (not in 照|れ隠, a word Node keeps whole); the
+  // limits dropped 22 firings, 20 of them at Node's boundary (酔|っ払, 乗|っ取, 吹|っ飛, こ|れ乗)
+  // and two not (月初|っ端, ったらぶ|っ飛). Not the heads that are words or begin one, which ICU
+  // keeps whole with the kanji as often as not: お and ご (お金, ご飯; Node cut 217 of 802), a
+  // particle (に関して, と共に, を通して; 13 of 72), a longer kana word (この辺, もう一度, やり方; 71
+  // of 272). boundsOf() asks it only of a segmenter that fuses: ICU4C cuts before the kanji itself.
+  function kanaHeadSeam(text, pos, starts) {
+    if (!NON_INITIAL.has(text[pos]) && (PARTICLES.has(text[pos]) || HONORIFICS.has(text[pos]))) return -1;
+    const end = segmentEnd(text, pos, starts);
+    let stop = pos;
+    while (stop < end && isHiragana(text[stop])) stop++;
+    if (stop === pos || stop >= end || !KANJI_HEAD.test(text.slice(stop, stop + 2))) return -1;
+    if (NON_INITIAL.has(text[pos])) return stop - pos >= 2 ? stop : -1;
+    if (stop !== pos + 1) return -1;
+    if (pos > 0 && isKanji(text[pos - 1])) return stop;
+    if (stop + 1 !== end || end >= text.length) return -1;
+    const next = text.slice(end, segmentEnd(text, end, starts));
+    return !PARTICLES.has(next) && (isKana(next[0]) || KANJI_HEAD.test(next)) ? stop : -1;
+  }
+
+  // Lines ICU4C cuts before each kanji (Node 24: 腐|っ|た|肉|ある|よ|。, 行|っ|た|場合|は,
+  // 飛|び|越|え|た) and Firefox fuses a kana ending onto one (Firefox 160: 腐|った肉|ある|よ|。,
+  // the viewer's line).
+  const FUSED_HEAD_PROBES = ["腐った肉あるよ。", "行った場合は", "飛び越えた"];
+  let fusedHeads = null;
+
+  // Whether the running segmenter is one that fuses a word's kana ending with the next word's
+  // kanji, asked once: whether kanaHeadSeam() finds a head on its cut of a probe line. Without a
+  // segmenter every index is a start, and there is nothing to find. A fusing segmenter the probe
+  // missed would have its cut taken as it is, as before the seam: the fused words go unfound, and
+  // none takes another word's colour.
+  function fusesKanaHeads() {
+    if (fusedHeads === null) {
+      fusedHeads = FUSED_HEAD_PROBES.some((line) => {
+        const starts = wordStarts(line);
+        return [...starts].some((pos) => kanaHeadSeam(line, pos, starts) > 0);
+      });
+    }
+    return fusedHeads;
   }
 
   // The auxiliaries ICU fuses with the copula after them (そうだ, そうです, そうだね in Firefox:
@@ -1269,7 +1328,10 @@ const SHISUKO_WORDS = (() => {
   // The text as runs, in order: a matched run carries its entry's status and pitch, the text
   // between matches is one run with neither. `starts` is the set of indices a word may begin at;
   // `opts.particles` and `opts.katakana` count the particles and the katakana words as known,
-  // `opts.names` draws the names "proper". At a word boundary, in this order of precedence:
+  // `opts.names` draws the names "proper". `opts.kanaHeads` says whether `starts` come from a
+  // segmenter that fuses a kana ending with the next kanji (a Firefox cut marked in Node); left
+  // out, the running segmenter is asked (fusesKanaHeads()). At a word boundary, in this order of
+  // precedence:
   //  - a deck word (or a known one), with the honorific prefix ICU cut off it (お in お|風呂, its
   //    status and no pitch, before the word's own run) or the quotative that fronts いう inside one
   //    segment (って in っていう: with the particles a particle, learned; without them the status
@@ -1293,7 +1355,8 @@ const SHISUKO_WORDS = (() => {
     const katakana = !!(opts && opts.katakana);
     const particles = !!(opts && opts.particles);
     const names = !!(opts && opts.names);
-    const bounds = boundsOf(s, starts instanceof Set ? starts : starts ? new Set(starts) : wordStarts(s));
+    const kanaHeads = opts && opts.kanaHeads !== undefined ? !!opts.kanaHeads : fusesKanaHeads();
+    const bounds = boundsOf(s, starts instanceof Set ? starts : starts ? new Set(starts) : wordStarts(s), kanaHeads);
     const usable = !!index && index.size > 0;
     const heads = usable ? index.heads : null;
     const tryAt = (pos) => (usable && (!heads || heads.has(s[pos])) ? matchAt(s, pos, index, bounds) : null);

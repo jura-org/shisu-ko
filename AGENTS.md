@@ -132,7 +132,8 @@ Full text and reasons: `docs/dev/invariants-and-gotchas.md`.
   `--host`, `--port`, `--model`, and whatever takes an address, a path, a program, a browser's
   cookies, code from the network or free text, or exits instead of serving.
   `addon/start-options.js` (`SHISUKO_START_OPTIONS`, `parseStartOptions()`) holds the same table
-  for the popup and the background, kept equal by `test_native_host.py`; a message without
+  for the popup and the background, kept equal by `test_native_host.py`, which also holds the
+  defaults that the popup's (?) list (`SHISUKO_START_OPTION_HELP`) names to `parse_args()`'s; a message without
   options stays the bare `{cmd: "start"}` every launcher understands. `status`'s `other` and
   `start`'s refusal (`OTHER_SERVER_ERROR`) are a `/health` answer while nobody holds this data
   folder's instance lock (`lock_state()`: `held` / `free` / `unknown`, and `unknown` claims
@@ -339,8 +340,9 @@ methods over mlx-whisper; `server/mlx_beam.py` gives that path the beam search t
 Kitsune models: `kitsune_name()`, `kitsune_download_plan()`, `load_kitsune_model()`, and in
 `kitsune_engine.py` `read_package()`, `dequantize()`, `ctc_spans()`, `attention_boundaries()`,
 `KitsuneModel.transcribe()`. The Start button: `startServer()`, `askLauncher()` and
-`launcherStatus()` in `background.js`, `parseStartOptions()` in `addon/start-options.js`,
-`renderStartOptionsHint()` and `checkOtherServer()` in `popup.js`, the native host's `handle()`,
+`launcherStatus()` in `background.js`, `parseStartOptions()` and `SHISUKO_START_OPTION_HELP` in
+`addon/start-options.js`, `renderStartOptionsHint()`, `renderStartOptionsList()` (the (?) list)
+and `checkOtherServer()` in `popup.js`, the native host's `handle()`,
 `check_options()`, `lock_state()` and `launch()`, the instance lock `hold_instance_lock()` /
 `try_lock()`, and the port `OwnPortHTTPServer`. The update
 step: `server/update.py`, `POST /update`, exit code 4. The AMD engine (experimental):

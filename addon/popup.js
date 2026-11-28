@@ -364,6 +364,72 @@ function renderStartOptionsHint() {
   else setHint(hint, `The Start server button passes ${parsed.options.join(" ")} to the next server it starts; one already running keeps its own`, "");
 }
 
+// The list the (?) beside the field opens: every option the button takes, in the table's order,
+// with what follows it and what it does. It is built from SHISUKO_START_OPTIONS and
+// SHISUKO_START_OPTION_HELP (start-options.js), so it names exactly what parseStartOptions()
+// passes, and with createElement and textContent alone. A space in the text parts an option from
+// what follows it: a margin parts nothing in a copied row, on a braille display or in a screen
+// reader's line, which all read "--deviceauto | cuda | mlx | cpu" without it.
+function startOptionValues(rule) {
+  if (rule === null) return "";
+  if (Array.isArray(rule)) return rule.join(" | ");
+  return `${rule.min}–${rule.max}`;
+}
+
+// A help line's Japanese (the sentence endings the --sentence-ends line names) is marked as
+// Japanese: the popup's own text is English, and a screen reader reads a run nothing marks with
+// the English voice, which drops or misreads it. A line holding Japanese becomes a span per run,
+// lang="ja" on the Japanese ones, so the list keeps to createElement and textContent; any other
+// line is its dd's text alone.
+const JAPANESE_RUN = /([\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}ー]+)/u;
+
+function setHelpLine(parent, text) {
+  const runs = text.split(JAPANESE_RUN);
+  if (runs.length === 1) {
+    parent.textContent = text;
+    return;
+  }
+  runs.forEach((run, i) => {
+    if (!run) return;
+    const part = document.createElement("span");
+    if (i % 2 === 1) part.lang = "ja"; // split() puts what the group caught at the odd places
+    part.textContent = run;
+    parent.appendChild(part);
+  });
+}
+
+function renderStartOptionsList() {
+  const rows = [];
+  for (const [name, rule] of Object.entries(SHISUKO_START_OPTIONS)) {
+    const term = document.createElement("dt");
+    const code = document.createElement("code");
+    code.textContent = name;
+    term.appendChild(code);
+    const values = startOptionValues(rule);
+    if (values) {
+      const shown = document.createElement("span");
+      shown.className = "soft";
+      shown.textContent = ` ${values}`;
+      term.appendChild(shown);
+    }
+    const what = document.createElement("dd");
+    setHelpLine(what, SHISUKO_START_OPTION_HELP[name] || "");
+    rows.push(term, what);
+  }
+  document.getElementById("start-options-table").replaceChildren(...rows);
+}
+
+// The (?) opens the list and closes it again; aria-expanded says which, for a screen reader and
+// for the button's own look (popup.css). init() closes it, so every popup opens with it closed.
+function showStartOptionsList(open) {
+  document.getElementById("start-options-help").setAttribute("aria-expanded", open ? "true" : "false");
+  document.getElementById("start-options-list").classList.toggle("hidden", !open);
+}
+
+function toggleStartOptionsList() {
+  showStartOptionsList(document.getElementById("start-options-help").getAttribute("aria-expanded") !== "true");
+}
+
 // ------------------------------------------------------------------ someone else's server
 
 // A server that run.cmd / run.sh did not start (/health's `launcher` not true) on the launcher's
@@ -1079,7 +1145,9 @@ async function init() {
   // So does the Start server options' hint. The section is there only where the button is.
   document.getElementById("startOptions").addEventListener("input", renderStartOptionsHint);
   document.getElementById("start-options-section").classList.toggle("hidden", !START_AVAILABLE);
-  setText(document.getElementById("start-options-list"), `Options: ${Object.keys(SHISUKO_START_OPTIONS).join(" ")}. docs/server.md says what each does.`);
+  renderStartOptionsList();
+  showStartOptionsList(false);
+  document.getElementById("start-options-help").addEventListener("click", toggleStartOptionsList);
   renderStartOptionsHint();
   document.getElementById("start-server").addEventListener("click", startServerFromPopup);
   document.getElementById("update-now").addEventListener("click", updateServerFromPopup);

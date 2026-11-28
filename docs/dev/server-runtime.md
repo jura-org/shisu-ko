@@ -270,9 +270,12 @@ costs 1.5 GB). The committed memory of an idle server (about 0.8 GB before any l
 OpenBLAS's buffers, reserved and never touched. On a laptop whose NVIDIA GPU powers off when
 unused, only a process that never loaded a model lets it.
 
-The decoded track of a video is the other large holder, kept for `--idle-minutes` after its last
-sync. faster-whisper's `decode_audio()` returns float32 (230 MB an hour) and holds the int16
-decode and two float32 copies at once while it converts: a 4.1-hour stream kept 906 MB and
+The decoded track of a video is the other large holder, kept until the first `/sync` of any video
+once `--idle-minutes` have passed since its own last sync (`maybe_evict()`, which `App.sync()`
+alone calls and which acts at most once a minute), so while no tab syncs it stays; a live follower
+lets its buffer go by itself (`LiveFollower.run()`). faster-whisper's `decode_audio()` returns
+float32 (230 MB an hour) and holds the int16 decode and two float32 copies at once while it
+converts: a 4.1-hour stream kept 906 MB and
 passed through 2.2 GB more. `decode_track()` runs the same steps (faster-whisper's own frame
 filter, grouping and resampler) and keeps the int16: 453 MB, 1.1 GB at the peak, and
 `audio_slice()` hands each window out as the very float32 `decode_audio()` gives (an int16 over
@@ -635,9 +638,13 @@ and the options that exit (see `START_OPTIONS`' comment). `addon/start-options.j
 same table as a JSON literal and `parseStartOptions(text)`: the setting `startOptions` (what the
 viewer typed) split on whitespace, `--name=value` read as `--name value`, a word of a set typed
 in another case put in the set's spelling, `{ok, options}` or `{ok: false, error}` with the
-host's own wording. `test_native_host.py` keeps the two tables equal, checks that `server.py`'s
-`parse_args()` takes every option with each value its rule allows, and that no allowed word
-holds anything a command line reads.
+host's own wording. Beside them, `SHISUKO_START_OPTION_HELP` gives each option one line for the
+popup's (?) list: what it does, with its default as "word (default)" for a set or "(default N)"
+for a number. `test_native_host.py` keeps the two tables equal, checks that `server.py`'s
+`parse_args()` takes every option with each value its rule allows, that no allowed word holds
+anything a command line reads, and that every help line names the default `parse_args()` gives
+(`--lookahead`'s for both kinds of device); `start-options.test.js` holds one line per option,
+in the table's order.
 `launch()` on Windows runs `cmd.exe /c start "Shisu-ko server" .\run.cmd [options]` with `cwd=server/`
 (cmd.exe splits a full path holding `&` or `(` even when quoted), `DETACHED_PROCESS |
 CREATE_NEW_PROCESS_GROUP` and first `CREATE_BREAKAWAY_FROM_JOB`, retrying without it on
@@ -732,20 +739,28 @@ asked) and flushes a pending save (`flushSave()`, sent before the first `await` 
 the grant) before it sends `startServer`: the field's change event fires as it gives the focus
 to the button, and the background reads the options from the settings. The field's hint
 (`renderStartOptionsHint()`) says on every keystroke what the button will pass or what it
-refuses; the section shows only where the button does (`START_AVAILABLE`).
+refuses; the section shows only where the button does (`START_AVAILABLE`). The (?) beside the
+field (`start-options-help`, a button outside the field's label, which names its input by `for`)
+opens and closes `start-options-list` (`toggleStartOptionsList()`, with `aria-expanded`; `init()`
+closes it): every option of `SHISUKO_START_OPTIONS` in its order, what follows it (`a | b`, a
+range `min–max`, nothing for a flag; `startOptionValues()`) and its help line, built once with
+`createElement` and `textContent` (`renderStartOptionsList()`).
 
 Someone else's server: a `/health` answer at the launcher's address (`http://127.0.0.1:8790` or
 `http://localhost:8790`, `onLauncherAddress()`) from a server whose `launcher` is not `true` (an
-old copy has no such field; Docker, Nix and a start by hand say `false`) may not be this
-computer's at all. `checkOtherServer()` asks the background's `launcherStatus()`, which sends
+old copy has no such field; Docker, Nix, a start by hand and a run.cmd / run.sh start with
+`--no-update` or `SHISUKO_NO_UPDATE` say `false`) may not be this computer's at all.
+`checkOtherServer()` asks the background's `launcherStatus()`, which sends
 `{cmd: "status"}`, once per server seen (version, launcher flag, model, device) and only where
 the button is; without the permission there is no `sendNativeMessage`, the answer is
 `permission missing` and nothing prompts. With `other` the status line turns to `Other server`
 (`badge bad`, `otherServerText()`: who answers, and that it is an old copy or the Docker
 container to stop), and the Start button stays hidden, since a server of this computer's would
 only find the port taken; when that server goes, `/health` fails, the line says `Server offline`
-and the button is back. A server run.cmd / run.sh started is never asked about, and no verdict
-(no permission, no host, a host from before `other`) leaves `Server online`. Badge texts:
+and the button is back. A server run.cmd / run.sh started without `--no-update` or
+`SHISUKO_NO_UPDATE` is never asked about (one started with either is, and the host, finding the
+instance lock held, answers that it is this computer's own), and no verdict (no permission, no
+host, a host from before `other`) leaves `Server online`. Badge texts:
 `Checking server`, `Server offline`, `Starting server`, `Updating server`, `Other server`,
 `Loading model`, `Server online`. A start and an update exclude each other: `requestStart()` refuses while
 `pendingUpdate()` holds a record (`UPDATE_RUNNING_HINT`), `startStatus()` carries that record

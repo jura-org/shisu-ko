@@ -245,7 +245,8 @@ two commands and every malformed request, the lock's three states and the `other
 server that is not this computer's own, the Start server options (every refusal before
 `/health` is asked, that `server.py` takes every option with each value its rule allows, that no
 allowed word holds anything a command line reads, and that `addon/start-options.js` holds the
-same table), the launch on each platform with a recorded `Popen`,
+same table, with a help line for the popup's (?) list that names each option's default as
+`parse_args()` has it), the launch on each platform with a recorded `Popen`,
 the instance lock shared with `server.py`, registration for every browser into a temporary home
 with a fake registry, the host over a real pipe, and the wrapper and launcher scripts.
 `test_own_port.py` holds that the server binds without `SO_REUSEADDR` on Windows only, and on
@@ -266,7 +267,8 @@ the `startServer` message: the native host's answers, the timeout, the mapping o
 errors to hints, the options it sends or refuses, the `launcherStatus` question, and the launch
 record that outlives the event page and ends with any answer of the server's; `popup.test.js`
 runs the popup's start flow against a fake document, from the button to the 90 s deadline and
-its hints, the Start server options' hint and click, and the "Other server" line.
+its hints, the Start server options' hint and click, the (?) list of every option, and the
+"Other server" line.
 The update check is covered on both sides too: `server/tests/test_update_check.py` holds the
 server's request (two headers, no token or cookie), the day's cache, the backoff, the off switch
 and `/health`'s `latest`; `background.test.js` feeds `/health` answers carrying `latest` to the
